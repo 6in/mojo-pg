@@ -161,3 +161,32 @@
   T6 で初めて `pixi run check` の全段がそろう（`examples/basic.mojo` が埋まるため）。それまで `check` は examples 段で落ちる。
   サブエージェントに渡す契約文では、**`Row` を必ず `Row[origin]` と書く**（今回の唯一のやり直しの原因。型パラメータを省くと「パラメータ無し」と読まれる）。
   `fmt` は親が統合後にだけ走らせる方針は今回も維持して衝突ゼロだった（turn 6 の想定外 (7) への対処が有効）
+
+## turn 8 — impl — T6 escape / status 5 メソッド + `examples/basic.mojo` + 公開 API 再エクスポート
+- やったこと: サブエージェント 2 本（A: `connection.mojo` の 5 メソッド + `tests/test_connection.mojo` 追記 / B: `examples/basic.mojo` + `src/pq/__init__.mojo` 再エクスポート + `pixi.toml` + `final_check.sh` 4/6 段）で並行実装し統合。
+  **`pixi run check` が初めて全段 PASS**（1/6 fmt 差分なし・2/6 precompile・3/6 docstring 診断 0 件・4/6 `examples/basic.mojo` 実行（`n = 1` / `s = hello` / `z = NULL`）・5/6 両サーバー **194 PASS / 0 FAIL**（97 ×2。test_connection が 14 → 20 で +6 ×2 = +12）・6/6 `warning:` 0 件）。所要は 5/6 段が約 95 s（PG17 ≈ 74 s + PG14 ≈ 54 s を直列）、全体 99 s
+- 想定外: (1) **`pixi run check` の 1/6 段は未コミットの作業ツリーでは原理的に落ちる**。この段は `mojo format` 実行後に `git diff --quiet -- src tests examples hello.mojo` を見るので、
+  「整形で差分が出た」と「そのターンの実装がまだ未コミット」を区別できない。実際 1 回目の `check` は `All done! ✨ 19 files left unchanged`（= 整形は何も変えていない）なのに 1/6 だけ FAIL した。
+  PLAN「検証コマンド」節が最終判定を**「クリーンな状態から全検査」**と定義しているとおり、**コミット後に `check` を回すのが設計どおりの使い方**なので、ゲート側は直していない（T8 の完了基準も同じ HEAD 相対の形を指定している）。手順は「fmt → 実装コミット → `check`」
+  (2) A の報告より: `PQescapeLiteral` は `OptCStr` を返すが `PQfreemem` は `MutRawPtr` を取るので、`p = quoted.value()` から `MutRawPtr(unsafe_from_address=Int(p))` を作り直して渡している。コピーが先なので「各メソッド `PQfreemem` 1 回」は保たれる
+  (3) B の報告より: サブエージェントへの依頼文で「`src/pq/decode_text.mojo` の型マッピング**表**を読め」と書いたが、`decode_text.mojo` の型対応は**表ではなく散文**（モジュール docstring と `decode_text` の docstring の 2 箇所、`grep -c '^|'` = 0）。依頼文の誤りで、PLAN の追従先チェックリストは `decode_text.mojo` について「OID 定数 + `comptime if` 分岐」しか求めていないので **PLAN 訂正には当たらない**
+- やり直し: 0 回（統合時のコード修正なし。親が直したファイルは無く、`fmt` も 19 ファイル無変更）
+- PLAN 訂正: なし
+- 既存テストの期待値の変更: **なし**。`tests/test_connection.mojo` は 6 本を**追記**しただけで既存 14 本は未編集。`tests/final_check.sh` の 4/6 段は「`examples/basic.mojo` が無ければ意図的に fail」という**T6 で解消する前提で書かれていた暫定分岐**を外して実行に切り替えた（T1 完了基準に明記されていた予定どおりの変更で、期待値の変更ではない）
+- 追従先チェックリスト: 該当 3 行を実行。
+  「`examples/` を足す」→ `rg 'examples/' pixi.toml tests/final_check.sh`: `pixi.toml:17 example-basic` と `final_check.sh:87 run_logged mojo run -I src examples/basic.mojo` の両方 ✓。
+  「公開 struct / メソッドを足す」→ 3/6 段の docstring 診断 0 件 ✓。`escape_literal` の docstring に ` E'a\b'` の例あり ✓（T8 の `rg` 検査対象）。
+  「libpq を呼ぶ新しい経路を足す」→ `PQfreemem` は `connection.mojo:317`（escape_literal）と `:356`（escape_identifier）の**各 1 回だけ** ✓、`char*` 戻りは両方 `String(unsafe_from_utf8_ptr=p)` で即コピーしてから free ✓、`grep -rc get_function src/pq` = 0 ✓。
+  横断検査: `rg '^\s*fn ' src tests examples hello.mojo` = 0 件 ✓。
+  非該当: 「libpq 関数のバインディング」（`functions.mojo` 未編集。50 本のまま）/「`Row.get[T]` の対応型」（追加なし）/「`PgErrorKind` を足す」（追加なし）/「テストファイルを足す」（新規ファイルなし・追記のみ）
+- 型マッピング表の 3 箇所突き合わせ（前ターンの申し送り）: `src/pq/__init__.mojo`（新規・4 列表）/ `Row.get` docstring（表）/ `decode_text.mojo`（散文）の 3 つで **OID は全て一致**（bool 16 / int2 21 / int4 23 / int8 20（`Int64` と `Int`）/ float4 700 / float8 701 / bytea 17 hex のみ / `String` は任意 OID）、拡幅なしも 3 箇所すべて明記。差は表現だけで矛盾なし
+- verify への申し送り（サブエージェントの「契約外の提案」から、実装せず記録したもの）:
+  (1) **`OID_TEXT`(25) / `OID_VARCHAR`(1043) / `OID_BPCHAR`(1042) / `OID_NAME`(19) は宣言されているが 1 箇所も使われていない**（B の実測: `src` と `tests` 全体で定義行のみ一致）。`decode_text` の `String` 分岐は OID を検査しないので、型マッピング表の「25, 1043, 1042, 19」列は**文書だけで強制されていない**（`jsonb` 列も `String` で読める）。表の「上記以外 → `String` としてのみ取得可」行は事実と整合しているので変更なし。定数を使うか消すかの判断は verify へ
+  (2) **`status()` / `transaction_status()` の戻り `Int` を比較する定数の置き場所**: A の新テストは `pq._ffi.types` から `CONNECTION_OK` / `PQTRANS_*` を import している（`tests/test_ffi.mojo` と同じ形）。T6 で `pq` 直下に再エクスポートしたので、**公開 API だけを使うなら `from pq import ...` に寄せられる**（A と B は並行で、A は B の成果物を前提にできなかった）。利用者向けの `is_ok()` / `in_transaction()` のような述語メソッドの提案は却下して記録のみ
+  (3) **`examples/basic.mojo` の `PgError` import はコンパイル上は不要**（B の実測: `from pq import Connection` だけでも `except e` は callee の `raises PgError` から型推論されて exit 0）。完了基準が 2 名の import を指定しており、再エクスポートの証明にもなるので指定どおり残した
+  (4) **テストが無い escape のケース**: マルチバイト UTF-8（byte 長 vs 文字数の区別は docstring で主張しているだけで未実測）/ 空文字列 / 埋め込み NUL / NULL 戻り → `PgError(SERVER)` 分岐（libpq の確保失敗を起こせないので到達不能）
+  (5) T5 からの持ち越し（未解決のまま）: `is_null` に `String` 版が無い / `Row.__init__` が公開 / `Row` から列メタデータに届かない / `execute` のエラー分類（sqlstate 無し + `CONNECTION_BAD` を `CONNECTION` に寄せるか）
+- 次への注意: 残りは T7（`tests/test_leak.mojo`）と T8（品質仕上げ）。
+  **T7 は実行時間が長い**: 本体 10,000 回 ≈ 35 s/サーバー + 異常系 3 ループ ×1,000 回。`test_connection.mojo` が既に ≈ 74 s/サーバー（PG17 実測）あるので、T7 投入後の `pixi run test` は 1 回 4〜5 分を見込むこと（`check` も同じだけ伸びる）。
+  T7 の `is_leaking` 単体テスト 4 ケースは DB 不要なので、本体ループの前に置けば失敗が早く分かる。macOS 判定（`CompilationTarget.is_macos()` / `os_is_macos()`）と `size_of` の import 元は未プローブ（PLAN「impl への申し送り」）—— コンパイルエラーになったら scratch で名前を確かめてから PLAN 訂正する。
+  **実装 → コミット → `pixi run check`** の順を守る（上記 想定外 (1)）。`fmt` は親が統合後に 1 回だけ走らせる方針を継続（3 ターン連続で衝突ゼロ）
