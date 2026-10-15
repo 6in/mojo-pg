@@ -68,6 +68,11 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
     the module docstring for when that happens and why every failure of it is
     ignored.
 
+    `PREPARE` is not transactional, so a statement prepared inside a
+    transaction still exists after `ROLLBACK` -- but anything it refers to may
+    not: once a rollback undoes DDL from inside the transaction, a later
+    `execute` of the surviving statement can come back as a server error.
+
     Parameters:
         origin: Immutable origin of the borrowed `Connection`.
     """

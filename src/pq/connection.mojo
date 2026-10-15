@@ -293,7 +293,7 @@ struct Connection(Movable):
         through `PQexecParams`, including when `params` is empty: it never
         falls back to `PQexec`.
 
-        Exactly one statement is allowed, because `PQexecParams` builds an
+        Only a single statement is allowed, because `PQexecParams` builds an
         unnamed prepared statement: `SELECT 1; SELECT 2` is rejected with
         SQLSTATE `42601` (`cannot insert multiple commands into a prepared
         statement`). A single trailing semicolon -- `SELECT 1;` -- succeeds.

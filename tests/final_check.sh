@@ -111,8 +111,16 @@ if [ "$doc_missing" -ne 0 ]; then
 fi
 
 # ------------------------------------------------------- 4. examples run
-stage "4/6 examples/basic.mojo"
-run_logged mojo run -I src examples/basic.mojo || fail "4/6 examples"
+# Both examples run; either one failing fails the stage. They are judged
+# together because the stage name is what the summary reports, and the two are
+# the same promise: the package's re-exported surface is enough on its own.
+stage "4/6 examples"
+examples_failed=0
+run_logged mojo run -I src examples/basic.mojo || examples_failed=1
+run_logged mojo run -I src examples/params.mojo || examples_failed=1
+if [ "$examples_failed" -ne 0 ]; then
+    fail "4/6 examples"
+fi
 
 # -------------------------------------------------------------- 5. tests
 stage "5/6 tests (both servers, test_leak on the first server only)"

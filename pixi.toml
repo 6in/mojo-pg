@@ -15,6 +15,7 @@ hello = "mojo hello.mojo"
 # -I src: examples import `pq`.
 hello-libpq = "mojo run -I src examples/hello_libpq.mojo"
 example-basic = "mojo run -I src examples/basic.mojo"
+example-params = "mojo run -I src examples/params.mojo"
 build = "mkdir -p build && mojo build -I src -o build/hello_libpq examples/hello_libpq.mojo"
 test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
