@@ -82,7 +82,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `loader.mojo` + `test_smoke.mojo` 書き換え + `hello_libpq.mojo` + `pixi.toml`（対象: `src/pq/_ffi/loader.mojo`, `src/pq/_ffi/__init__.mojo`, `tests/test_smoke.mojo`, `examples/hello_libpq.mojo`, `pixi.toml`）
     - B: `tests/test_loader_fail.mojo`（契約: `from pq._ffi.loader import libpq`、`from pq.errors import PgError, PgErrorKind`、失敗は `kind == PgErrorKind.LIBPQ_LOAD`）（対象: `tests/test_loader_fail.mojo`）
 
-- [ ] T3: `decode_text.mojo`（型スイッチ `decode_text[T]` + bytea hex + 範囲チェック）と DB 不要の境界値テスト
+- [x] T3: `decode_text.mojo`（型スイッチ `decode_text[T]` + bytea hex + 範囲チェック）と DB 不要の境界値テスト
   - 完了基準:
     - `src/pq/decode_text.mojo`: OID 定数（`OID_BOOL=16, OID_BYTEA=17, OID_NAME=19, OID_INT8=20, OID_INT2=21, OID_INT4=23, OID_TEXT=25, OID_FLOAT4=700, OID_FLOAT8=701, OID_BPCHAR=1042, OID_VARCHAR=1043`）、
       `decode_text[T: Copyable](text: String, oid: UInt32) raises PgError -> T`（「決めた事項」5 の表。非対応 T は `comptime assert False`）、`parse_bytea_hex(text) raises PgError -> List[UInt8]`
