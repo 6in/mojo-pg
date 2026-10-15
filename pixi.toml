@@ -12,9 +12,14 @@ libpq = ">=14"
 
 [tasks]
 hello = "mojo hello.mojo"
-hello-libpq = "mojo examples/hello_libpq.mojo"
-build = "mkdir -p build && mojo build -o build/hello_libpq examples/hello_libpq.mojo"
+# -I src: examples import `pq`.
+hello-libpq = "mojo run -I src examples/hello_libpq.mojo"
+example-basic = "mojo run -I src examples/basic.mojo"
+build = "mkdir -p build && mojo build -I src -o build/hello_libpq examples/hello_libpq.mojo"
 test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
 db-up = "docker compose -f tests/docker-compose.yml up -d --wait"
 db-down = "docker compose -f tests/docker-compose.yml down -v"
+check = "bash tests/final_check.sh"
+# .mojoc, not .mojopkg: Mojo 1.1.0 rejects a .mojopkg output here.
+package = "mkdir -p build && mojo precompile src/pq -o build/pq.mojoc"
