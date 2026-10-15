@@ -120,3 +120,44 @@
   `column_index(name: String)` は `as_c_string_span()` が `mut self` なので毎回 `name.copy()` している。`var name: String` に変えれば 1 コピー省けるが T5 の呼び出し側に影響するので T5 で判断（B の契約外の提案）。
   **T5 のテストで列名を assert しない**（上記 想定外 (6)）。`application_name` の値一致を T5 で見るなら 63 バイト前提。
   `tests/test_connection.mojo` は 1 サーバーあたり ≈ 50 s かかる（`connect_timeout=1` の到達不能テストと切断テストが主因）。T7 のリークテスト（≈ 35 s/サーバー）と合わせると `pixi run test` が 1 回 3 分前後になる見込み
+
+## turn 7 — impl — T5 `Row` / `RowIter`（`Iterable` + `get[T]` / `get_optional[T]`）+ 受け入れクエリと型取得テスト
+- やったこと: サブエージェント 2 本（A: `src/pq/result.mojo` に Row 系を追記 / B: `tests/test_result.mojo` を PLAN の仕様表から独立に）で並行実装し統合。
+  `pixi run test` は両サーバーで **182 PASS / 0 FAIL**（test_result 13 ×2 が純増。connection 14 / decode_text 49 / errors 3 / ffi 7 / loader_fail 1 / result 13 / smoke 4 ×2）、
+  ログ全体で `FAIL` `warning:` `error:` `out of range` `NOTICE` が grep 0 件、`pixi run package` exit 0、docstring 診断（`_ffi` と合成 dunder 除外）0 件、`pixi run fmt` 差分なし（18 ファイル）
+- 負のコンパイル確認（P5 / REQ §5.2）: `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-007-neg-row-escape.mojo`。
+  `var moved = result^` で `Result` を移動した後に `row.get[Int32](0)` を使うと `error: use of uninitialized value 'result'`（`note: 'result' declared here`）でコンパイル失敗。
+  **エラーが出るのは `row.get` の行で、そこに `result` という名前は出てこない** — origin が借用を通じて `result` を初期化済みに保っていることの証拠。期待どおり
+- 想定外: (1) **`_ = x^` は寿命を終わらせない**（PLAN 訂正 (b) の原因）。`_ = result^` の直後に `result.row_count()` を書いてもコンパイルも実行もできる（scratch `turn-007-neg-row-escape3.mojo` で単独確認）。
+  4,000 バイトの text を持つ結果で `_ = result^` 後に 2,000 回の `String` 確保を挟んで読み直しても値は無傷だった（`turn-007-neg-row-escape2.mojo`）。
+  つまり `tests/test_*.mojo` に散っている `_ = conn^` / `_ = result^` は **ASAP 破棄を防ぐ生存マーカー**として機能しているのであって、デストラクタの明示呼び出しではない。**この解釈は既存テスト全体の読み方に関わる**
+  (2) **B の統合は 1 箇所だけ合わなかった**（PLAN どおりの想定内の食い違い）: B は契約文の `Row` という表記から「origin パラメータ無し」と仮定してヘルパーを書いたが、実装は `Row[origin: ImmOrigin]`。
+  `'Row[_]' is not concrete, use '[]' to bind missing parameters` で 1 行目から落ちた。親が 6 ヘルパーの署名を修正（`-> Row[origin_of(result)]` と、推論パラメータ `[origin: ImmOrigin, //, T: ...]` + `row: Row[origin]`）。両形は先に scratch プローブで確定させてから適用
+  (3) `len(String)` と `s[0:8]` は 1.1.0 で**エラー**（UTF-8 の曖昧さを理由に明示を要求）→ `s.byte_length()` / `s[byte=0:8]`
+  (4) A の報告より: `comptime IteratorType` のような**パラメータを持つ comptime 値は docstring に `Parameters:` 節が必要**で、無いと `warning: comptime value has parameters, but has no 'Parameters' in doc string`。
+  この警告文には `doc string` が含まれるので **`final_check.sh` 3/6 段の `grep -c 'doc string'` に数えられて gate が落ちる**（`pixi run package` は無言のまま）。推論パラメータ（`iterable_mut`）も列挙が必要
+- やり直し: 1 回（上記 想定外 (2) のヘルパー署名修正。テスト本体のアサーションは 1 つも変えていない）
+- PLAN 訂正: 2 件（どちらも実測反映で、要件・決定には触れない）。
+  (a) T5 テスト案件 7 の SQL を `-2147483648::int4` / `-32768::int2` → **`(-2147483648)::int4` / `(-32768)::int2`**。
+  `::` が単項マイナスより強く束縛するため、括弧なしでは正の `2147483648` を先に int4 にキャストして `ERROR: integer out of range`（int2 側は `smallint out of range`）になり、クエリ自体が通らない。**B が psql で PG14 / PG17 両方で実測して発見**
+  (b) T5 の負のコンパイル確認の形を `_ = res^` → **`var moved = res^`**（根拠: 上記 想定外 (1)）
+- 既存テストの期待値の変更: **なし**。既存のテストファイルは 1 つも編集していない（新規 `tests/test_result.mojo` のみ。`src/pq/result.mojo` は追記）。
+  親が手を入れたのは**このターンで新規作成された** `tests/test_result.mojo` のヘルパー署名 6 箇所（想定外 (2)）だけで、期待値は未変更
+- 追従先チェックリスト: 該当行を実行。
+  「`Row.get[T]` の対応型を足す」→ 検査 `rg 'Int16' src/pq/decode_text.mojo src/pq/result.mojo src/pq/__init__.mojo tests/test_decode_text.mojo` は **4 ファイル中 3 ファイル**で一致（`src/pq/__init__.mojo` の型一覧は T6 の完了基準なので未作成 = 想定どおりの残り）。
+  A は当初 `Row.get` の docstring に表を置かず `decode_text` を参照する形にしていたが、チェックリストが `Row.get` の docstring の型表を同期先に挙げており、
+  公開 API の利用者が最初に読むのは `Row.get` 側なので**親が型表（T ↔ 要求 OID の 8 行 + 拡幅なしの明記）を追記**し、実装の単一の出所は `decode_text` であると併記した。
+  「テストファイルを足す」→ `pixi run test` のログに `tests/test_result.mojo` が両サーバー分出る ✓。「公開 struct / メソッドを足す」→ docstring 診断 0 件 ✓。
+  「libpq を呼ぶ新しい経路を足す」→ **非該当**（T5 は `_text` / `_is_null` / `column_type_oid` という T4 の既存経路しか使わず、新しい libpq 呼び出しを足していない）。`grep -c get_function src/pq` = 0 ✓、`rg '^\s*fn ' src tests examples hello.mojo` = 0 件 ✓。
+  非該当: 「libpq 関数のバインディング」（`functions.mojo` 未編集）/「`PgErrorKind` を足す」（追加なし）/「`examples/` を足す」（T6）
+- verify への申し送り（サブエージェントの「契約外の提案」から、実装せず記録したもの）:
+  (1) **`is_null` に `String` 版が無い**（`get` / `get_optional` は両方ある）。列名で書く利用者は `row.is_null(res.column_index("n"))` と書くことになる。非対称
+  (2) **`Row.__init__` が公開**なので、モジュール外から範囲外 index の `Row` を作れる。全アクセサが `_check_cell` で再検査するので安全だが、不変条件を構造で守るなら内部化が要る
+  (3) `src/pq/__init__.mojo` が `Result` / `Row` を再エクスポートしていないので今は `from pq.result import Result, Row` と書く必要がある（T6 の完了基準に入っているので T6 で解消する見込み。`examples/basic.mojo` が `from pq import ...` だけを使う前提と整合させること）
+  (4) `Row` から列メタデータ（`column_count` / `column_name`）に届かないので、`for row in res:` の中でメタデータを見るには `Result` を別に抱える必要がある
+  (5) 契約にあるが必須ケースに無く**テストが無い**組み合わせ: `get[T]` に存在しない列名（→ TYPE_MISMATCH）/ `get_optional` の `String` 版 / `is_null` の範囲外 index。T5 の完了基準を満たす範囲では穴
+- 次への注意: T6 は `escape_literal` / `escape_identifier`（**`PQfreemem` の初登場**。追従先チェックリストの「`PQfreemem` は 1 箇所」= 各メソッド 1 回を必ず確かめる）/ `server_version` / `status` / `transaction_status` + `examples/basic.mojo` + `__init__.mojo` 再エクスポート。
+  `__init__.mojo` には **REQ §4.5 の型マッピング表**を書くので、`decode_text.mojo`（決めた事項 5）と `Row.get` の docstring の表（今回追記）と**3 箇所を 1 対 1 で突き合わせる**こと。
+  T6 で初めて `pixi run check` の全段がそろう（`examples/basic.mojo` が埋まるため）。それまで `check` は examples 段で落ちる。
+  サブエージェントに渡す契約文では、**`Row` を必ず `Row[origin]` と書く**（今回の唯一のやり直しの原因。型パラメータを省くと「パラメータ無し」と読まれる）。
+  `fmt` は親が統合後にだけ走らせる方針は今回も維持して衝突ゼロだった（turn 6 の想定外 (7) への対処が有効）
