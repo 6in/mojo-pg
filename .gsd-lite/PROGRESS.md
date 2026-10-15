@@ -868,3 +868,19 @@ T7 では完了基準の範囲外の変更をしていない（turn 8 の `run_t
    verify はこれを差し戻さないこと。PLAN T7 の「PLAN 訂正（turn 9 実測）」に理由を書いた。
 6. **turn 8 の申し送りが 1 項目外していた実例がある**（(c) の残りが「4 番だけ」ではなく 2 番もあった）。
    verify は PROGRESS の申し送りを前提にせず、完了基準そのものを `grep` で確かめ直すこと。
+
+## turn 10 — verify — 合格（round 1、差し戻し 0 件、残留リスク 10 件）/ main へ `--no-ff` ローカルマージ
+- やったこと: `main...HEAD` の全差分を REQ §4〜§6 + PLAN 決めた事項 14 と突き合わせ。読み取り専用サブエージェント 2 本（コードレビュー / セキュリティ）を並行させ、
+  親で `pixi run check`（6/6、84 s）と `pixi run test`（両サーバー 201 本 × 2、exit 0、leak 両方平坦）を回し、追従先チェックリスト全行を素のシェルで再実行、
+  テストに無い格子 11 セルを `scratch/turn-010-grid/probe.mojo` で一括プローブ（全セル `PgError`、トレースバック無し）。VERIFICATION.md を書いて
+  ブランチにコミット → `main` に `--no-ff` マージ（リモート無し）。`reflect: true` なので reflect へ遷移
+- 想定外: (1) lean-ctx の MCP ツールは未接続（素のツール）。(2) 差し戻しに相当する指摘は 0 件だったが、サブエージェント 2 本から文書・テスト門番の
+  軽微な指摘 6 件（prepared の型表 docstring が実態より広い / `check` 6/6 段が `implicit ROLLBACK failed` を数えない / `find("1")` の落ちない断定 など）と
+  極端入力 1 件（2 GiB 超 bytea の `c_int` 折り返し）が出た。Phase 1 の残留 docstring と同じ扱いで VERIFICATION §6 に番号付きで残し、次マイルストーンの
+  持ち越し整理（REQ §6 相当）の候補にした。(3) `__deinit__` の ROLLBACK 分類が REQ §4.4「接続断なら CONNECTION」より狭い（sqlstate 付き FATAL は SERVER）
+  ことをレビューが指摘。Phase 1 規則と整合し docstring にも明記済みなので読み方の問題として残留リスク 7 に記録
+- やり直し: 0 回
+- 次への注意: (1) reflect は VERIFICATION §6 の残留リスク 10 件を「次回への提案」の持ち越し候補として扇形に分けて書く（文書 6 / 仕様の読み方 2 / 極端入力・設計 2）。
+  (2) 次マイルストーンの discuss は `main` に戻ってから始める（今 `main` 上。ブランチ `gsd-lite/phase2-params-prepared-tx` は残してある）。
+  (3) 検出力の再確認用バイナリは `scratch/turn-008-*`、今回の格子プローブは `scratch/turn-010-grid/probe.mojo`（gitignore 済み）。
+  (4) `check` の所要は今回 84 s（目安 80〜115 s の下側）、`pixi run test` は約 6 分
