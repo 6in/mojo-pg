@@ -415,3 +415,101 @@ PLAN T4 (b)-1 の期待値を後者に訂正した（要件・決定に反しな
 | `fn` を使わない | `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` | 0 件 ✓ |
 
 - 未該当（後続タスクの担当）: `Transaction` の再エクスポート（T5）/ `examples/` 追加（T7）/ leak 12 本（T6）
+
+## turn 7 — impl — T5 transaction（`Transaction[origin]` / `Connection.transaction` / test_transaction 13 + test_savepoint 7）
+
+- やったこと: サブエージェント 3 本（A: `src/pq/transaction.mojo` + `Connection.transaction` /
+  `set_rollback_failure_handler` + `__init__.mojo` / B: `tests/test_transaction.mojo` を (b) 1〜12 から
+  独立に 13 本 / C: `tests/test_savepoint.mojo` を (c) 1〜6 から独立に 7 本）を対象ファイル非重複で並行実装。
+  親で統合 → `fmt` 1 回 → `package` → docstring 診断 → `test`（両サーバー）→ `check` 6/6 →
+  追従先チェックリスト照合 → コミット（8546642）。完了基準 (a)〜(d) をすべて満たした
+- 想定外: **(1) `Transaction.prepare` を委譲で書けない**（PLAN 訂正に詳述）。`self._conn[].prepare(...)` の戻りは
+  `PreparedStatement[origin_of(origin)]` の入れ子 origin になり、署名側の `PreparedStatement[Self.origin]` /
+  `[origin_of(self._conn[])]` はどちらも `[origin]` に畳まれる。struct の origin パラメータは不変なので変換不能で、
+  PLAN「未プローブ」が用意していた代替（`rebind`）も `expression does not designate a value with an origin` で不可、
+  `__disable_del` は Mojo 1.1.0 に存在しない。A は FFI を複製せず `Connection._prepare_parts`（不変 `self` で
+  2 往復を行い名前を返す）に切り出し、2 つの `prepare` が各自の借用で `PreparedStatement` を構築する形にした。
+  前ターン申し送り (2) の「委譲で返せる見込み」は**外れ**（同じ `Connection` 借用由来でも deref を挟むと origin が入れ子になる）。
+  (2) **`std.os.setenv` は Mojo 1.1.0 で raise しない**（`Bool` を返す）。B が依頼文どおり `try/except` で包んだら
+  `try body doesn't raise an exception` 警告が 3 件出たため `try` を外した（警告ゼロ要件と両立しない）。
+  PLAN 決めた事項 12 の「`setenv` 等を `try/except` で包む」は不要。
+  (3) B / C はどちらも「`Connection.transaction()` がまだ無い」状態で終わったが、C は `src/pq` のコピーに
+  スタブを当てて自力で型検査まで済ませており（7 本 0 警告）、統合後の修正は**ゼロ**だった
+- やり直し: 0 回
+- 次への注意: (1) **T6 が参照する `__deinit__` の ROLLBACK 経路は `transaction.mojo:150-214`**（生 `PQexec` +
+  `PQclear`）。陽性対照 ③（ROLLBACK 結果の `PQclear` を消す）は `:182` と `:199` の 2 箇所のうち
+  **`:199`（失敗時）ではなく `:182`（COMMAND_OK 時）**を消すのが正しい（正常系の 10,000 回ループで効く）。
+  (2) `_prepare_parts` の切り出しで `prepare` の FFI は 1 箇所に集約されたので、T6 の prepared ループが
+  `PQclear` 漏れを見る対象も 1 箇所（`connection.mojo:_prepare_parts` の describe 結果は `Result` が解放）。
+  (3) **T7 (c) の docstring 照合は T5 の時点で済んでいる**: `grep -c 'conn.execute(b)' src/pq/transaction.mojo` → 1、
+  `copied when` + `transaction()` が `set_rollback_failure_handler` の docstring に、`commit()` に
+  `ROLLBACK` command tag の説明あり。残りは `PreparedStatement` の「tx 内 DDL 巻き戻し後」の 1 項目。
+  (4) `grep -c 'implicit ROLLBACK failed' build/final_check.log` は**この turn の check で既に 0**（T5 (b)-12 の
+  機械的な裏付け。T7 で再掲するだけでよい）。
+  (5) B / C の「契約外の提案」で verify が拾ってよいもの: `savepoint("Sp")` のあと `rollback_to("sp")` が
+  `3B001` になる（クォート済み識別子と畳まれた名前は別物）という**エスケープの本質を突く 1 件**は未テスト。
+  savepoint のネスト（`a` → `b` → `rollback_to("a")` が `b` を捨てる）と同名の二重 `savepoint`（PostgreSQL は
+  シャドウする）も未テスト。いずれも PLAN の 6 項目外なので入れていない
+
+### T5 完了基準の実測
+
+- (a) `src/pq/transaction.mojo`（457 行、`fmt` 後）: `struct Transaction[origin: ImmOrigin](Movable)` で
+  `Copyable` にしていない。フィールドは `_conn: Pointer[Connection, Self.origin]` / `_done: Bool` /
+  `_handler: def(PgError) thin` の 3 本だけ ✓。`Connection` 側は `var _rollback_failure_handler: def(PgError) thin`
+  が `connection.mojo:95`（`__init__` で `_default_rollback_failure_handler` を代入）、
+  `transaction(ref self) raises PgError -> Transaction[origin_of(self)]` が `:742`、
+  `set_rollback_failure_handler(mut self, handler: def(PgError) thin)` が `:802`、
+  `_prepare_parts` が `:457`。`src/pq/__init__.mojo:68` に `from .transaction import Transaction` ✓
+  - 決めた事項 10 の順序どおり: `transaction()` は ① `PQstatus == CONNECTION_BAD` → `CONNECTION`
+    （`PQerrorMessage`）→ ② `PQtransactionStatus != PQTRANS_IDLE` → `USAGE`
+    `transaction() requires an idle connection (transaction status N)` → ③ `BEGIN` → 構築（ハンドラをコピー）✓
+  - `commit()` は `_check_open()` → **`_done = True` を送信前** → `COMMIT` → `command_tag() == "ROLLBACK"` なら
+    `SERVER` / `sqlstate=""` / `COMMIT resulted in ROLLBACK: the transaction was aborted` ✓
+  - savepoint 3 本は `_check_open()` → 空文字 `USAGE` `savepoint name must not be empty` →
+    `escape_identifier` → `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT`。command tag は見ない ✓
+  - `__deinit__` は `_done` なら無動作、そうでなければ生 `PQexec("ROLLBACK")` → NULL なら `CONNECTION`、
+    非 `PGRES_COMMAND_OK` なら診断 7 項目を `_error_field` でコピー → `PQclear` → sqlstate 空 かつ
+    `CONNECTION_BAD` なら `CONNECTION`、それ以外 `SERVER` → `self._handler(err)`。**raise しない** ✓
+    （`_take_result` との差は `message` が空のときの `unexpected result status N` フォールバックが無い点だけ）
+- (b) `tests/test_transaction.mojo` **13 本**（PLAN (b) 1〜12 → 1:1、項目 2 だけ 2 本に分割）。**両サーバー 13/13 PASS** ✓
+  - 仕様どおり実測一致した要所: `commit` 後の count 1 と二重 `commit` の `USAGE`、`rollback` の count 0、
+    `_ = tx^` での暗黙 ROLLBACK と `PQTRANS_IDLE`、**ASAP 破棄（次の行の `conn.execute` が既に tx 外）**、
+    `tx.execute(sql, params)` / `tx.prepare` の委譲（prepared は `Int32` で束縛）、ネスト禁止が
+    `transaction status 2` / `3` の USAGE、終了後の 6 メソッド全部 USAGE、aborted からの `commit()` が
+    `SERVER` / sqlstate 空 / message に `ROLLBACK`、**接続断中の破棄でハンドラが `Connection|...` を記録**、
+    **ハンドラは生成時コピー（`first|Connection|...`。2 本目は呼ばれない）**、接続断後の `transaction()` が `CONNECTION`
+  - B が仕様から解釈を選んだ点（親が妥当と判断）: USAGE 系は `sqlstate == ""` も assert（Phase 1 からの慣習）；
+    ネストのメッセージは `PQTRANS_*` 定数から組み立てて「どの状態を断ったか」を示す；
+    項目 4 は `_tx_execute(tx, ...).affected_rows()` の連鎖で INSERT 行を tx の最終使用にしている
+- (c) `tests/test_savepoint.mojo` **7 本**（PLAN (c) 1〜6 → 項目 4 のみ 2 本）。**両サーバー 7/7 PASS** ✓
+  部分取り消しで count 1、`sp "1"` と `Sp` の往復、`22012` → `rollback_to` → `INTRANS` → `commit`、
+  存在しない名前が `3B001` → `25P02` → `rollback()` で `IDLE`、空文字 3 本が `USAGE` で `INTRANS` のまま、
+  `release` 後の `rollback_to` が `3B001`
+- (d) 検証コマンド:
+  - `/home/parallels/.pixi/bin/pixi run test` → **両サーバー全ファイル PASS（0 failed）**。内訳（各サーバー同数）:
+    test_connection 28 / test_decode_text 49 / test_encode_binary 14 / test_errors 7 / test_ffi 7 /
+    test_leak 8 / test_loader_fail 1 / test_params 31 / test_prepared 13 / test_result 15 /
+    **test_savepoint 7** / test_smoke 4 / **test_transaction 13**。leak の RSS 系列は PG17
+    `connect/query/close [4085, 4086, 4086, 4086, 4086, 4169, 4169, 4169, 4169]`（+84 の一段 1 回、
+    tolerance 256 内）/ 他 3 系列は完全に平坦、PG14 は 4 系列すべて平坦。所要 **約 5 分**
+  - `/home/parallels/.pixi/bin/pixi run check` → **6/6 PASS**（`final_check: PASS`）。作業木が未コミットのまま成功。
+    所要 **65 s**（01:58:35 → 01:59:40）。3/6 段 `missing doc strings outside _ffi: 0`、
+    5/6 段で `-- 127.0.0.1:54314 tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=1)`、
+    6/6 段 `matched lines in build/final_check.log: 0`（= `warning:` も libpq の `WARNING:` も 0 件 =
+    ネスト BEGIN / 二重 COMMIT がサーバーに届いていない証拠）。test_leak は 1 サーバー 40 s
+  - `/home/parallels/.pixi/bin/pixi run package` → 出力はタスク見出し行のみ = **警告ゼロ** ✓
+  - docstring 診断 → `_ffi` と dunder を除いて **0 件** ✓
+  - `/home/parallels/.pixi/bin/pixi run fmt` → `4 files reformatted, 25 files left unchanged`
+    （`transaction.mojo` / `connection.mojo` / `test_transaction.mojo` / `test_savepoint.mojo`。親が統合後に 1 回だけ）
+
+#### 追従先チェックリストの照合（T5 該当行）
+
+| 行 | 確かめ方 | 結果 |
+|---|---|---|
+| 公開 struct を足す（`Transaction`） | `grep -nE 'Param\|PreparedStatement\|Transaction' src/pq/__init__.mojo` | `:7-8`（docstring の列挙に 3 型）/ `:65` `Param` / `:66` `PreparedStatement` / `:68` `from .transaction import Transaction` の 5 件 ✓ **3 型すべて揃った** |
+| 公開 struct を足す（docstring 診断） | `mojo precompile --diagnose-missing-doc-strings ...` の 'doc string' 件数 | **0** ✓ |
+| libpq を呼ぶ新しい経路を足す | `grep -rn 'PQexec(' src/pq/*.mojo` | **4 行**（`connection.mojo:279` `execute(sql)` / `connection.mojo:527` describe 失敗時 DEALLOCATE / `prepared.mojo:114` `__deinit__` / `transaction.mojo:167` `__deinit__`）= PLAN の「4 行（connection ×2 / transaction / prepared）」と一致 ✓ |
+| libpq を呼ぶ新しい経路を足す（`PQfreemem`） | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行 | `connection.mojo:667, 709`（escape_literal / escape_identifier）の **2 行**のまま ✓（savepoint は `escape_identifier` 経由） |
+| テストファイルを足す | `pixi run test` のログに新ファイル名が 2 回出る | `test_transaction.mojo` / `test_savepoint.mojo` とも `== 127.0.0.1:54317` と `== 127.0.0.1:54314` の **2 回** ✓ |
+| `__del__` を書かない（決めた事項 14-4） | `grep -rn '__del__' src tests examples` | 0 件 ✓ |
+| 既定ハンドラが黙っている（T5 (b)-12 / T7 (d)） | `grep -c 'implicit ROLLBACK failed' build/final_check.log` | **0** ✓ |
