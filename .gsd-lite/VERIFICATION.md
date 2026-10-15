@@ -1,157 +1,164 @@
-# VERIFICATION — phase1-sync-text-basic
+# VERIFICATION — phase2-params-prepared-tx
 
-## round 1（turn 11, 2026-10-15）— 判定: **差し戻し**（指摘 3 件 → F1 / F2 / F3）
+- 検証: 2026-10-16 / gsd-lite-verify（turn 10、verify round 1）
+- 判定: **合格**（差し戻し 0 件。残留リスク 10 件を §6 に列挙 — すべて文書・テスト門番・極端入力の類で、データ損失・誤動作・クラッシュを伴うものは無い）
+- 対象: `git diff main...HEAD`（34 ファイル、+9,424 / −1,191）。コード部分は `src/pq/{params,prepared,transaction,encode_binary}.mojo`（新規）、
+  `src/pq/{connection,result,errors,__init__}.mojo` / `src/pq/_ffi/functions.mojo`（変更）、`tests/test_{params,prepared,transaction,savepoint,encode_binary}.mojo`（新規）、
+  `tests/test_{leak,ffi,errors,result}.mojo` / `tests/{run_tests,final_check}.sh`（変更）、`examples/params.mojo`、`pixi.toml`
+- 判定の基準: REQUIREMENTS §4〜§6 と PLAN「決めた事項」（REQ を読み替えた 14-1〜14-5 は PLAN を正とした）。`CLAUDE.md` / `AGENTS.md` は対象リポジトリに無い
+- 進め方: コードレビューとセキュリティチェックを読み取り専用のサブエージェント 2 本に並行させ、親が自分のレビュー・堅牢性プローブ・テスト実行と統合して判定した。
+  サブエージェントはファイルを変更していない（`git status --short` が空のまま）
 
-- 対象: `git diff main...HEAD`（28 ファイル, +5,520 / −52）。コードは `src/pq`（9 ファイル）、`tests/`（8 本 + 2 スクリプト）、`examples/`、`pixi.toml`
-- 実行エンジン: Claude Code（verify = claude-fable-5-1）。並列レビュー: コードレビュー / セキュリティの 2 サブエージェント（読み取り専用）+ 親の堅牢性プローブと機械判定
-- `CLAUDE.md` / `AGENTS.md` は対象リポジトリに無い
+## 1. 検証コマンド（クリーンな作業木から verify が自分で回したもの）
 
-### 機械判定（クリーンな木、コミット `a0ec2c7` から）
-
-| 検査 | 結果 |
+| コマンド | 結果 |
 |---|---|
-| `pixi run db-up` → `pixi run check` | **6/6 PASS**（21:52:24 → 21:53:54、90 s） |
-| 5/6 テスト | **210 PASS / 0 FAIL**（105 × PG17 / PG14。`test_leak` 40 s / 38 s、他は ≤ 1 s） |
-| 3/6 docstring 診断（`_ffi` と合成 dunder 除外） | 0 件 |
-| 1/6 fmt | 差分なし（`git status` も clean） |
-| 6/6 `warning:` | 0 件 |
-| 追従先チェックリスト 7 行 | 全一致: バインディング 50 本（`functions.mojo` 50 / `test_ffi.mojo` 50 / `assert_equal(len(names), 50)` / PLAN「50 本」5 箇所）、`Int16` 4 ファイル、`TYPE_MISMATCH` 3、`examples/` 2 箇所、`get_function` 9 ファイル 0、`PQfreemem` `connection.mojo:317` / `:356` の 2 回、`fn ` 0 件 |
-| リークサンプル（check ログ） | PG17 本体 `[37770, 37772 ×6, 37855, 37855]`、PG14 `[37748, 37833 ×8]`。異常系 3 ループは全サーバーで完全に平坦。+83 ページの一段が今回も両サーバーで 1 回ずつ |
+| `pixi run db-up` | pg17 / pg14 とも Healthy |
+| `pixi run check`（最終判定、6 段） | **6/6 PASS**（`final_check: PASS`）。02:34:21 → 02:35:45 = **84 s**。3/6 `missing doc strings outside _ffi: 0`、6/6 `matched lines in build/final_check.log: 0`（`warning:` も `WARNING:` も 0 件） |
+| `pixi run test`（両サーバー、test_leak も両方） | **exit 0**。`tests run` 26 件（13 ファイル × 2 サーバー）、`N failed`（N ≥ 1）0 件、`warning:` / `WARNING:` 0 件 |
+| `grep -c 'implicit ROLLBACK failed' build/final_check.log` | **0**（既定ハンドラは `check` の全行程で一度も鳴っていない） |
 
-### 受け入れ基準の達成状況（REQ §5）
+テスト本数（各サーバー同数）: test_connection 28 / test_decode_text 49 / test_encode_binary 14 / test_errors 7 / test_ffi 7 / test_leak 12 /
+test_loader_fail 1 / test_params 31 / test_prepared 13 / test_result 15 / test_savepoint 7 / test_smoke 4 / test_transaction 13 = **201 本 × 2**。
 
-| 項目 | 状況 |
+リーク系列（`pixi run test`、built binary、`TOLERANCE_PAGES = 256`）— Phase 2 の 4 系列はどちらのサーバーでも増分 0〜16 ページ:
+
+```
+PG17  execute(sql, params) [4642 ×8, 4658]   prepare/execute/drop [4659 ×9]
+      transaction/commit   [4659 ×9]         transaction/drop     [4659 ×9]
+PG14  execute(sql, params) [4678 ×9]         prepare/execute/drop [4679 ×9]
+      transaction/commit   [4679 ×9]         transaction/drop     [4679 ×9]
+```
+
+Phase 1 の 4 系列も平坦（PG17 connect `[4087, 4088 ×8]`、PG14 `[4174, 4175 ×8]`）。この回は +83 ページの一段は出なかった。
+
+## 2. 受け入れ基準の達成状況
+
+### REQ §5.1（HANDOFF §10 Phase 2）
+- 全基本型の `$1`〜`$n` 往復（bool / int2 / int4 / int8 / float4 / float8 / text / bytea / NULL）: `test_params` の 10 列テーブル往復 + `column_type_oid` 10 個の一致 ✓
+- SQL インジェクション文字列をテキスト経路で: `test_params`（count 1、原文一致、テーブル残存）✓
+- commit せずに破棄 → ROLLBACK: `test_transaction`（count 0、`PQTRANS_IDLE`）✓
+- セーブポイントで部分取り消し: `test_savepoint`（count 1）✓
+- PG 14 / PG 17 両方で通る、警告ゼロ、`fn` 無し: 上の表 / `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` = 0 件 ✓
+
+### REQ §5.1a（追加の異常系・境界。PLAN 決めた事項 14 の読み替えを含む）
+- 接続断中の tx 破棄でハンドラが `Connection|...` を受ける ✓（`test_transaction`）
+- 境界値往復（整数の端 / NaN / ±Inf / −0.0 のビット保存 / 空・NUL 入り bytea / 空文字 / 64 KiB × 2）✓（`test_params` 8 本 + `test_encode_binary` 14 本）
+- 型不一致: 14-2 の題材（`Bool` → int4 = 42804、`Int(3000000000)` → int4 = 22003、`Int(5)` は成功）✓
+- rollback 後の prepared: 14-1 どおり **成功**を固定し、26000 は手動 `DEALLOCATE` 後の `execute` で固定、破棄は静か ✓（`test_prepared`）
+- USAGE 系 6 種（二重 commit / rollback、終了後の savepoint・execute・prepare、tx 中の `transaction()`、個数不一致、String の NUL、空 savepoint 名）✓
+- aborted 状態の `commit()` → `SERVER` / sqlstate 空 / message に `ROLLBACK`、その後 `conn.execute` が通る ✓
+- 破棄後に `PQtransactionStatus` が IDLE ✓
+
+### REQ §5.2（堅牢性）
+- クラッシュ・トレースバック無し: テストと §4 の格子プローブのすべてで `PgError` が返った（下記）✓
+- `PQclear` / `PQfinish` / `PQfreemem`: `_take_result` の全失敗経路、describe 失敗時の DEALLOCATE 結果、2 つの `__deinit__` の生 `PQexec` 結果すべてで `PQclear`。
+  `Result` に渡した `PGresult` は 1 回だけ ✓。陽性対照（PROGRESS turn 3 / 8）が 5 経路で FAIL することを impl が実測済み
+- バッファ生存: `_ParamBuffers` は `bufs` を全部作ってからアドレスを取り、`_ = buffers^` / `_ = sql^` / `_ = name^` は 4 箇所すべて libpq 呼び出しの後 ✓。
+  stride は `lengths` / `formats` が `List[c_int]`、`values` が `List[Int]`（ポインタ幅）、`types` が `List[UInt32]` ✓
+- 解放済みポインタ: `PreparedStatement[origin]` / `Transaction[origin]` は `origin_of(self)` の `Pointer[Connection]` で `Connection` より長生きできない。`Movable` のみ（`Copyable` 無し）✓
+- 10,000 回ループ 4 本で RSS が単調増加しない（上の系列）✓
+
+### REQ §5.3（リーク測定方式）
+- `run_tests.sh` が `test_leak.mojo` だけ `mojo build` → `build/test_leak` を実行 ✓。`TOLERANCE_PAGES` は 16 系列の実測（+83 の一段 2 回）で 256 維持、理由は PROGRESS turn 3 ✓
+- 陽性対照: `PQclear`（Result）/ `PQfreemem`（escape_literal）/ prepared の DEALLOCATE 結果 / tx の ROLLBACK 結果 の 4 経路で FAIL のサンプル列が PROGRESS に貼られている ✓
+- `check` は `PQ_TEST_LEAK_SERVERS=1` で 1 サーバー、`test` は両方 ✓（ログに `skipped (PQ_TEST_LEAK_SERVERS=1)` が 54314 側で 1 行）
+
+### REQ §5.4（品質）
+- docstring: `check` 3/6 段 `missing doc strings outside _ffi: 0` ✓
+- fmt 差分 0: `check` 1/6 段（コピーに明示ファイル列で `mojo format` → `diff -r`）PASS ✓
+- `examples/params.mojo` 単体実行 + `pixi.toml` の `example-params` ✓（4/6 段で basic と params の 2 本）
+- `pixi run package`: 2/6 段 PASS（警告ゼロ）✓
+
+### REQ §6（持ち越し整理）
+- docstring 3 件（`execute` の CONNECTION 説明 / `Row.get[T](name)` の NUL メッセージ / `PAYLOAD_BYTES`）: 差分で確認 ✓
+- `PQ_MOJO_LIBPQ` は 1 本のみ: `loader.mojo:10` の既存文言（コード変更なし）✓
+- `final_check.sh` 1/6 段を `git diff` 判定からフォーマッタ自身の差分判定に ✓（コピー先が `.gitignore` 配下で no-op になる欠陥を impl が陽性対照で発見・修正済み）
+- `OID_TEXT` 等 4 定数は削除せず残す ✓（`OID_TEXT` は `test_prepared` が参照）
+- `check` の leak 1 サーバー化 ✓
+
+### REQ §4（機能要件）の API 表面
+- `Param` の `@implicit` 19 本 + `null()` / `null(oid)` + `oid()` / `is_null()` / `is_binary()`、値アクセサ無し ✓
+- `Connection.execute(sql, params)` は空 params でも `PQexecParams`、`resultFormat` 0 固定、`result_format` 引数無し ✓
+- `Connection.prepare(sql, param_types=[])` → `PreparedStatement[origin]`（`pq_stmt_N` 接続ごと連番、`PQdescribePrepared` で型保持、`execute` / `param_count` / `param_type_oid` / `name`、`__deinit__` で DEALLOCATE・失敗無視・フック無し）✓
+- `Connection.transaction()`（非 IDLE は USAGE、`CONNECTION_BAD` は CONNECTION = 14-3）→ `Transaction[origin]`（commit / rollback / savepoint / rollback_to / release / execute ×2 / prepare、`__deinit__` で ROLLBACK → 失敗はハンドラ）、
+  `set_rollback_failure_handler`（生成時コピー、既定は stderr 1 行）✓
+- `PgErrorKind.USAGE = 5`（`"Usage"`）、`_ffi` 53 本（`PQcmdStatus` / `PQnparams` / `PQparamtype`）✓
+
+## 3. セキュリティチェック（サブエージェント + 親の確認）
+
+- SQL 組み立て箇所は 4 種のみ: `DEALLOCATE <name>`（名前は `_next_stmt_name` が生成する `pq_stmt_<Int>` で `[a-z0-9_]` のみ。パッケージ内で `PreparedStatement[...](...)` を構築する箇所は `connection.mojo` / `transaction.mojo` の 2 箇所だけ）、
+  `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT`（必ず `escape_identifier` = `_reject_nul` → `PQescapeIdentifier`）、`BEGIN` / `COMMIT` / `ROLLBACK`（定数）。パラメータ値は SQL 文字列に一切触れない ✓
+- 入力検証: String パラメータの NUL は FFI 前に USAGE（位置 `$N` のみ、値は非表示）、個数不一致は FFI 前に USAGE、`param_type_oid` は負も範囲外も拒否、空 savepoint 名は USAGE ✓
+- 秘密情報: ソース・テスト・例にあるのは docker テスト DB（127.0.0.1:54317 / 54314、`pq` / `pq`）のみ。`run_tests.sh` の見出しは host:port だけでパスワードをログに出さない。`Param` は `Writable` / `Stringable` 非準拠で値を返すアクセサが無い ✓
+- シェル: `final_check.sh` の `find -print0 | read -d ''`、配列・変数はすべてクォート、`eval` 無し、`rm -rf` は固定相対パス `build/fmtcheck` ✓
+- デストラクタ: どちらも raise せず、接続断（NULL 結果）でも `PQclear` 対象が無いことを判定して安全に抜ける ✓
+
+## 4. 堅牢性の格子（round 1。ライブラリなので「入力経路 = API 引数、出力経路 = 戻り値 / stderr、例外クラス = `PgErrorKind`」に読み替えた）
+
+入力経路 × 状態のうちテストが固定しているもの: sql（空 / NUL / 複数文 / aborted tx 内）、params（NULL / 空リスト / NUL / 境界値 / 64 KiB / 個数不一致 / 型不一致 / 12 本混在）、
+savepoint 名（空 / 引用符 / 大文字 / 存在しない / release 後）、prepared（構文エラー / 複数文 / 手動 DEALLOCATE 後 / ROLLBACK 後 / 接続断後）、tx（二重終了 / 終了後の全操作 / ネスト / INERROR からの commit / 接続断中の破棄）。
+
+テストに無いセルを `scratch/turn-010-grid/probe.mojo`（PG17）で一括プローブした。**全セルが `PgError` で返り、トレースバック無し**:
+
+| セル | 結果 |
 |---|---|
-| §5.1 両サーバーで全テスト PASS | ✓ |
-| §5.1 警告ゼロ、`fn` 不使用 | ✓ |
-| §5.1 誤パスワードで `CONNECTION`、メッセージにパスワード無し | ✓（`test_connection.mojo:384-403`。親プローブでも 9 経路の失敗メッセージに `password=` / `WRONG` は出ない） |
-| §5.1 受け入れクエリ 6 列の型取得 | ✓（`test_result.mojo` acceptance 2 本） |
-| §5.1 構文エラーで `sqlstate == "42601"` | ✓ |
-| §5.1 10,000 回ループでメモリが単調増加しない | テストは PASS するが **テストがリークを検出できない**（下記 指摘 1）。基準の達成はこのラウンドでは未証明 |
-| §5.1b docstring / fmt / `examples/basic.mojo` / パッケージビルド | ✓（`.mojopkg` は 1.1.0 で不可能なため `.mojoc`。決めた事項 8 の文書化済み逸脱） |
-| §5.2 どの入力でもクラッシュせず `PgError` | ✓（下記 堅牢性プローブ。トレースバック 0 件） |
-| §5.2 `PQclear` / `PQfinish` / `PQfreemem` が両経路で呼ばれ二重解放しない | コードレビューで全経路を静的に確認 ✓。動的な証拠（リークテスト）は指摘 1 のとおり無効 |
-| §5.2 解放済みポインタへのアクセスが型上起こらない | ✓（`Row[origin]`、scratch の負のコンパイル確認 turn 6 / 7） |
+| savepoint / rollback_to / release の名前に NUL | `TypeMismatch` / `embedded NUL byte in s`、tx は INTRANS のまま、`commit()` が通る |
+| `prepare("SELECT $1::int4", [23, 25, 20])`（ヒントがプレースホルダより多い） | サーバーが 3 パラメータとして受理（`param_count() == 3`）、`execute([Int32(7)])` は USAGE（`takes 3 parameters, got 1`）。「describe の結果が正」の docstring どおり |
+| `prepare("SELECT $1", [999999])`（存在しない OID） | `Server` / `XX000` / `cache lookup failed for type 999999`、次の `prepare` は通る（番号は消費され `pq_stmt_3`） |
+| INERROR のまま tx を破棄 | `__deinit__` の ROLLBACK が成功し IDLE、ハンドラは鳴らない |
+| 0 パラメータの prepared（`SELECT 42`） | `param_count() == 0`、`execute(List[Param]())` が 42、`execute([Int32(1)])` は USAGE、`param_type_oid(0)` は `out of range (0..-1)` |
+| tx 生存中に `conn.execute("COMMIT")` を手で送ってから破棄 | COMMIT は効いている（行は残る）。`__deinit__` の ROLLBACK に対しサーバーが `WARNING:  there is no transaction in progress` を stderr に出す（libpq の notice processor）。データ損失無し |
+| 200 パラメータ（`$1 + ... + $200`、Int32） | 20100（stride のずれ無し） |
+| 70 文字の savepoint 名 | サーバーが 63 文字に切り詰める `NOTICE:` を 3 回出すが savepoint / rollback_to / release は全部通る |
+| tx 内の空 SQL | `Server` / `empty query`、tx は INTRANS のまま（abort しない）、`commit()` が通る |
+| `Optional[String]` に NUL | `Usage` / `embedded NUL byte in parameter $2` |
+| tx 生存中に `pg_terminate_backend` → `tx.commit()` | `Connection` / `no connection to the server`、2 回目の `commit()` は `Usage`（終了済み）、破棄・接続破棄とも静か |
 
-### 観点ごとの確認
+## 5. 文書の主張の照合
 
-**コードレビュー（サブエージェント + 親）**
-- FFI 境界: `String` → `const char*` の 6 箇所すべてで所有 `String` を呼び出し後まで生存（`_ = x^`）、`char*` → `String` の全箇所で `PQclear` / `PQfreemem` / `PQfinish` の前にコピー。`open(Dict)` のキー/値配列は NUL 終端、`as_c_string_span()` の再確保後にポインタ採取。バグなし
-- 50 本のシグネチャ: `libpq-fe.h` のプロトタイプ・行番号・PLAN 表の 3 者と全一致。`OptCStr` は PLAN の 6 関数に限定、`Oid` → `UInt32`、`size_t` → `c_size_t`
-- 範囲検査: 行 / 列 / セルすべて libpq 呼び出し前に拒否。`RowIter` は 0..nrows-1 を正確に 1 回ずつ
-- `decode_text`: 境界・OID 完全一致・bytea hex の検査はすべて PLAN どおり。`Float32(atof())` の二重丸めはレビュー側の 2,000 万件プローブで不一致 0
+- 追従先チェックリスト全行を素のシェルで再実行: libpq 53 / 53、`fifty` 0、`five failure` 系 0、`PQexec(` 4 行（connection ×2 / prepared / transaction）、`PQfreemem(` 2 行、
+  `__def test_` leak 12 / params 31 / prepared 13 / transaction 13 / savepoint 7 / encode 14、`fn` 0、`__del__` 0、`examples/params.mojo` が `pixi.toml:18` と `final_check.sh:120` の両方、`PQ_TEST_LEAK_SERVERS` 5 行 ✓
+- `grep -n '50 本' .gsd-lite/PLAN.md .gsd-lite/PROGRESS.md` の 2 件はチェックリスト自身の行と turn 3 の履歴で、PLAN T7「PLAN 訂正（turn 9）」の説明どおり陳腐化した主張ではない ✓
+- PLAN 冒頭の所要の目安「80〜115 s」に対し今回の `check` は 84 s で範囲内 ✓
+- PROGRESS turn 9 の「`pixi run test` は回していない」は正直な記述で、verify が今回回して両サーバー PASS を確認した ✓
+- PLAN 訂正 4 件（turn 3 fmt no-op / turn 4 シフト / turn 6 `[1, 2, "x"]` → `Int32` / turn 7 `_prepare_parts`）は要件・決定に反しない範囲で、理由が実測つきで書かれている ✓
+- 冒頭要約と本文の不一致: 無し
 
-**セキュリティ**
-- 秘密情報: ハードコードはテスト既定（`pq/pq@127.0.0.1`）のみ。`src/pq` の全 `raise PgError` を追跡し、conninfo / params / password を埋め込む経路は無い
-- インジェクション: `execute` は補間しない。`escape_*` は libpq に委譲。埋め込み NUL でも libpq 自身が NUL で止まるので出力は常に閉じた引用（未終端リテラルにはならない）
-- ロード: `PQ_MOJO_LIBPQ` は環境と同じ信頼レベル（setuid 文脈でのみ問題）。`RTLD.GLOBAL` は stdlib 既定で、追加したのは `NODELETE` のみ。バージョンゲートの前に呼ぶ libpq 関数は `PQlibVersion` だけ ✓
-- **指摘**: `tests/docker-compose.yml` が `0.0.0.0:54317/54314` で superuser を LAN に公開（Phase 0 からの既存ファイルだが 1 行で直る → F3）
+## 6. 残留リスク（差し戻さない。次マイルストーンの「持ち越し整理」候補として番号付き）
 
-**堅牢性プローブ（round 1 の格子。scratch `turn-011-probe-robust.mojo` / `turn-011-probe-badlib.mojo`）**
+文書・テスト門番（Phase 1 の残留 docstring 3 件と同じ扱い。まとめて 1 コミットで直せる規模）:
 
-| 入力経路 | 試した値 | 結果 |
-|---|---|---|
-| conninfo String | 空 / 空白のみ / 不明キー / 未終端引用 / `connect_timeout=abc` / NUL 埋め込み / 誤パスワード / URI / 100 KB の `application_name` | 全部 `CONNECTION`（URI と NUL は接続成功）。秘密情報の漏れ 0 |
-| Dict params | 空 Dict / 空キー / 空白入りキー / 値に NUL / 値に `=` 空白 引用符 | 全部 `CONNECTION` か成功。漏れ 0 |
-| SQL | コメントのみ / `;;;` / `COPY TO STDOUT` / `COPY FROM STDIN` / 1/0 / NOTICE / WARNING / NUL 埋め込み / 1 MiB リテラル / 10 列 / `RAISE ... USING DETAIL, HINT` / 中断トランザクション | `empty query` / `unexpected result status 3, 4`（次の `execute` で回復）/ 22012 / P0001。クラッシュ 0 |
-| 列名 | 空 / NUL 埋め込み / `"A"` | `TYPE_MISMATCH` か index（NUL は NUL までの名前で一致 = 無言の切り詰め） |
-| escape | 空 / NUL / NUL のみ / マルチバイト+引用符+バックスラッシュ / 1 MiB | 全部成功（` E'日本語''x\\y'` 等）。NUL は NUL までで切り詰め |
-| `PQ_MOJO_LIBPQ` | `libc.so.6`（ELF だが libpq でない）/ `/etc/hostname`（非 ELF）/ ディレクトリ | 全部 `LibpqLoad`（`missing symbol PQconnectdb` / `file too short` / `Is a directory`）。2 回目も同じ kind |
-| 出力経路（`examples/basic.mojo`） | stdout を `/dev/full` / 先に閉じたパイプ | exit 0（書き込み失敗は無視される。例であり要件外、記録のみ） |
+1. **`src/pq/prepared.mojo:130-131` の docstring が実態より広い**: `PreparedStatement.execute` は「`Connection.execute(sql, params)` と同じ型表」と言うが、`PQexecPrepared` は `paramTypes` を送らないので
+   `prepare("SELECT $1::int4")` に `[1]`（`Int` = int8 8 byte）を渡すと `22P03`（`conn.execute` 側は assignment cast で成功する非対称。PLAN turn 6 訂正）。
+   `src/pq/__init__.mojo` §Parameters の「the OID sent in `paramTypes`」も prepared 経路には当たらない。`grep -rn 22P03 src/` が 0 件なので、
+   「prepared では `PQprepare` 時点の型と同じ幅の値（`$1::int4` なら `Int32`）を渡す」を両方に 1 文ずつ足す
+2. **`tests/final_check.sh` 6/6 段が `implicit ROLLBACK failed` を数えていない**: 既定ハンドラの出力は `warning:` / `WARNING:` のどちらにも一致しないので、暗黙 ROLLBACK が失敗し始めても `check` は PASS する。
+   PLAN T5 (b)-12 / T7 (d) は手動 `grep -c` で 0 を確認する運用。grep パターンに `|implicit ROLLBACK failed` を足せば機械化できる（見出しにこの文字列を入れない）
+3. **`tests/test_prepared.mojo:543-544` の `message.find("1") >= 0` は落ちない断定**: 個数不一致メッセージには `pq_stmt_1` も含まれるので「got 1」の確認になっていない（PLAN T4 (b)-2 の文面どおりではある）。
+   `"takes 3 parameters, got 1"` の部分一致にする。verify のプローブでは `takes 0 parameters, got 1` / `takes 3 parameters, got 1` を実測しており挙動自体は正しい
+4. **`Connection.__init__` の docstring に `_stmt_counter` / `_rollback_failure_handler` が無い**（PLAN 決めた事項 23）。フィールド docstring はあるので 3/6 段は通る
+5. **`param_type_oid(0)` の 0 パラメータ文での文言 `out of range (0..-1)`**（cosmetic）
+6. **savepoint 名の NUL メッセージが `embedded NUL byte in s`**（`escape_identifier` の引数名 `s`）。`Transaction` の docstring は kind だけを約束しているので矛盾ではないが、Phase 1 の `name` 問題と同型。
+   docstring に「message は `escape_identifier` の引数名 `s` を指す」と書くか、savepoint 側で `_reject_nul(name, "name")` を先に呼ぶ
 
-例外クラス: 公開 API は `raises PgError` の型付きなので他の例外は型上漏れない。`atol` / `atof` / `affected_rows` は内部で捕捉済み
+仕様の読み方（REQ / DECISIONS に 1 行足すか、docstring で明示する）:
 
-**文書の主張**: PLAN / PROGRESS の件数（50 本、105 × 2、`PQfreemem` 2、tolerance 256 / 16）は現状と一致。docstring の過大な主張は F2 / F3 に列挙（「Any byte sequence」「standard_conforming_strings に従う」「conninfo を echo しない」、`test_leak.mojo` の「100 バイト/回でも検出」「CI runs Linux」、`test_connection.mojo:424` の古いコメント）
+7. **REQ §4.4「接続断なら `kind=Connection`」より実装は狭い**: `Transaction.__deinit__` の分類は `_take_result` と同じ Phase 1 規則（sqlstate 付き FATAL は `SERVER`、次の呼び出しで `CONNECTION`）なので、
+   `transaction()` 直後に外部から backend を kill され、間に `execute` が無いまま破棄されると ROLLBACK 自体が `57P01` を受けてハンドラには `SERVER`（sqlstate `57P01`）が渡る。
+   REQ §5.1a-1 の経路（同じ接続で `pg_terminate_backend` → `execute` が CONNECTION で raise → 破棄）は `CONNECTION` でテスト済み。`__deinit__` の docstring はこの規則を明記している
+8. **tx 生存中に `conn.execute("COMMIT")` / `"ROLLBACK"` を手で送る混用**: `Transaction` は自分の `_done` を知らないので破棄時の ROLLBACK がサーバー WARNING（stderr）になる。データは手動 COMMIT の結果どおりで損失は無い。
+   `Transaction` docstring の「conn.execute との混用」節に 1 文足す
 
-**期待値の変更**: impl が PROGRESS に書いたとおり、既存テストの期待値変更は turn 4 の `test_smoke.mojo` 2 本（ローダー経由化）のみで妥当
+極端入力・設計上の受容（Phase 3 以降の判断材料）:
 
-### 指摘（差し戻し理由）
+9. **`c_int(len(_data))` の範囲検査が無い**（`params.mojo:455`）: 2 GiB 以上の bytea パラメータで `paramLengths[i]` が負に折り返し、libpq 側で範囲外読みになり得る。
+   サーバーのフィールド上限は 1 GiB − 1 なので成功し得ない入力だが、`PgError` ではなくクラッシュになる。`len > 0x3FFFFFFF` で USAGE を投げる 1 行が候補（テストで 2 GiB を確保するのは非現実的なので単体で検査できる形に）
+10. **`_next_stmt_name` の `MutUntrackedOrigin` 書き込み**（PLAN 決めた事項 9 が受容）と、**`Transaction` / `PreparedStatement` 生存中でも `conn` への `mut self` 呼び出し（`set_rollback_failure_handler`）が Mojo 1.1.0 では通る**こと
+    （`test_transaction.mojo:1090` が実例）。origin は `conn` の破棄・移動を防いでおり、`Connection` に `close()` が無い現状では生存ポインタの危険は無い。
+    将来 `close(mut self)` を足すときに `Transaction` 生存中の呼び出しを型で防げないことを設計メモに残す。`PreparedStatement.__init__` が公開で任意の `name` を取れる点も同類（自分の接続への自己注入のみで権限境界は無い）
 
-1. **リークテストが偽陰性**（F1）。`src/pq` のコピーから `Result.__deinit__` の `PQclear` を消して `tests/test_leak.mojo` を回しても **8 本 PASS**、本体ループのサンプルは `[37765, 37767 ×8]` で完全に平坦（warm cache、実運用と同じ baseline）。
-   `mojo run` の同一プロセス内コンパイラが残す解放済みヒープ（≈100 MB 超、常駐）が 10,000 個の `PGresult` を吸収する。REQ §5.1 の「メモリが単調増加しない」の証拠としてこのテストは機能していない。
-   impl の turn 9 申し送り「陽性側は未実証」をそのまま検証した結果。この指摘は「テストが完了基準を実際に検証しているか」の観点で、要件追加ではない
-2. **接続断の 1 回目が `SERVER`**（F2a）。REQ §4.3 は接続断を `CONNECTION` に分類する意図だが、libpq は非 NULL の `PGRES_FATAL_ERROR`（sqlstate 空）を返すので 1 回目は `SERVER`。`PgErrorKind.CONNECTION` の docstring「connection is no longer usable」と矛盾する。turn 6 / 8 の申し送りの判断: **CONNECTION に寄せる**（決めた事項 6 に 1 行追加。1 行の規則で E8 / E9 を壊さない）
-3. **埋め込み NUL の無言の切り詰め**（F2b）。8 経路すべてで NUL 以降が黙って捨てられる（`execute("SELECT 1\0; SELECT 2")` は `SELECT 1` だけ実行、password の値に NUL があれば以降が消える）。クラッシュも注入も無いが、アプリが検証済みの値が切り詰めて保存される = データ整合性の問題なので差し戻し。docstring「Any byte sequence is accepted」の訂正を含む
-4. 軽微（F3 に集約）: docstring 3 件、古いコメント 1 件、`test_libpq_is_a_single_handle` が自明に通る、REQ §4.4 の `detail` / `hint` / `context` を assert するテストが無い、`get[T](name)` の不存在列名 / `get_optional` 列名版のテストが無い、docker-compose の公開先
+## 7. マージ
 
-### 残留リスク（合格扱い。差し戻さない）
-
-- `OID_TEXT` / `OID_VARCHAR` / `OID_BPCHAR` / `OID_NAME` は宣言のみ未使用（`String` は任意 OID。D10 どおり）。消すか Phase 3 で使う
-- `PQ_MOJO_LIBPQ` は設定時その 1 本のみでフォールバックしない（REQ §4.1 の「→」の読みと違うが T2 契約 + `test_loader_fail` が依存。loader の docstring に明記済み）。REQ の文言は次の discuss で揃える
-- バージョンゲート `< 140000` は runtime 未到達（このマシンに古い libpq が無い）
-- `RTLD.GLOBAL`（stdlib 既定）による libssl 等のシンボル干渉は Python 相互運用時の互換リスク。`RTLD.LOCAL` でも動くはず（全シンボルを `dlsym` で引くため）
-- `String(unsafe_from_utf8_ptr=)` は検証しないので非 UTF-8 の `client_encoding` では不正な `String` になる（Phase 1 は UTF-8 前提。未記載）
-- `Connection.__init__` / `Result.__init__` / `Row.__init__` が公開（NULL は安全、ゴミアドレスは UB。`_ffi` が実質 private なので実害は低い）
-- `CONNECTION` 系メッセージは libpq の末尾 `\n` を残し、`SERVER` 系は残さない（表記の不統一）
-- +83 ページの一段の出所は未特定（レビューの推測: libpq / OpenSSL のコードページの初回タッチ。RSS はファイル裏付きページも含む）
-- `tests/test_ffi.mojo` と `loader.mojo` のパス決定ロジックが二重（turn 4 の申し送り。意図的）
-- `examples/basic.mojo` は stdout 書き込み失敗を無視する（例であり要件外）
-- `.mojopkg` → `.mojoc`（1.1.0 の制約。決めた事項 8）
-
-## round 2（turn 15, 2026-10-15）— 判定: **合格**（指摘 0 件。main へ `--no-ff` マージ）
-
-- 対象: `git diff main...HEAD`（30 ファイル, +6,355 / −55、コード側は `src/pq` 9 / `tests/` 8 本 + 2 スクリプト + compose / `examples/` 2 / `pixi.toml`）。
-  重点は round 1 の差し戻し F1〜F3 の差分（`a0ec2c7..HEAD`: `src/pq` 3 ファイル +144 / −30、`tests/` 5 ファイル + compose）
-- 実行エンジン: Claude Code（verify = claude-fable-5-1）。並列レビュー: F1〜F3 差分のコードレビューを読み取り専用サブエージェント 1 本に独立させ、親は機械判定・回帰プローブ・文書照合
-- round 1 の申し送りどおり「round 1 の格子の再確認 + F1〜F3 の回帰」だけを行い、新しいクラスの探索はしていない
-
-### 機械判定（クリーンな木、コミット `e7cabe1` から）
-
-| 検査 | 結果 |
-|---|---|
-| `pixi run db-up` → `pixi run check` | **6/6 PASS**（23:01:15 → 23:02:51、96 s） |
-| 5/6 テスト | **228 PASS / 0 FAIL**（114 × PG17 / PG14。connection 28 / decode_text 49 / errors 3 / ffi 7 / leak 8 / loader_fail 1 / result 14 / smoke 4。`test_leak` 42 s / 43 s） |
-| 3/6 docstring 診断（`_ffi` と合成 dunder 除外） | 0 件 |
-| 1/6 fmt | 差分なし（20 files unchanged、`git status` clean） |
-| 6/6 `warning:` | 0 件 |
-| 追従先チェックリスト 7 行 | 全一致（round 1 と同値）: バインディング 50 本（`functions.mojo` 50 / `test_ffi.mojo` 50 / PLAN「50 本」5 箇所）、`Int16` 4 ファイル（3/1/1/4）、`TYPE_MISMATCH` 5（≥ 2）、`examples/` `pixi.toml:17` + `final_check.sh:87`、`get_function` 9 ファイル 0、`PQfreemem` `connection.mojo:350` / `:392` の各 1 回、`fn ` 0 件 |
-| リークサンプル（check ログ） | PG17 本体 `[37964, 37966 ×8]`、PG14 `[37851, 37853, 37936 ×7]`（+83 の一段 1 回）。異常系 3 ループは両サーバーで完全に平坦 |
-
-### F1〜F3 の回帰（期待結果表 E1〜E16）
-
-| # | 結果 | 根拠 |
-|---|---|---|
-| E1〜E4 | ✓ **4 本とも自分のループだけ FAIL**、他 3 ループ PASS | 親が `scratch/turn-015-positive-control.sh`（F2 / F3 で動いた行番号を取り直し: `result.mojo:99` / `connection.mojo:129` / `:350` / `:284`）で `src/pq` のコピーから free を 1 つ消して再実測。E1 `[115401, 131411, 147420, 163428, 179500, 196326]` → 6 サンプル目で E6 の早期 fail（grew 80,925 > 65,536）。E2 `[115681, 132074, 148533, 164931]`。E3 `[90418, 93391, 96592, 99794]`。E4 `[97142, 103548, 109954, 116360]`。ログは `scratch/turn-015-positive-E*.log` |
-| E5 | ✓ | 無改変で check 1 回（本ターン）+ impl turn 12 の 3 回連続 = 両サーバー 8/8 PASS ×4 |
-| E6 | ✓ | E1 で発火を再確認（上記）。E2〜E4 はリーク総量が 256 MiB に届かないので tolerance 側で FAIL する（設計どおり。impl turn 12 の実測と一致） |
-| E7 / E8 / E9 | ✓ | `test_terminated_backend_then_connection_error`（1 回目 CONNECTION / sqlstate 空 / message）、`test_syntax_error_fills_diagnostics`（SERVER 42601）、`test_copy_out_stays_a_server_error`（SERVER / `unexpected result status 3` / **`status() == CONNECTION_OK` も assert** = AND の両腕をテストが押さえる）。実装 `connection.mojo:292-294` は `PQclear` の後、`sqlstate == "" and PQstatus == CONNECTION_BAD` の両条件 |
-| E10 | ✓ 8 経路 | `_reject_nul` の呼び出しは `open(String)` :155 / `open(Dict)` :188-189（`libpq_ptr()` より前）/ `execute` :245 / `escape_literal` :332 / `escape_identifier` :374 / `column_index` `result.mojo:203`（`Row.get` / `get_optional` の名前版はここに委譲）。テスト 6 本（9 アサート経路）がすべて `TYPE_MISMATCH` / 厳密一致の message / NUL 以降のマーカー不在 / `open` 2 本は password 不在 / `execute`・escape・列名は直後の正常呼び出しで状態不変を assert。`_reject_nul` は `as_bytes()` 全長を走査（NUL で止まらない）し値をメッセージに入れない |
-| E11 | ✓ | 既存テストの期待値変更は impl が PROGRESS に列挙した 2 箇所のみ（turn 13 の E7、turn 14 の E14）で、どちらも表の要求そのもの。他 210 本は無変更で PASS |
-| E12 / E13 / E14 | ✓ | `test_raise_exception_fills_detail_hint_and_context`（6 フィールド）/ `test_name_lookup_in_get_and_get_optional`（TYPE_MISMATCH ×2 + Some("s") + None）/ `test_libpq_is_a_single_handle` が `Int(libpq_ptr())` のアドレス一致 |
-| E15 | ✓ | `docker ps`: `tests-pg14-1 127.0.0.1:54314->5432/tcp` / `tests-pg17-1 127.0.0.1:54317->5432/tcp` のみ |
-| E16 | ✓ | 上の機械判定表 |
-
-### round 1 の堅牢性格子の再確認（scratch `turn-011-probe-robust.mojo` / `turn-011-probe-badlib.mojo` を無改変で再実行）
-
-round 1 と同じ結果で、NUL を含む 7 ケース（conninfo / Dict 値 / SQL / 列名 / escape ×3）だけが「無言の切り詰め」→ **`TypeMismatch` `embedded NUL byte in <引数名>`** に変わった。それ以外（空 / 空白 / 不明キー / 未終端引用 / `connect_timeout=abc` / 誤パスワード / URI / 100 KB `application_name` / 空 Dict / 空キー / 空白入りキー / `=` 空白 引用符入り値 / コメントのみ / `COPY TO STDOUT` → 次の `SELECT 1` が成功 / `COPY FROM STDIN`（status 4）→ 次の `SELECT 1` が成功 / 1/0 / NOTICE / WARNING / `;;;` / 中断トランザクション / 1 MiB リテラル / 10 列 / `RAISE ... USING DETAIL, HINT` / 空列名 / `"A"` / 空 escape / マルチバイト / 1 MiB escape）は round 1 と同一。秘密情報の漏れ 0、トレースバック 0。`PQ_MOJO_LIBPQ` に libc / 非 ELF を与えた場合も `LibpqLoad` で 2 回目も同じ kind
-
-### 受け入れ基準の達成状況（REQ §5。round 1 で未証明だった行だけ更新）
-
-| 項目 | 状況 |
-|---|---|
-| §5.1 10,000 回ループでメモリが単調増加しない | ✓ **証明済み**。無改変で平坦（上表）かつ、4 つの free をそれぞれ消すとそのループだけが FAIL する（E1〜E4）。テストが基準を実際に検証している |
-| §5.2 `PQclear` / `PQfinish` / `PQfreemem` が両経路で呼ばれ二重解放しない | ✓ 静的（round 1）+ 動的（E1〜E4 の陽性対照）の両方 |
-| §5.2 どの入力でも `PgError`（埋め込み NUL を含む） | ✓ NUL は libpq に渡る前に拒否され、状態は変わらない |
-| その他の行 | round 1 のまま ✓ |
-
-### 文書の主張
-
-- PLAN: T7 の所要「43〜47 s/サーバー」は実測 42 / 43 s で一致。決めた事項 6 の表に F2 の行、決めた事項 12 に F1 の追記あり。T4 の実装メモの message は F3 (c) に追従済み（`libpq returned NULL`）。「50 本」5 箇所は実物と一致
-- PROGRESS: turn 12〜14 の件数（210 → 224 → 228、114/サーバー）と期待値変更の列挙（2 箇所）は diff と一致
-- 差し戻した docstring 6 件（round 1 指摘 4）はすべて訂正済み: `standard_conforming_strings` は「参照されない」に、「Any byte sequence」は「NUL を除く」に、「CI runs Linux」削除、`T5` コメント削除、conninfo echo の注意書き、COPY 未対応の段落
-- `tests/test_leak.mojo` の「100 B/回でも検出」は実測どおりの説明（プールが吸収する / payload で押し切る）に置き換わっている
-
-### 残留リスク（合格扱い。差し戻さない。round 1 の一覧に追加する分）
-
-- **`execute` docstring の `CONNECTION` の説明がやや広い**（`connection.mojo:238-240`「the connection was lost while running `sql`」）。規則は「sqlstate 空 **かつ** `CONNECTION_BAD`」なので、sqlstate 付きの FATAL（例: `idle_session_timeout` の 57P05 が届いた場合）が先に来る切断は `SERVER` のまま次の `execute` で `CONNECTION` になる。決めた事項 6 の表は正確。docstring に「sqlstate を伴わない切断」と 1 語足せば閉じる
-- `Row.get[T](name)` / `get_optional[T](name)` の docstring は「`col` contains a NUL byte」と書くが、message は委譲先の `column_index` の `"embedded NUL byte in name"`（E10 の `<引数名>` と引数名が 1 段ずれる）。テストはこの `name` を assert しているので挙動は固定
-- `tests/test_leak.mojo` の `PAYLOAD_BYTES` docstring の「first sample is taken before `ABORT_PAGES` is reached」は不正確（`ABORT_PAGES` は `samples[0]` からの増分なので初回サンプル前の成長は数えない）。判定には影響しない
-- `ABORT_PAGES` の早期 fail が実際に発火するのは本体ループだけ（異常系 3 ループは総量が 256 MiB 未満）。impl turn 12 の記録どおりで、異常系は tolerance 側で確実に FAIL する
-- `COPY ... FROM STDIN`（status 4）と「次の `execute` で回復」はテストでなく verify のプローブで確認（round 1 / round 2 とも `after_copy_in` の `SELECT 1` が成功）。`test_copy_out_stays_a_server_error` は TO STDOUT 側のみ
-- `_reject_nul` が `errors.mojo` に同居（impl turn 13 の提案 (2)）。`escape_*` は `PQescapeLiteral` に長さを渡すので NUL を通せる可能性があるが、E10 どおり 8 経路一律で拒否（提案 (1)）
-- `tests/docker-compose.yml` の superuser `pq/pq` は 127.0.0.1 バインドで LAN からは届かないが、同一ホストの他ユーザーからは届く（テスト専用）
-- round 1 の残留リスク一覧（`OID_TEXT` 等の未使用定数 / `PQ_MOJO_LIBPQ` 設定時のフォールバック無し / バージョンゲート未到達 / `RTLD.GLOBAL` / 非 UTF-8 `client_encoding` / `__init__` の公開 / `\n` の不統一 / +83 ページの出所 / `test_ffi.mojo` と `loader.mojo` のパス決定の二重 / `examples/basic.mojo` の stdout）はそのまま持ち越し
-
-### マージ
-
-- リモート無し（`git remote get-url origin` → `No such remote 'origin'`）→ (a) `main` へ `git merge --no-ff gsd-lite/phase1-sync-text-basic`。ブランチは残す。`reflect: true` なので次は `/gsd-lite-reflect`
+- リモート無し（`git remote get-url origin` → `No such remote 'origin'`）→ (a) ローカルで `main` に `--no-ff` マージ。ブランチ `gsd-lite/phase2-params-prepared-tx` は残す
+- `reflect: true` なので `phase: "reflect"` / `next_command: "/gsd-lite-reflect"` に遷移

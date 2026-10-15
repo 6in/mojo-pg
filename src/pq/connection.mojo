@@ -24,7 +24,9 @@ from pq._ffi.types import (
     CONNECTION_OK,
     CStr,
     CStrArray,
+    IntPtr,
     MutRawPtr,
+    OidPtr,
     PG_DIAG_CONTEXT,
     PG_DIAG_MESSAGE_DETAIL,
     PG_DIAG_MESSAGE_HINT,
@@ -38,9 +40,13 @@ from pq._ffi.types import (
     PGRES_TUPLES_OK,
     PGconnPtr,
     PGresultPtr,
+    PQTRANS_IDLE,
 )
 from pq.errors import PgError, PgErrorKind, _reject_nul
+from pq.params import Param, _ParamBuffers
+from pq.prepared import PreparedStatement
 from pq.result import Result
+from pq.transaction import Transaction, _default_rollback_failure_handler
 
 
 def _error_field(
@@ -79,6 +85,21 @@ struct Connection(Movable):
     """Borrowed process-wide libpq table, retained so `__deinit__` cannot raise.
     """
 
+    var _stmt_counter: List[Int]
+    """One-element cell holding the last prepared-statement number issued.
+
+    A `List` rather than a plain `Int` because `prepare` only borrows the
+    connection immutably; see `_next_stmt_name`.
+    """
+
+    var _rollback_failure_handler: def(PgError) thin
+    """Handler every new `Transaction` copies for a failed implicit `ROLLBACK`.
+
+    Replaceable with `set_rollback_failure_handler`; a `Transaction` takes its
+    own copy when `transaction()` runs, so a later replacement never changes
+    an existing one.
+    """
+
     def __init__(
         out self,
         conn: PGconnPtr,
@@ -92,6 +113,10 @@ struct Connection(Movable):
         """
         self._conn = conn
         self._pq = pq
+        # `_stmt_counter` starts at 0, so the first `prepare` issues
+        # `pq_stmt_1`. Numbering is per connection.
+        self._stmt_counter = [0]
+        self._rollback_failure_handler = _default_rollback_failure_handler
 
     def __deinit__(deinit self):
         """Close the connection with `PQfinish` unless it is already NULL."""
@@ -228,6 +253,10 @@ struct Connection(Movable):
         and libpq brings the connection back to a usable state on the next
         `execute`.
 
+        The result is adopted by `_take_result`, which `execute(sql, params)`,
+        `PreparedStatement.execute` and each `Transaction` command also go
+        through, so they all classify failures identically.
+
         Args:
             sql: One or more SQL statements.
 
@@ -237,10 +266,14 @@ struct Connection(Movable):
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
                 byte, `PgErrorKind.CONNECTION` when libpq returns no result at
-                all or the connection was lost while running `sql`, or
-                `PgErrorKind.SERVER` when the server reports a diagnostic.
-                Server errors carry `sqlstate`, `severity`, `detail`, `hint`,
-                `position` and `context` when libpq supplies them.
+                all, or when the connection was lost while running `sql` and
+                libpq reported it without an SQLSTATE, or
+                `PgErrorKind.SERVER` when the server reports a diagnostic. (A
+                disconnect the server announced as a FATAL *with* an SQLSTATE
+                is therefore still `SERVER` for that statement, and the next
+                `execute` is the one that raises `CONNECTION`.) Server errors
+                carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
+                `context` when libpq supplies them.
         """
         _reject_nul(sql, "sql")
         var res = self._pq[].PQexec(
@@ -248,6 +281,290 @@ struct Connection(Movable):
             CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
         )
         _ = sql^
+        return self._take_result(res)
+
+    def execute(
+        self, var sql: String, params: List[Param]
+    ) raises PgError -> Result:
+        """Run one parameterised statement with `PQexecParams`.
+
+        Placeholders are `$1` through `$n`, numbered from 1 rather than
+        written as `?`, so `params[0]` binds `$1`. The call always goes
+        through `PQexecParams`, including when `params` is empty: it never
+        falls back to `PQexec`.
+
+        Only a single statement is allowed, because `PQexecParams` builds an
+        unnamed prepared statement: `SELECT 1; SELECT 2` is rejected with
+        SQLSTATE `42601` (`cannot insert multiple commands into a prepared
+        statement`). A single trailing semicolon -- `SELECT 1;` -- succeeds.
+
+        Each `Param` carries its own type OID and wire format:
+
+        | Mojo type | type OID | format |
+        |---|---|---|
+        | `Bool` | 16 | binary, 1 byte |
+        | `Int16` | 21 | binary, 2 byte big-endian |
+        | `Int32` | 23 | binary, 4 byte big-endian |
+        | `Int64` / `Int` | 20 | binary, 8 byte big-endian |
+        | `Float32` | 700 | binary, 4 byte IEEE 754 |
+        | `Float64` | 701 | binary, 8 byte IEEE 754 |
+        | `String` / `StringLiteral` | **0 (unspecified)** | text |
+        | `List[UInt8]` | 17 | binary, the bytes as-is |
+        | `Param.null()` / `Param.null(oid)` | 0 / the given OID | NULL |
+
+        A `String` goes out with OID 0 -- type unspecified -- so the server
+        infers it from context: in `SELECT $1` it becomes `text` (OID 25),
+        while `SELECT $1 + 1` infers `int4`, so `"7"` arrives as 8. An `Int`
+        is sent as `int8` (OID 20), yet PostgreSQL's assignment cast still
+        lets `Int(5)` reach an `int4` column on `INSERT`; a value outside
+        that column's range, such as `Int(3000000000)`, is `22003`.
+
+        The number of parameters is left to the server rather than counted
+        client-side, so passing fewer than the placeholders need is SQLSTATE
+        `08P01`, and the connection remains usable afterwards.
+
+        Results always come back in text form; a binary `result_format` is
+        Phase 3.
+
+        The result is adopted by `_take_result`, the same path `execute(sql)`
+        takes, so both classify failures identically.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            params: The values to bind, `params[0]` binding `$1`.
+
+        Returns:
+            The `Result` of the statement, owning the `PGresult*`.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte, `PgErrorKind.USAGE` when the value of a `String`
+                parameter contains a NUL byte (`embedded NUL byte in
+                parameter $N`; nothing is sent to the server), and
+                `PgErrorKind.CONNECTION` or `PgErrorKind.SERVER` under
+                exactly the classification `_take_result` applies --
+                `CONNECTION` when libpq returns no result at all or the
+                connection was lost and libpq reported it without an
+                SQLSTATE, `SERVER` when the server reports a diagnostic,
+                carrying `sqlstate`, `severity`, `detail`, `hint`,
+                `position` and `context` when libpq supplies them.
+        """
+        _reject_nul(sql, "sql")
+        var buffers = _ParamBuffers(params)
+        var res = self._pq[].PQexecParams(
+            self._conn,
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+            c_int(buffers.count()),
+            buffers.types_ptr(),
+            buffers.values_ptr(),
+            buffers.lengths_ptr(),
+            buffers.formats_ptr(),
+            c_int(0),
+        )
+        _ = buffers^
+        _ = sql^
+        return self._take_result(res)
+
+    def _next_stmt_name(self) -> String:
+        """Consume the next prepared-statement number and build its name.
+
+        Names are `pq_stmt_1`, `pq_stmt_2`, ... per connection. A number is
+        consumed even when the `prepare` that asked for it then fails: reusing
+        it would risk `42P05` (`prepared statement already exists`) against a
+        statement the failure left behind, and a gap in the sequence costs
+        nothing.
+
+        `prepare` borrows the connection immutably -- that is what lets a
+        `PreparedStatement` coexist with further `Connection.execute` calls --
+        so the counter cannot be a plain `var` field. It lives in a
+        one-element `List` instead, and the write goes through a pointer
+        rebound to `MutUntrackedOrigin`, the same escape hatch
+        `_ffi.loader.libpq_ptr` uses to hand out a mutable view of a
+        process-global. The heap cell is reached through `unsafe_ptr()`, so no
+        part of `self` is mutated and nothing else aliases that address.
+
+        Returns:
+            The name for the statement about to be prepared.
+        """
+        var cell = Pointer[Int, MutUntrackedOrigin](
+            unsafe_from_address=Int(self._stmt_counter.unsafe_ptr())
+        )
+        cell[] += 1
+        return String("pq_stmt_", cell[])
+
+    def prepare(
+        ref self,
+        var sql: String,
+        param_types: List[UInt32] = List[UInt32](),
+    ) raises PgError -> PreparedStatement[origin_of(self)]:
+        """Prepare `sql` on the server and return a handle to it.
+
+        Exactly one statement is allowed, with `$1`..`$n` placeholders, as for
+        `execute(sql, params)`. The statement is given a generated name --
+        `pq_stmt_1`, `pq_stmt_2`, ... per connection, readable through
+        `PreparedStatement.name()` -- so no caller-supplied identifier is ever
+        interpolated into SQL.
+
+        Two round trips happen here: `PQprepare`, then `PQdescribePrepared` to
+        read back the parameter count and the type OIDs the server resolved.
+        That is what makes `PreparedStatement.param_count()` and
+        `param_type_oid()` answerable without a further round trip, and what
+        lets `PreparedStatement.execute` reject a wrong parameter count
+        client-side.
+
+        `param_types` is a *hint* for types the server cannot infer, exactly
+        like the `paramTypes` argument of `PQprepare`: an entry of 0 leaves
+        that parameter to inference, and a shorter list than the statement has
+        placeholders leaves the rest to inference too. The authoritative types
+        are always the ones `PQdescribePrepared` reports, so
+        `param_type_oid()` can differ from what was passed in.
+
+        The returned statement borrows the connection immutably, so
+        `Connection.execute` stays callable while it is alive, but the
+        statement cannot outlive the connection -- that is a compile error.
+        Destroying it sends `DEALLOCATE`; see the `pq.prepared` module
+        docstring for when Mojo destroys it and why `PREPARE` surviving a
+        `ROLLBACK` is expected.
+
+        Nothing is left on the server when this raises: a failed `PQprepare`
+        created no statement, and a failed `PQdescribePrepared` is followed by
+        a best-effort `DEALLOCATE` whose own outcome is discarded before the
+        describe error is re-raised.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            param_types: Optional type OID hints, `param_types[0]` for `$1`.
+                An entry of 0 asks the server to infer that parameter.
+
+        Returns:
+            A `PreparedStatement` bound to this connection's origin.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte, or `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under
+                exactly the classification `_take_result` applies, for either
+                the prepare or the describe -- `42601` for a syntax error,
+                `42P18` when a parameter type cannot be determined, `42P05`
+                for a name collision. Server errors carry `sqlstate`,
+                `severity`, `detail`, `hint`, `position` and `context` when
+                libpq supplies them.
+        """
+        var types = List[UInt32]()
+        var name = self._prepare_parts(sql^, param_types, types)
+        return PreparedStatement[origin_of(self)](
+            Pointer(to=self), name^, types^
+        )
+
+    def _prepare_parts(
+        self,
+        var sql: String,
+        param_types: List[UInt32],
+        mut types: List[UInt32],
+    ) raises PgError -> String:
+        """Run the two round trips `prepare` needs and return its parts.
+
+        This is the whole of `prepare` except the final construction. It is
+        split out because the origin a `PreparedStatement` is parameterised on
+        has to be written by whoever holds the borrow: `Transaction.prepare`
+        has to hand out a statement on the transaction's own borrow of the
+        connection, and on Mojo 1.1.0 a `PreparedStatement` returned from
+        `prepare` called through `Pointer.__getitem__` comes back with a
+        nested origin that no signature can spell, so it cannot be converted.
+        Both callers therefore build the value themselves from these parts.
+
+        `self` is borrowed immutably -- the generated name comes from
+        `_next_stmt_name`'s heap cell, not from a mutable field -- so it is
+        callable through the immutable borrow a `Transaction` holds.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            param_types: Optional type OID hints, `param_types[0]` for `$1`.
+                An entry of 0 asks the server to infer that parameter.
+            types: Cleared, then filled with the type OID `PQdescribePrepared`
+                reported for each parameter, in `$1`..`$n` order.
+
+        Returns:
+            The generated name of the statement the server now holds.
+
+        Raises:
+            PgError: Exactly what `prepare` documents, for either round trip.
+        """
+        _reject_nul(sql, "sql")
+        var name = self._next_stmt_name()
+        # One dummy element past the hints, so `unsafe_ptr()` is a valid
+        # non-NULL address even for an empty list -- the same rule
+        # `_ParamBuffers` follows.
+        var hints = List[UInt32](capacity=len(param_types) + 1)
+        for i in range(len(param_types)):
+            hints.append(param_types[i])
+        hints.append(UInt32(0))
+        var res = self._pq[].PQprepare(
+            self._conn,
+            CStr(unsafe_from_address=Int(name.as_c_string_span().ptr())),
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+            c_int(len(param_types)),
+            OidPtr(unsafe_from_address=Int(hints.unsafe_ptr())),
+        )
+        _ = hints^
+        _ = sql^
+        # A failing prepare left no statement on the server, so there is
+        # nothing to clean up before this propagates.
+        _ = self._take_result(res)
+        var res2 = self._pq[].PQdescribePrepared(
+            self._conn,
+            CStr(unsafe_from_address=Int(name.as_c_string_span().ptr())),
+        )
+        var desc: Result
+        try:
+            desc = self._take_result(res2)
+        except e:
+            # The statement exists but the caller gets no handle for it, so
+            # nothing would ever DEALLOCATE it. Try once through the raw
+            # PQexec and discard the outcome entirely: the describe failure is
+            # what the caller needs to see, and a failed cleanup must not
+            # replace it with a less informative error.
+            var drop = String("DEALLOCATE ", name)
+            var dropped = self._pq[].PQexec(
+                self._conn,
+                CStr(unsafe_from_address=Int(drop.as_c_string_span().ptr())),
+            )
+            _ = drop^
+            if not dropped.is_null():
+                self._pq[].PQclear(dropped)
+            raise e^
+        var count = Int(self._pq[].PQnparams(desc._res))
+        types.clear()
+        types.reserve(count)
+        for i in range(count):
+            types.append(self._pq[].PQparamtype(desc._res, c_int(i)))
+        # `desc` is a `Result`, so its PQclear happens on destruction here.
+        return name^
+
+    def _take_result(self, res: PGresultPtr) raises PgError -> Result:
+        """Adopt a finished `PGresult` or raise the error it reports.
+
+        A successful result is handed to `Result`, which takes over the
+        `PQclear`. Every failing path clears `res` itself before raising, apart
+        from a NULL `res`, where libpq allocated nothing to clear.
+
+        Args:
+            res: The result libpq returned for the command that just ran, as-is
+                including NULL.
+
+        Returns:
+            The `Result` of the command, owning the `PGresult*`.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
+                all, or when the connection was lost while running the command
+                and libpq reported it without an SQLSTATE, or
+                `PgErrorKind.SERVER` when the server reports a diagnostic. (A
+                disconnect the server announced as a FATAL *with* an SQLSTATE
+                is therefore still `SERVER` for that statement, and the next
+                command is the one that raises `CONNECTION`.) Server errors
+                carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
+                `context` when libpq supplies them.
+        """
         if res.is_null():
             # No PGresult was allocated, so there is nothing to PQclear.
             raise PgError(
@@ -422,3 +739,81 @@ struct Connection(Movable):
             the connection is bad.
         """
         return Int(self._pq[].PQtransactionStatus(self._conn))
+
+    def transaction(ref self) raises PgError -> Transaction[origin_of(self)]:
+        """Send `BEGIN` and return the transaction block it opened.
+
+        The connection must be idle: a second `transaction()` while one is
+        already open is rejected client-side with `PgErrorKind.USAGE` and
+        nothing is sent, so the server never sees the `WARNING: there is
+        already a transaction in progress` that a bare second `BEGIN` would
+        produce. Savepoints, not nesting, are how a block subdivides -- see
+        `Transaction.savepoint`.
+
+        A connection that has already failed is reported as
+        `PgErrorKind.CONNECTION` rather than `USAGE`, and that test runs
+        first: `PQtransactionStatus` answers `PQTRANS_UNKNOWN` on a dead
+        connection, which is not idle either, and losing the server is not an
+        API misuse.
+
+        The returned value borrows the connection immutably, so
+        `Connection.execute` stays callable -- and runs inside the block --
+        while it is alive, but the transaction cannot outlive the connection:
+        that is a compile error. Destroying it without `commit()` or
+        `rollback()` sends `ROLLBACK`, and because Mojo destroys it right
+        after its last use, the `pq.transaction` module docstring is worth
+        reading before mixing `tx.execute` and `conn.execute`.
+
+        Returns:
+            A `Transaction` bound to this connection's origin, holding a copy
+            of the current rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when `PQstatus` is already
+                `CONNECTION_BAD`, carrying libpq's own `PQerrorMessage` text;
+                `PgErrorKind.USAGE` when the connection is not idle
+                (`transaction() requires an idle connection (transaction
+                status N)`, `N` being the `PQTRANS_*` value); otherwise
+                whatever `execute("BEGIN")` raises.
+        """
+        if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        var status = self._pq[].PQtransactionStatus(self._conn)
+        if status != PQTRANS_IDLE:
+            raise PgError(
+                PgErrorKind.USAGE,
+                String(
+                    "transaction() requires an idle connection ",
+                    "(transaction status ",
+                    Int(status),
+                    ")",
+                ),
+            )
+        _ = self.execute("BEGIN")
+        return Transaction[origin_of(self)](
+            Pointer(to=self), self._rollback_failure_handler
+        )
+
+    def set_rollback_failure_handler(mut self, handler: def(PgError) thin):
+        """Install the handler for a `Transaction`'s failed implicit rollback.
+
+        A `Transaction` destructor cannot raise, so when the `ROLLBACK` it
+        sends fails it calls this handler instead.
+
+        The handler is **copied when `transaction()`** is called, so replacing
+        it later does not affect existing `Transaction` values -- install it
+        before opening the block it should cover.
+
+        The default handler writes one line to stderr. A replacement must not
+        raise, which is what the `thin` function type enforces.
+
+        Args:
+            handler: The function to call with the error a failed implicit
+                `ROLLBACK` produced.
+        """
+        self._rollback_failure_handler = handler

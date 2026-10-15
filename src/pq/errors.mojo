@@ -1,6 +1,6 @@
 """Error types for the `pq` package.
 
-Defines `PgErrorKind`, a small `Int` newtype enumerating the five failure
+Defines `PgErrorKind`, a small `Int` newtype enumerating the six failure
 categories the package can report, and `PgError`, the single error type raised
 by `pq` APIs via typed `raises PgError`.
 """
@@ -10,8 +10,8 @@ by `pq` APIs via typed `raises PgError`.
 struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
     """Category of a `PgError`.
 
-    An `Int` newtype with exactly five constants: `LIBPQ_LOAD`, `CONNECTION`,
-    `SERVER`, `NULL_VALUE` and `TYPE_MISMATCH`.
+    An `Int` newtype with exactly six constants: `LIBPQ_LOAD`, `CONNECTION`,
+    `SERVER`, `NULL_VALUE`, `TYPE_MISMATCH` and `USAGE`.
     """
 
     var value: Int
@@ -34,6 +34,13 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
 
     Also covers an argument libpq cannot be handed at all, namely text with an
     embedded NUL byte.
+    """
+
+    comptime USAGE = Self(5)
+    """The caller misused the `pq` API.
+
+    Detected client-side; nothing was sent to the server, so `sqlstate` and
+    the other diagnostics are empty.
     """
 
     def __eq__(self, other: Self) -> Bool:
@@ -74,6 +81,8 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
             writer.write("NullValue")
         elif self == Self.TYPE_MISMATCH:
             writer.write("TypeMismatch")
+        elif self == Self.USAGE:
+            writer.write("Usage")
 
 
 struct PgError(Copyable, Writable):

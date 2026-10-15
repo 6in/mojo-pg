@@ -113,6 +113,11 @@ struct LibpqFFI(Movable):
     ) -> c_int  # libpq-fe.h:606
     var PQcmdTuples: def(PGresultPtr) thin abi("C") -> CStr  # libpq-fe.h:603
     var PQclear: def(PGresultPtr) thin abi("C") -> None  # libpq-fe.h:623
+    var PQcmdStatus: def(PGresultPtr) thin abi("C") -> CStr  # libpq-fe.h:600
+    var PQnparams: def(PGresultPtr) thin abi("C") -> c_int  # libpq-fe.h:607
+    var PQparamtype: def(PGresultPtr, c_int) thin abi(
+        "C"
+    ) -> UInt32  # libpq-fe.h:608
 
     # --- quoting and libpq-allocated memory -----------------------------
     var PQescapeLiteral: def(PGconnPtr, CStr, c_size_t) thin abi(
@@ -273,6 +278,15 @@ struct LibpqFFI(Movable):
         self.PQclear = _dl_sym[def(PGresultPtr) thin abi("C") -> None](
             self._lib, "PQclear"
         )
+        self.PQcmdStatus = _dl_sym[def(PGresultPtr) thin abi("C") -> CStr](
+            self._lib, "PQcmdStatus"
+        )
+        self.PQnparams = _dl_sym[def(PGresultPtr) thin abi("C") -> c_int](
+            self._lib, "PQnparams"
+        )
+        self.PQparamtype = _dl_sym[
+            def(PGresultPtr, c_int) thin abi("C") -> UInt32
+        ](self._lib, "PQparamtype")
 
         self.PQescapeLiteral = _dl_sym[
             def(PGconnPtr, CStr, c_size_t) thin abi("C") -> OptCStr

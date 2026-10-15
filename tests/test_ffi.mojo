@@ -66,6 +66,9 @@ def _symbol_names() -> List[String]:
         "PQgetisnull",
         "PQcmdTuples",
         "PQclear",
+        "PQcmdStatus",
+        "PQnparams",
+        "PQparamtype",
         "PQescapeLiteral",
         "PQescapeIdentifier",
         "PQfreemem",
@@ -94,9 +97,9 @@ def test_libpq_ffi_constructs() raises:
     _ = ffi^
 
 
-def test_all_fifty_symbols_present() raises:
+def test_all_symbols_present() raises:
     var names = _symbol_names()
-    assert_equal(len(names), 50)
+    assert_equal(len(names), 53)
     var lib = OwnedDLHandle(_libpq_path())
     for ref name in names:
         assert_true(lib.check_symbol(name), "missing symbol " + name)
