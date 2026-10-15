@@ -335,3 +335,23 @@
 - 次への注意: 残りは **F3 だけ**（文書・テスト・compose の軽微な訂正、表 E12〜E16）。F3 の (e)「`tests/test_connection.mojo:424-425` の『Row.get は T5 で来る』コメント削除」は本ターンで**触っていない**ので行番号が動いている（`test_open_params_round_trips_application_name` 内。`grep -n 'T5' tests/test_connection.mojo` で引ける）。
   F3 (g) の E12（`detail` / `hint` / `context`）のテストは F3 の担当なので本ターンでは書いていない（一度書いたが F2 の範囲外なので外した）。
   `pixi run check` は 97 s で安定。コミット前に回すと 1/6 段が必ず FAIL するので、F3 でも「`pixi run test` → コミット → `check`」の順にすること
+
+## turn 14 — impl — F3 文書・テスト・compose の軽微な訂正
+- やったこと: F3 の (a)〜(g) をすべて実施。`connection.mojo` の 4 箇所の docstring 訂正（conninfo 構文エラーの echo / NULL メッセージ / `standard_conforming_strings` / COPY 未対応）、E12〜E14 のテスト 3 本追加、`docker-compose.yml` の 2 ポートを `127.0.0.1` バインドにして `pixi run db-up` で作り直し。`pixi run test` 両サーバー緑（**228 PASS / 0 FAIL**、114/サーバー）、`pixi run check` **6/6 PASS**（警告 0 / docstring 診断 0 / fmt 差分なし、101 s）
+- 完了基準（表 E12〜E16）の実測:
+  - **E12** = ✓。`test_raise_exception_fills_detail_hint_and_context`（`tests/test_connection.mojo`）。`DO $$ ... RAISE EXCEPTION 'boom' USING DETAIL = 'd', HINT = 'h' ... $$` が `kind == SERVER` / `sqlstate == "P0001"` / `message == "boom"` / `detail == "d"` / `hint == "h"` / `context` に `inline_code_block` を含む（PG14 / PG17 同一。REQ §4.4 の `detail` / `hint` / `context` を初めて assert した）
+  - **E13** = ✓。`test_name_lookup_in_get_and_get_optional`（`tests/test_result.mojo`）。`SELECT 's'::text AS s, NULL::text AS n` に対し `get[Int32]("nope")` / `get_optional[Int32]("nope")` が `TYPE_MISMATCH`、`get_optional[String]("s") == Optional("s")`、`get_optional[String]("n") == None`。名前引きのヘルパー 3 本（`_get_by_name_kind` / `_get_optional_by_name_kind` / `_get_optional_by_name`）を既存の索引版と同じ形で追加
+  - **E14** = ✓。`test_libpq_is_a_single_handle` を `PQlibVersion()` の一致から `Int(libpq_ptr())` の**アドレス一致**に変更（同じライブラリを 2 回ロードしても version は一致するので「1 ハンドル」の証明にならない）。ヘルパー `_table_address()` を追加
+  - **E15** = ✓。`docker ps` が `tests-pg14-1 127.0.0.1:54314->5432/tcp` / `tests-pg17-1 127.0.0.1:54317->5432/tcp` のみ（`0.0.0.0` / `[::]` の行は出ない）
+  - **E16** = ✓。`final_check: PASS`（1/6 fmt 差分なし「20 files left unchanged」/ 2/6 precompile / 3/6 docstring 診断 0 / 4/6 `examples/basic.mojo` 出力正常 / 5/6 両サーバー 228 PASS / 6/6 `warning:` 0 件）。所要 101 s（22:57:30→22:59:11）
+- 文書訂正の実測根拠: (a) モジュール docstring と `open(String)` / `open(Dict)` の Raises を「`pq` はメッセージに conninfo / params を足さない。libpq は認証失敗ではパスワードを出さないが、**conninfo の構文エラーでは断片を echo する**（`password=sec ret` → `missing "=" after "ret"`）。プログラムが渡す資格情報は `open(Dict)`（値を解析しないので echo され得ない）」に書き換え。(b) `escape_literal` の「サーバーの `standard_conforming_strings` に従う」を削り「`standard_conforming_strings` は参照されない。バックスラッシュがあれば常に ` E'...'`」に。(c) `"PQconnectdb returned NULL (out of memory)"` → `"libpq returned NULL (out of memory)"`（`_adopt` は `open(Dict)` = `PQconnectdbParams` からも通るため）。(d) `execute` に COPY 未対応の段落。(e) `T5` コメント削除（`Row.get` は実装済みなので、直後の「サーバー側の述語で値を確かめる」コメントの「still」も落とした）
+- 想定外: なし（F3 はすべて PLAN どおり。`pixi run check` が 97 s → 101 s、`test_connection` が 27 → 28 本 / `test_result` が 13 → 14 本に増えた分）
+- やり直し: 0 回
+- 既存テストの期待値の変更: **1 箇所**。`tests/test_smoke.mojo` の `test_libpq_is_a_single_handle` が見る値を `PQlibVersion()` の一致 → `libpq_ptr()` のアドレス一致に変更（理由: 表 E14 そのもの。version の一致は 2 回ロードでも成立するので、ロードが 1 回だったことを検出できていなかった = 偽陰性）。他のテストの期待値は 1 つも変えていない（E12 / E13 は新規追加、`test_open_params_round_trips_application_name` の変更はコメント 2 行のみで assert は不変）
+- PLAN 訂正: 1 件。`.gsd-lite/PLAN.md:105`（T4 の実装メモ）の `PgError(CONNECTION, "PQconnectdb returned NULL (out of memory)")` を `"libpq returned NULL (out of memory)"` に更新（F3 (c) で message を変えたので、PLAN の記述が実物と食い違うのを解消。要件・決定には触れない）
+- 契約外の提案（実装していない。verify 判断用）:
+  (1) `test_open_params_round_trips_application_name` は `Row.get` が実装済みなので列値を直接 assert できる（今はサーバー側の述語で確認）。F3 の完了基準は「古いコメントの削除」だけなので assert は足していない
+  (2) `tests/docker-compose.yml` の superuser `pq/pq` は 127.0.0.1 バインドで LAN からは届かなくなったが、同一ホストの他ユーザーからは届く。テスト専用なので変えていない
+- 次への注意: **PLAN の未完了タスクはゼロ**。次は `/gsd-lite-verify`（verify round 2）。verify round 2 は「round 1 の格子の再確認 + F1〜F3 の回帰」だけで、新しいクラスの探索はしない（turn 11 の申し送り）。
+  F1 の positive control を回すなら `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-012-positive-control.sh E1|E2|E3|E4` を使うが、**F2 / F3 で `src/pq/connection.mojo` の行番号が動いている**ので `grep -n 'PQclear\|PQfinish\|PQfreemem' src/pq/*.mojo` で取り直すこと。
+  `pixi run check` は 1 回 **101 s**、`pixi run test` は 1 回 **約 100 s**（`test_leak` が 43〜45 s/サーバー）。1/6 段は未コミットの差分で必ず FAIL するので「実装 → コミット → `check`」の順で回す。`pixi` / `mojo` は PATH に無いのでフルパス `/home/parallels/.pixi/bin/pixi` を使う
