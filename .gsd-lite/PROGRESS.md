@@ -43,3 +43,22 @@
   T2 の契約には `test_ffi.mojo` の書き換えが入っていないので、そのまま残して良いか T2 で判断する（残すなら二重管理の指摘として verify に申し送る）。
   `final_check.sh` は「全段走らせてから集約 exit」方式。`build/final_check.log` に溜めたログで警告を数えるので、段を足すときは出力を必ず `$LOG` に流すこと
   （docstring 診断の生ログだけは `build/docstrings.log` に分けてある。`_ffi` の期待される警告を数えないため）
+
+## turn 4 — impl — T2 `_ffi/loader.mojo` + smoke / hello をローダー経由に
+- やったこと: サブエージェント 2 本（A: `loader.mojo` + `test_smoke.mojo` 書き換え + `hello_libpq.mojo` + `pixi.toml` / B: `test_loader_fail.mojo` を契約から独立に）で並行実装し統合。
+  `pixi run test` は両サーバーで 30 件 PASS（errors 3 / ffi 7 / loader_fail 1 / smoke 4 ×2、`FAIL` と `warning:` は grep 0 件）、`pixi run package` exit 0 で警告ゼロ、`pixi run fmt` 差分なし、`pixi run hello-libpq` が `PQlibVersion = 180006` を表示
+- 想定外: (1) **`platform_map` は `List` を返せない**ので OS 既定候補はカンマ区切りの `StringLiteral`（`linux="libpq.so.5,libpq.so"`）にして実行時 `split(",")` で分解した。
+  結果として RESEARCH が「未プローブ」と警告していた macOS 判定（`CompilationTarget.is_macos()` / `os_is_macos()`）は一切使わずに済んだ（PLAN の候補リストの中身は変更なし）。
+  (2) `var reason = String()` が `warning: assignment to 'reason' was never used` を出す → 宣言のみ `var reason: String` にして try 末尾と except の両方で代入（1.1.0 の確定初期化解析が通る）。
+  (3) **`PgError` は `Error` に暗黙変換されない**ので、`raises`（素の `Error`）である TestSuite のテスト関数から `libpq()` を直接呼べない。`test_smoke.mojo` / `hello_libpq.mojo` は `try/except` で `Error(String(e))` に変換するヘルパー経由にした（`test_errors.mojo` と同じ既存パターン）。
+  (4) バージョンゲート（`PQlibVersion() < 140000`）の分岐は**実行されていない**: pixi 環境の libpq は 18.6 で、140000 未満の libpq がこのマシンに無い。文字列生成は仕様どおりだが runtime 未到達
+- やり直し: 0 回（統合時の修正なし。A が spec 7 の `try/except` 省略時のコンパイルエラー、B が `ref _ = f()` の警告回避形をそれぞれ事前に実測して確定させていた）
+- 既存テストの期待値の変更: `tests/test_smoke.mojo` の 3 テストを書き換えた。(a) `test_libpq_loads` は「`OwnedDLHandle.check_symbol("PQlibVersion"/"PQconnectdb")` が True」→「`libpq()` 経由の `PQlibVersion() > 0`」。
+  (b) `test_libpq_version_at_least_14` は `get_function` 直呼び → `libpq()` 経由。(c) `test_toolchain` は変更なし。理由: T2 の完了基準が「自前の探索ロジックを消して `libpq()` を使う」ことそのもの（シンボル存在の網羅確認は `test_ffi.mojo` の 50 名 `check_symbol` が担当なので smoke 側の 2 シンボル確認は重複）。`test_libpq_is_a_single_handle` を新規追加
+- T2 の判断（turn 3 の申し送りへの回答）: **`tests/test_ffi.mojo` は書き換えず、自前の `OwnedDLHandle` / `LibpqFFI(path)` 構築をそのまま残した**。
+  理由: `test_ffi.mojo` は `_ffi` 生層の単体テストで、ローダーのキャッシュから独立に 50 シンボルの解決を確かめるのが役目。ローダー経由にすると「`_Global` が一度成功したこと」しか言えなくなる。
+  ただし `_libpq_path()` 相当のパス決定ロジックが `test_ffi.mojo` と `loader.mojo` の 2 箇所にある**二重管理**なので、verify への指摘として残す
+- 次への注意: T3（`decode_text.mojo`）は DB 不要で `PgError` にしか依存しないので T2 の成果物に触らない。
+  T4 以降で `Connection` / `Result` が使うのは `libpq_ptr()`（`Pointer[LibpqFFI, MutUntrackedOrigin]` を返す。`__deinit__` から `PQfinish` / `PQclear` を呼ぶ用）で、**T2 では `libpq()` 側しか runtime で通っていない**（origin キャストは `libpq()` が内部で `libpq_ptr()` を呼ぶので実行はされている）。
+  テストから `libpq()` を呼ぶときは `PgError` → `Error` の変換ヘルパーが必要（上記 想定外 (3)）。`PQ_MOJO_LIBPQ` を設定すると**それ 1 本だけ**が候補になり OS 既定へのフォールバックは無い（契約どおりの仕様。typo で分かりにくい失敗になりうる点は verify に申し送る）
+
