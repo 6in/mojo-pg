@@ -248,7 +248,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: なし
   - 並列サブ作業: なし
 
-- [ ] F2: `execute` の接続断を `CONNECTION` に分類 + 埋め込み NUL の事前拒否（コード変更。turn 6 / 8 の申し送りと security review の指摘）
+- [x] F2: `execute` の接続断を `CONNECTION` に分類 + 埋め込み NUL の事前拒否（コード変更。turn 6 / 8 の申し送りと security review の指摘）
   - 完了基準: 表の **E7〜E11** を満たす。
     (a) `Connection.execute`: 決めた事項 6 の最終行で全フィールドを `String` にコピーして `PQclear` した**後**、`sqlstate == ""` かつ `PQstatus(conn) == CONNECTION_BAD` なら `kind` を `CONNECTION` にする（message / severity 等は同じ値を入れる）。
     決めた事項 6 の表にこの行を足す。`tests/test_connection.mojo:496-522` の期待値とコメントを E7 に合わせる（`PgErrorKind.CONNECTION` の docstring「connection is no longer usable」と一致させるため）。
@@ -367,8 +367,12 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
    | `PGRES_TUPLES_OK` / `PGRES_COMMAND_OK` | `Result` を返す（所有権移動） |
    | `PGRES_EMPTY_QUERY` | `PQclear` → `PgError(SERVER, "empty query")`（他フィールド空） |
    | それ以外（FATAL_ERROR / NONFATAL_ERROR / BAD_RESPONSE / COPY_* / …） | `PQresultErrorField` で `severity`('V' があれば 'V'、無ければ 'S') / `sqlstate`('C') / `message`('M'、NULL なら `PQresultErrorMessage`、それも空なら `"unexpected result status <n>"`) / `detail`('D') / `hint`('H') / `position`('P') / `context`('W') を**全部 `String` にコピーしてから** `PQclear` → `PgError(SERVER, ...)` |
+   | 上の行で `sqlstate == ""` **かつ** `PQstatus(conn) == CONNECTION_BAD`（turn 13 / F2 で追加） | 同じフィールド値のまま `kind` だけ `CONNECTION` にする。sqlstate が空な診断は libpq がクライアント側で作ったもので、接続も落ちているなら「文が拒否された」ではなく「接続が死んだ」。`PgErrorKind.CONNECTION` の docstring「no longer usable」と一致する。**両方の条件が必要**: 構文エラーは sqlstate を持ち（E8）、`COPY ... TO STDOUT` は sqlstate が空でも接続は生きている（E9） |
 
    複数文は libpq どおり最後の文の結果（docstring に明記）。
+   **埋め込み NUL の事前拒否**（turn 13 / F2 で追加。決めた事項 13 の補足）: `String` → `const char*` は `as_c_string_span()` が最初の NUL で切れるので、
+   libpq に渡す前に `errors.mojo` の `_reject_nul(s, what)` で `PgError(TYPE_MISMATCH, "embedded NUL byte in <引数名>")` を投げる（E10 の 8 経路。値そのものはメッセージに入れない）。
+   `Row.get[T](name)` / `get_optional[T](name)` は `column_index` に委譲するので検査は `column_index` の 1 箇所（E10 はこの 2 経路も実測する）。
 7. **存在しない列名 / 範囲外 index の kind は `TYPE_MISMATCH`**（REQ §4.4 の kind 集合は固定で 6 つ目を足せない。サーバーは関与しないので `SERVER` は誤解を招く。
    「要求した形が結果と合わない」クラスとして TypeMismatch に寄せる。message: `column "<name>" does not exist` / `column index <i> out of range (0..<n-1>)` / `row index <i> out of range (0..<n-1>)`。RESEARCH §6-5 の「plan で決める」項目）
 8. **`pixi run package` = `mojo precompile src/pq -o build/pq.mojoc`**（REQ §5.1b の `mojo package ... -o build/pq.mojopkg` は 1.1.0 で不可能: `mojo package` は非推奨、`precompile -o x.mojopkg` は `error: output path must have a '.mojoc' extension` — plan 時に実測。

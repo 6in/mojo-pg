@@ -312,3 +312,26 @@
 - 次への注意: 次は **F2**（`execute` の接続断を `CONNECTION` に分類 + 埋め込み NUL の事前拒否）。期待結果は PLAN の表 **E7〜E11** だけを見る。
   F2 で `src/pq/connection.mojo` を編集すると `turn-012-positive-control.sh` の行番号（`result.mojo:99` / `connection.mojo:124` / `:317` / `:263`）がずれるので、F2 以降に positive control を回すときは `grep -n 'PQclear\|PQfinish\|PQfreemem' src/pq/*.mojo` で取り直すこと（スクリプト冒頭にも注記あり）。
   `pixi run check` は 1 回 **97 s** で、1/6 段が未コミットの差分で落ちるので「実装 → コミット → `check`」の順で回すのが速い。`pixi` / `mojo` は PATH に無いのでフルパス `/home/parallels/.pixi/bin/pixi` を使う
+
+## turn 13 — impl — F2 `execute` の接続断を CONNECTION に分類 + 埋め込み NUL の事前拒否
+- やったこと: `execute` の非成功経路に「`sqlstate == ""` **かつ** `PQstatus == CONNECTION_BAD` なら `kind` を `CONNECTION`」の 1 条件を足し、`errors.mojo` に `_reject_nul(s, what)` を 1 本置いて libpq に渡す 6 箇所の入口で呼ぶようにした。`tests/test_connection.mojo` に 7 本追加（E7 の期待値を SERVER → CONNECTION に変更、E9、E10 の 8 経路）。`pixi run check` **6/6 PASS**（224 PASS / 0 FAIL / 警告 0 / docstring 診断 0 / fmt 差分なし、97 s）
+- 完了基準（表 E7〜E11）の実測:
+  - **E7** = ✓。`SELECT pg_terminate_backend(pg_backend_pid())` の 1 回目が `kind == CONNECTION` / `sqlstate == ""` / message に `server closed the connection unexpectedly`。2 回目も `CONNECTION`（PG14 / PG17 同一）
+  - **E8** = ✓（既存 `test_syntax_error_fills_diagnostics` が無変更で PASS）。`SELEC 1` は sqlstate `42601` を持つので第 1 条件で落ちて `SERVER` のまま
+  - **E9** = ✓。`COPY (SELECT 1) TO STDOUT` は `kind == SERVER` / `sqlstate == ""` / message `unexpected result status 3`。**同じテスト内で `conn.status() == CONNECTION_OK` も assert** したので、「sqlstate が空」だけでは CONNECTION に化けないことが機械判定される（E7 の規則の AND の両腕をテストが押さえている）
+  - **E10** = ✓。8 経路すべて `TYPE_MISMATCH` / `message == "embedded NUL byte in <引数名>"`（`conninfo` / `params key` / `params value` / `sql` / `s` ×2 / `name` ×3）。`open` の 2 本は NUL を password の値の位置に置き、message に NUL 以降（`AFTER_NUL_MARKER`）も `WRONG_pw_123` も出ないことまで assert。拒否の直後に `execute("SELECT 1")` / `escape_literal("a")` / `column_index("a")` が通る（状態不変）
+  - **E11** = ✓。既存 210 テストは 1 本も期待値を変えずに PASS（変更したのは E7 の 1 本のみ。下記）
+- 想定外: (1) **`as_c_string_span()` は最初の NUL で切れる**ことを scratch プローブで実測（`"abc" + chr(0) + "MARKER"` は `byte_length() == 10` / `as_bytes()` に 0 が 1 個 / `len(span) == 3`）。つまり NUL 検査が無いと libpq は切り詰めた前半だけを見て「エラーにならずに違うことをする」（conninfo なら別のホストに繋がる、SQL なら前半だけ実行、列名なら別の列に当たる）。テストはこの性質を使って「切り詰めたら成功してしまう入力」を選んである（`SELECT 1; DROP TABLE ` + NUL、列名 `a` + NUL）
+  (2) `Row.get[T](name)` / `get_optional[T](name)` は `column_index` に委譲しているので検査は `column_index` の 1 箇所で足りた（E10 の 8 経路に対して `_reject_nul` の呼び出しは 6 箇所）。契約は挙動で満たされているので重複呼び出しは入れていない
+  (3) `open(Dict)` は検査専用のループを先頭に 1 本置いた（既存のコピーループ内に混ぜると `libpq_ptr()` の後になり、libpq 未ロード時に LIBPQ_LOAD が先に出て引数検査の順序が入口ごとに食い違う）。Dict は小さいので 2 パスの実害はない
+  (4) turn 12 の想定外 (4) が再現: `pixi run check` の 1/6 段は `mojo format` 後の `git diff` を見るので、コミット前に回すと必ず FAIL する。先に `pixi run test`（両サーバー green）→ コミット → `check` の順で回した
+- やり直し: 0 回
+- 既存テストの期待値の変更: **1 箇所**。`tests/test_connection.mojo` の `test_terminated_backend_then_connection_error` の 1 回目の `execute` を `kind == SERVER` → **`kind == CONNECTION`** に変更（理由: F2 (a) そのもの = 表 E7。turn 6 と turn 11 で「kind の意味としては CONNECTION が正しい」と申し送られていた指摘の実装）。`sqlstate == ""` と message の assert は不変。turn 6 の「決めた事項 6 に触るので実装しない」というコメントも実装済みの説明に書き換えた
+- PLAN 訂正: 0 件（実物と PLAN の食い違いは無かった）。決めた事項 6 への**追記**は F2 の完了基準どおり 2 件: 表に「sqlstate 空 + CONNECTION_BAD → CONNECTION」の行、節末に「埋め込み NUL の事前拒否」の段落
+- 契約外の提案（実装していない。verify 判断用）:
+  (1) `escape_literal` / `escape_identifier` は `PQescapeLiteral(conn, ptr, len)` に**長さを渡す**ので、libpq 自体は埋め込み NUL でも切り詰めずに扱える可能性がある（未確認）。契約（E10）が 8 経路すべて拒否と決めているので拒否で統一したが、「長さを渡す経路だけは通す」という設計もあり得る
+  (2) `_reject_nul` は `errors.mojo` に置いた（`connection.mojo` と `result.mojo` の両方が既に import している唯一の葉モジュールだから）。エラー型の定義ファイルに引数検査が同居するのが気になるなら `_validate.mojo` 等に分ける案がある
+  (3) E10 のメッセージの引数名が `escape_literal` / `escape_identifier` だけ `s`（実引数名そのまま）で説明的でない。`"the value to quote"` 等にする案はあるが、F2 の完了基準が「`<引数名>`」なので実引数名に揃えた
+- 次への注意: 残りは **F3 だけ**（文書・テスト・compose の軽微な訂正、表 E12〜E16）。F3 の (e)「`tests/test_connection.mojo:424-425` の『Row.get は T5 で来る』コメント削除」は本ターンで**触っていない**ので行番号が動いている（`test_open_params_round_trips_application_name` 内。`grep -n 'T5' tests/test_connection.mojo` で引ける）。
+  F3 (g) の E12（`detail` / `hint` / `context`）のテストは F3 の担当なので本ターンでは書いていない（一度書いたが F2 の範囲外なので外した）。
+  `pixi run check` は 97 s で安定。コミット前に回すと 1/6 段が必ず FAIL するので、F3 でも「`pixi run test` → コミット → `check`」の順にすること
