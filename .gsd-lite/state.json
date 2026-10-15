@@ -18,12 +18,12 @@
     "name": "",
     "path": "."
   },
-  "milestone": "",
-  "phase": "discuss",
-  "next_command": "DISCUSS",
+  "milestone": "phase1-sync-text-basic",
+  "phase": "research",
+  "next_command": "/gsd-lite-research",
   "branch": {
-    "name": "",
-    "base": ""
+    "name": "gsd-lite/phase1-sync-text-basic",
+    "base": "main"
   },
   "research": {
     "targets": [
@@ -47,5 +47,5 @@
     "verify": "claude-fable-5-1",
     "reflect": "claude-fable-5-1"
   },
-  "updated_at": "2026-10-15T09:56:20+09:00"
+  "updated_at": "2026-10-15T19:35:08+09:00"
 }
