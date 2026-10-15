@@ -11,13 +11,17 @@ calling libpq. That matters beyond tidiness: libpq's own `PQfname` /
 `PQgetvalue` print `out of range` diagnostics to stderr for a bad index and
 then return NULL, so checking first is what keeps stderr clean.
 
-Row-level access (`Row`, `RowIter`, `__getitem__`, `__iter__`) is not part of
-this module yet; the internal `_check_cell` / `_is_null` / `_text` helpers are
-the surface it will build on.
+Row-level access is `__getitem__` and `__iter__`, both of which hand out `Row`
+values. A `Row` is a borrowed view -- a `Pointer[Result, origin]` plus a row
+index, never a snapshot of the row data -- so the `origin` parameter makes a
+`Row` that outlives its `Result` a compile error instead of a dangling read.
+`Row.get` / `Row.get_optional` build on `_check_cell` / `_is_null` / `_text`
+and finish in `pq.decode_text.decode_text`.
 """
 
 from std.ffi import c_int
 
+from pq.decode_text import decode_text
 from pq.errors import PgError, PgErrorKind
 
 from ._ffi.functions import LibpqFFI
@@ -40,12 +44,23 @@ def _column_range_error(col: Int, ncols: Int) -> PgError:
     )
 
 
-struct Result(Movable, Sized):
+struct Result(Iterable, Movable, Sized):
     """A libpq query result, owned and cleared on destruction.
 
     Constructed by `Connection.execute` from a `PGresultPtr` that has already
     been checked for a successful `PQresultStatus`. Holds the row and column
     counts read at construction time.
+    """
+
+    comptime IteratorType[
+        iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
+    ]: Iterator = RowIter[origin=iterable_origin]
+    """The iterator `__iter__` returns, bound to the borrow's origin.
+
+    Parameters:
+        iterable_mut: Mutability of the borrow being iterated, inferred from
+            `iterable_origin`.
+        iterable_origin: Origin of the `Result` borrow the rows will view.
     """
 
     var _res: PGresultPtr
@@ -106,6 +121,36 @@ struct Result(Movable, Sized):
             The same value as `row_count`.
         """
         return self._nrows
+
+    def __getitem__(ref self, i: Int) raises PgError -> Row[origin_of(self)]:
+        """Return a borrowed view of row `i`, so `result[i]` works.
+
+        Nothing is copied: the `Row` carries a pointer to this result plus
+        the row index, and reads cells on demand.
+
+        Args:
+            i: Zero-based row index.
+
+        Returns:
+            A `Row` bound to this result's origin.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when `i` is outside
+                `0..row_count() - 1`, which includes every negative index.
+        """
+        if i < 0 or i >= self._nrows:
+            raise _row_range_error(i, self._nrows)
+        return Row[origin_of(self)](Pointer(to=self), i)
+
+    def __iter__(ref self) -> Self.IteratorType[origin_of(self)]:
+        """Return an iterator over the rows, so `for row in result:` works.
+
+        Returns:
+            A `RowIter` positioned at row 0. It yields exactly `row_count()`
+            rows in index order, and nothing at all when the result has no
+            rows.
+        """
+        return RowIter[origin_of(self)](Pointer(to=self), 0)
 
     def column_name(self, i: Int) raises PgError -> String:
         """Return the name of column `i`.
@@ -268,3 +313,229 @@ struct Result(Movable, Sized):
             PgErrorKind.TYPE_MISMATCH,
             String("cell (", row, ", ", col, ") is out of range"),
         )
+
+
+struct Row[origin: ImmOrigin](Copyable):
+    """One row of a `Result`, as a borrowed view.
+
+    Holds a pointer to the result and a row index; no cell data is copied at
+    construction, and every accessor reads through the pointer. `origin` ties
+    the view to the borrow it came from, so a `Row` outliving its `Result` is
+    a compile error rather than a dangling read -- there is no runtime guard
+    for it.
+
+    Parameters:
+        origin: Immutable origin of the borrowed `Result`.
+    """
+
+    var _res: Pointer[Result, Self.origin]
+    var _index: Int
+
+    def __init__(out self, res: Pointer[Result, Self.origin], index: Int):
+        """Bind a row index to a result.
+
+        Args:
+            res: Pointer to the result this row belongs to.
+            index: Zero-based row index. Not validated here; `Result` only
+                ever builds in-range rows, and each accessor re-checks the
+                full cell coordinate anyway.
+        """
+        self._res = res
+        self._index = index
+
+    def get[T: Copyable](self, col: Int) raises PgError -> T:
+        """Decode column `col` of this row as `T`.
+
+        Validates the coordinate, then rejects SQL NULL, then decodes. The
+        NULL check must precede the read: libpq reports both SQL NULL and a
+        genuinely empty value as an empty string, so the order is the only
+        thing that distinguishes them. Use `get_optional` for a nullable
+        column.
+
+        The column's OID must match `T` exactly -- there is no widening, so
+        reading an `int2` column as `Int32` is a `TYPE_MISMATCH`:
+
+        | `T`            | Required column OID                          |
+        |----------------|----------------------------------------------|
+        | `Bool`         | 16 (bool)                                    |
+        | `Int16`        | 21 (int2)                                    |
+        | `Int32`        | 23 (int4)                                    |
+        | `Int64`, `Int` | 20 (int8)                                    |
+        | `Float32`      | 700 (float4)                                 |
+        | `Float64`      | 701 (float8)                                 |
+        | `List[UInt8]`  | 17 (bytea), hex format only                  |
+        | `String`       | any                                          |
+
+        `pq.decode_text.decode_text` implements the table and is the one place
+        to change when a type is added.
+
+        Parameters:
+            T: The Mojo type to decode into, from the table above. Any other
+                type fails to compile.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            The decoded value.
+
+        Raises:
+            PgError: `NULL_VALUE` when the cell is SQL NULL;
+                `TYPE_MISMATCH` when `col` is outside
+                `0..Result.column_count() - 1`, or when the column OID or
+                the cell text does not match `T`.
+        """
+        self._res[]._check_cell(self._index, col)
+        if self._res[]._is_null(self._index, col):
+            raise PgError(
+                PgErrorKind.NULL_VALUE, String("column ", col, " is NULL")
+            )
+        return decode_text[T](
+            self._res[]._text(self._index, col),
+            self._res[].column_type_oid(col),
+        )
+
+    def get[T: Copyable](self, col: String) raises PgError -> T:
+        """Decode the column named `col` of this row as `T`.
+
+        The name is resolved by `Result.column_index`, which follows
+        `PQfnumber`: an unquoted name is folded to lower case before
+        comparing, so for `SELECT 1 AS FOO, 2 AS "BAR"` both `"FOO"` and
+        `"foo"` reach column 0. A quoted, case-preserved column is only
+        reachable when the double quotes are part of the argument, so `"BAR"`
+        raises while `"\\"BAR\\""` reaches column 1.
+
+        Parameters:
+            T: The Mojo type to decode into.
+
+        Args:
+            col: Column name, optionally wrapped in double quotes to defeat
+                case folding.
+
+        Returns:
+            The decoded value.
+
+        Raises:
+            PgError: `NULL_VALUE` when the cell is SQL NULL;
+                `TYPE_MISMATCH` when no column matches `col`, or when the
+                column OID or the cell text does not match `T`.
+        """
+        return self.get[T](self._res[].column_index(col))
+
+    def get_optional[T: Copyable](self, col: Int) raises PgError -> Optional[T]:
+        """Decode column `col` of this row as an optional `T`.
+
+        The nullable counterpart of `get`: SQL NULL yields an empty
+        `Optional` instead of raising. A non-NULL empty string is still a
+        value, so a `text` column holding `''` comes back as `Optional("")`,
+        not as `None`.
+
+        Parameters:
+            T: The Mojo type to decode into.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            An empty `Optional` when the cell is SQL NULL, otherwise the
+            decoded value.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when `col` is outside
+                `0..Result.column_count() - 1`, or when the column OID or
+                the cell text does not match `T`.
+        """
+        self._res[]._check_cell(self._index, col)
+        if self._res[]._is_null(self._index, col):
+            return None
+        return decode_text[T](
+            self._res[]._text(self._index, col),
+            self._res[].column_type_oid(col),
+        )
+
+    def get_optional[
+        T: Copyable
+    ](self, col: String) raises PgError -> Optional[T]:
+        """Decode the column named `col` of this row as an optional `T`.
+
+        The name is resolved by `Result.column_index`, which follows
+        `PQfnumber`: an unquoted name is folded to lower case before
+        comparing, so for `SELECT 1 AS FOO, 2 AS "BAR"` both `"FOO"` and
+        `"foo"` reach column 0. A quoted, case-preserved column is only
+        reachable when the double quotes are part of the argument, so `"BAR"`
+        raises while `"\\"BAR\\""` reaches column 1.
+
+        Parameters:
+            T: The Mojo type to decode into.
+
+        Args:
+            col: Column name, optionally wrapped in double quotes to defeat
+                case folding.
+
+        Returns:
+            An empty `Optional` when the cell is SQL NULL, otherwise the
+            decoded value.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when no column matches `col`, or when
+                the column OID or the cell text does not match `T`.
+        """
+        return self.get_optional[T](self._res[].column_index(col))
+
+    def is_null(self, col: Int) raises PgError -> Bool:
+        """Report whether column `col` of this row holds SQL NULL.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            True for SQL NULL. A non-NULL empty string returns False.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when `col` is outside
+                `0..Result.column_count() - 1`.
+        """
+        self._res[]._check_cell(self._index, col)
+        return self._res[]._is_null(self._index, col)
+
+
+struct RowIter[origin: ImmOrigin](Iterator):
+    """Iterator over the rows of a `Result`.
+
+    Hands out `Row` views in index order and raises `StopIteration` once the
+    last row has been yielded, so a result with no rows yields nothing.
+
+    Parameters:
+        origin: Immutable origin of the borrowed `Result`.
+    """
+
+    comptime Element = Row[Self.origin]
+    """The item type `__next__` produces."""
+
+    var _res: Pointer[Result, Self.origin]
+    var _index: Int
+
+    def __init__(out self, res: Pointer[Result, Self.origin], index: Int):
+        """Start iteration at `index`.
+
+        Args:
+            res: Pointer to the result being iterated.
+            index: Zero-based index of the row to yield first.
+        """
+        self._res = res
+        self._index = index
+
+    def __next__(mut self) raises StopIteration -> Self.Element:
+        """Return a view of the current row and advance past it.
+
+        Returns:
+            A `Row` for the current index.
+
+        Raises:
+            StopIteration: Once every row has been yielded, which is
+                immediately for a result with no rows.
+        """
+        if self._index >= self._res[]._nrows:
+            raise StopIteration()
+        self._index += 1
+        return Row[Self.origin](self._res, self._index - 1)

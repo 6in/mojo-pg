@@ -126,7 +126,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `result.mojo` 本体（対象: `src/pq/result.mojo`。契約: 範囲外は libpq を呼ぶ前に `PgError(TYPE_MISMATCH)`。`PQgetvalue` の戻りは即 `String` にコピー）
     - C: `tests/test_connection.mojo` を上の箇条書きから独立に書く（対象: `tests/test_connection.mojo`）
 
-- [ ] T5: `Row` / `RowIter`（`__getitem__` / `for row in result` / `get[T]` / `get_optional[T]`、index と列名）+ 受け入れクエリと型取得テスト
+- [x] T5: `Row` / `RowIter`（`__getitem__` / `for row in result` / `get[T]` / `get_optional[T]`、index と列名）+ 受け入れクエリと型取得テスト
   - 完了基準:
     - `src/pq/result.mojo`: `Result` に `Iterable` を足し `comptime IteratorType[...]` / `__getitem__(ref self, i: Int) raises PgError -> Row[origin_of(self)]` / `__iter__(ref self)`（RESEARCH §2.3 のコード片どおり）。
       `struct Row[origin: ImmOrigin](Copyable)`: `get[T: Copyable](self, col: Int) raises PgError -> T`、`get[T: Copyable](self, col: String) raises PgError -> T`（`column_index` 経由）、`get_optional[T: Copyable](self, col: Int|String) raises PgError -> Optional[T]`、`is_null(col: Int) raises PgError -> Bool`。
@@ -134,9 +134,14 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - `tests/test_result.mojo` に少なくとも: 受け入れクエリ `SELECT 1::int4, 'a'::text, NULL::int4, true, 1.5::float8, '\x0102'::bytea` → `get[Int32](0)==1`, `get[String](1)=="a"`, `get[Int32](2)` → NULL_VALUE, `get_optional[Int32](2)` が None, `get[Bool](3)==True`, `get[Float64](4)==1.5`, `get[List[UInt8]](5)==[1,2]`、`column_type_oid` が 23/25/23/16/701/17；
       `SELECT NULL::text, ''::text` → `get_optional[String]` が None / Some("")（P9）；`SELECT 1 AS FOO, 2 AS "BAR"` → `column_index("FOO")==0`, `("foo")==0`, `("BAR")` → TYPE_MISMATCH, `("\"BAR\"")==1`, `get[Int32]("foo")==1`（P7）；
       `SELECT 1::int2, 1::int8, 1.5::float4, 'x'::varchar, 'ab'::char(5), 'n'::name, 12.5::numeric` → Int16 / Int64 と Int / Float32 / String ×3（OID 1043/1042/19）/ `get[String]` で `"12.5"`、`get[Float64](6)`（numeric）→ TYPE_MISMATCH、`get[Int32](0)`（int2 を Int32）→ TYPE_MISMATCH；
-      `SELECT 'NaN'::float8, 'Infinity'::float4, '-Infinity'::float8`（P11）；`SET bytea_output = 'escape'` 後に `SELECT '\x00'::bytea` → TYPE_MISMATCH（P12）；`SELECT 2147483647::int4, -2147483648::int4, 32767::int2, -32768::int2`（P10）；
+      `SELECT 'NaN'::float8, 'Infinity'::float4, '-Infinity'::float8`（P11）；`SET bytea_output = 'escape'` 後に `SELECT '\x00'::bytea` → TYPE_MISMATCH（P12）；`SELECT 2147483647::int4, (-2147483648)::int4, 32767::int2, (-32768)::int2`（P10。
+      **PLAN 訂正（turn 7 実測）**: 元は括弧なしの `-2147483648::int4` / `-32768::int2` だったが、`::` は単項マイナスより強く束縛するので
+      正の `2147483648` を先に int4 にキャストして `ERROR: integer out of range`（int2 側は `smallint out of range`）になり、クエリ自体が通らない。括弧が必須）；
       `SELECT generate_series(1, 5)` を `for row in res` で合計 15、`len(res)==5`、`res[4].get[Int32](0)==5`、`res[5]` → TYPE_MISMATCH、`res[-1]` → TYPE_MISMATCH、`res[0].get[Int32](1)` → TYPE_MISMATCH；0 行の結果で `for` が 0 回
-    - 負のコンパイル確認（run_tests 外、scratch）: `Result` を `_ = res^` で破棄した後に `row.get[...]` を使う → origin エラーでコンパイル失敗を確認し PROGRESS に書く（P5 / REQ §5.2 の「長生きする参照を返さない」）
+    - 負のコンパイル確認（run_tests 外、scratch）: `Result` を **`var moved = res^`** で移動した後に `row.get[...]` を使う → origin エラーでコンパイル失敗を確認し PROGRESS に書く（P5 / REQ §5.2 の「長生きする参照を返さない」）。
+      **PLAN 訂正（turn 7 実測）**: 元は `_ = res^` で破棄する形だったが、Mojo 1.1.0 の `_ = x^` は**寿命を終わらせない**（`_ = result^` の後でも `result.row_count()` がコンパイルも実行もできる）。
+      ASAP 破棄を防ぐ「生存マーカー」であってデストラクタ呼び出しではない（`tests/test_*.mojo` の `_ = conn^` / `_ = result^` がこの用途）。
+      借用の検査を踏ませるには名前付きの移動が必要で、その形なら `row.get` の行に `error: use of uninitialized value 'result'` が出る
     - `pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ
   - 対象: `src/pq/result.mojo`, `tests/test_result.mojo`
   - 依存: T4
