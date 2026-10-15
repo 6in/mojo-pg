@@ -5,6 +5,8 @@
 - 対象リポジトリ: `.`（in-repo 形）。`CLAUDE.md` / `AGENTS.md` は無い
 - 無人シェルの注意（RESEARCH 冒頭）: `mojo` / `pixi` は PATH に無い。**`/home/parallels/.pixi/bin/pixi run ...`** のフルパスで呼ぶ。
   docker の DB は `tests-pg17-1`(54317) / `tests-pg14-1`(54314) が healthy で起動中（plan 時点、`docker compose ps` で確認）
+- **PLAN 訂正（turn 10 実測）**: `rg`（ripgrep）は**この環境に入っていない**（`command -v rg` 空、`~/.cargo/bin` にも無い）。
+  本 PLAN の検査コマンドは `grep` 系に置き換えてある（`grep -rnE '^[[:space:]]*fn '` 等。`\s` は BRE/ERE に無いので `[[:space:]]` を使う）
 
 ## 検証コマンド
 
@@ -26,13 +28,13 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 | 変更の種類 | 直す場所 | 確かめ方 |
 |---|---|---|
-| libpq 関数のバインディングを足す / 減らす | `src/pq/_ffi/functions.mojo` のフィールド + `__init__` の `_dl_sym` 行（ヘッダ行番号コメント付き）、`tests/test_ffi.mojo` のシンボル名リスト、本 PLAN「決めた事項」の **50 本** | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` と `grep -cE '^\s+(String\()?"PQ[A-Za-z]+"\),?$\|^\s+"PQ[A-Za-z]+",$' tests/test_ffi.mojo` が同数（素朴な `grep -c '"PQ'` は `PQ_MOJO_LIBPQ` / `PQ_TEST_CONNINFO` / エラー文の `PQconnectdb failed` も数えて 53 になる — T1 で実測）、`tests/test_ffi.mojo` 内の `assert_equal(len(names), 50)` が機械判定、`rg -n '50 本' .gsd-lite/PLAN.md` の値を更新 |
-| `Row.get[T]` の対応型を足す | `src/pq/decode_text.mojo` の OID 定数 + `comptime if` 分岐、`Row.get` の docstring の型表、`tests/test_decode_text.mojo` の境界値、`src/pq/__init__.mojo` モジュール docstring の型一覧 | `rg -n 'Int16' src/pq/decode_text.mojo src/pq/result.mojo src/pq/__init__.mojo tests/test_decode_text.mojo` で 4 ファイル全部に出る（新型でも同様） |
-| `PgErrorKind` を足す | `src/pq/errors.mojo` の定数 + `PgErrorKind.write_to` の名前表 + `PgError` docstring の一覧。REQUIREMENTS §4.4 の kind 集合は固定なので**足さない**（足すなら BLOCKED） | `rg -c 'TYPE_MISMATCH' src/pq/errors.mojo` ≥ 2（定数と write_to） |
+| libpq 関数のバインディングを足す / 減らす | `src/pq/_ffi/functions.mojo` のフィールド + `__init__` の `_dl_sym` 行（ヘッダ行番号コメント付き）、`tests/test_ffi.mojo` のシンボル名リスト、本 PLAN「決めた事項」の **50 本** | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` と `grep -cE '^\s+(String\()?"PQ[A-Za-z]+"\),?$\|^\s+"PQ[A-Za-z]+",$' tests/test_ffi.mojo` が同数（素朴な `grep -c '"PQ'` は `PQ_MOJO_LIBPQ` / `PQ_TEST_CONNINFO` / エラー文の `PQconnectdb failed` も数えて 53 になる — T1 で実測）、`tests/test_ffi.mojo` 内の `assert_equal(len(names), 50)` が機械判定、`grep -n '50 本' .gsd-lite/PLAN.md` の値を更新 |
+| `Row.get[T]` の対応型を足す | `src/pq/decode_text.mojo` の OID 定数 + `comptime if` 分岐、`Row.get` の docstring の型表、`tests/test_decode_text.mojo` の境界値、`src/pq/__init__.mojo` モジュール docstring の型一覧 | `grep -c 'Int16' src/pq/decode_text.mojo src/pq/result.mojo src/pq/__init__.mojo tests/test_decode_text.mojo` で 4 ファイル全部が 1 以上（新型でも同様） |
+| `PgErrorKind` を足す | `src/pq/errors.mojo` の定数 + `PgErrorKind.write_to` の名前表 + `PgError` docstring の一覧。REQUIREMENTS §4.4 の kind 集合は固定なので**足さない**（足すなら BLOCKED） | `grep -c 'TYPE_MISMATCH' src/pq/errors.mojo` ≥ 2（定数と write_to） |
 | テストファイルを足す | 無し（`run_tests.sh` は glob）。DB 不要のテストも両サーバー分回る（高速なので許容） | `pixi run test` のログに新ファイル名が 2 回出る |
-| `examples/` を足す | `pixi.toml` の `[tasks]` に `example-<name>` を追加、`tests/final_check.sh` の examples 実行行 | `rg -n 'examples/' pixi.toml tests/final_check.sh` |
+| `examples/` を足す | `pixi.toml` の `[tasks]` に `example-<name>` を追加、`tests/final_check.sh` の examples 実行行 | `grep -rn 'examples/' pixi.toml tests/final_check.sh` |
 | 公開 struct / メソッドを足す | docstring 必須（T8 の診断で機械検出） | `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -vE "'(__init__\|__deinit__\|__copyinit__\|__moveinit__)'" \| grep -c 'doc string'` = 0（合成 dunder の除外理由は T8 完了基準） |
-| libpq を呼ぶ新しい経路を足す | `char*` は即 `String` にコピー、`PQfreemem` は 1 箇所、`get_function` は使わない | `grep -c get_function src/pq` = 0、`rg -n 'PQfreemem' src/pq/connection.mojo` が escape 2 メソッドの各 1 回のみ |
+| libpq を呼ぶ新しい経路を足す | `char*` は即 `String` にコピー、`PQfreemem` は 1 箇所、`get_function` は使わない | `grep -rc get_function src/pq` が全ファイル 0、`grep -n 'PQfreemem' src/pq/connection.mojo` が escape 2 メソッドの各 1 回のみ |
 
 ## Tasks
 
@@ -182,7 +184,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T6
   - 並列サブ作業: なし
 
-- [ ] T8: 品質仕上げ: docstring 診断ゼロ / `mojo format` 差分ゼロ / 警告ゼロ / `pixi run check` 両サーバー緑 / 追従先チェックリスト照合
+- [x] T8: 品質仕上げ: docstring 診断ゼロ / `mojo format` 差分ゼロ / 警告ゼロ / `pixi run check` 両サーバー緑 / 追従先チェックリスト照合
   - 完了基準:
     - `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 | grep -v '/_ffi/' | grep -vE "'(__init__|__deinit__|__copyinit__|__moveinit__)'" | grep -c 'doc string'` = 0（`pq` 直下の公開 struct / メソッド / 関数すべて。`_ffi` はモジュール docstring のみでよい）
       **合成 dunder を除外する理由**（T1 で実測。元の PLAN は除外なしで「= 0」だったが達成不可能だった）: `--diagnose-missing-doc-strings` は
@@ -190,10 +192,10 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
       実際に `PgError` は明示 `__init__`（docstring 付き）を持つのに合成のコピー / ムーブ分で 2 件報告される。判定は `tests/final_check.sh` 3/6 段に同じ除外で実装済み。
       既知の盲点: 手書きで docstring の無い `__init__` もこの除外に引っかかる（struct docstring で代替する規約とする）
     - `pixi run fmt` 実行後 `git diff --quiet -- src tests examples hello.mojo` が exit 0
-    - `rg -n '^\s*fn ' src tests examples hello.mojo` が 0 件（REQ §5.1「`fn` を使わない。`def` + 明示 `raises`」）
+    - `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` が 0 件（exit 1）（REQ §5.1「`fn` を使わない。`def` + 明示 `raises`」）
     - `pixi run check` が exit 0（両サーバー、`build/final_check.log` に `warning:` 0 件）。ログの要約（各段の結果と所要時間）を PROGRESS に書く
     - 追従先チェックリストの全行を実行して結果を PROGRESS に書く（特に 50 本の一致、`get_function` 0 件、`PQfreemem` 2 箇所）
-    - `Connection.execute` の docstring に「複数文は最後の文の結果を返し、途中の失敗はそのエラー」（D9）、`Result.column_index` / `Row.get(name)` の docstring に `PQfnumber` の小文字化規則（P7）、`escape_literal` の docstring に ` E'...'` 形式の例（P13）があることを `rg` で確認
+    - `Connection.execute` の docstring に「複数文は最後の文の結果を返し、途中の失敗はそのエラー」（D9）、`Result.column_index` / `Row.get(name)` の docstring に `PQfnumber` の小文字化規則（P7）、`escape_literal` の docstring に ` E'...'` 形式の例（P13）があることを `grep` で確認
     - 既存の `HANDOFF.md` は触らない（README 整備は Phase 5 / 対象外）
   - 対象: `src/pq/*.mojo`, `tests/*.mojo`, `examples/*.mojo`（docstring・整形のみ。挙動変更なし）
   - 依存: T7

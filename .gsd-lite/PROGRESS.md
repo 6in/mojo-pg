@@ -220,3 +220,45 @@
   **`pixi run check` が 1 回 92 s、`test` が 85 s** かかるので回す回数を計画すること（T8 は `check` 1 回で足りる）。
   T8 の `rg` 検査（`execute` の docstring の D9 文言 / `column_index` と `Row.get(name)` の `PQfnumber` 小文字化 / `escape_literal` の ` E'...'` 例）は turn 8 で ✓ を確認済みだが、**T8 で改めて実行して結果を書く**こと。
   追従先チェックリストは**全行**を実行する（50 本の一致・`get_function` 0 件・`PQfreemem` 2 箇所を特に）。`fmt` → コミット → `check` の順は維持（turn 8 想定外 (1)）
+
+## turn 10 — impl — T8 品質仕上げ（機械判定の全実行・最終タスク）
+- やったこと: T8 の完了基準 7 項目と追従先チェックリスト**全 7 行**を実行し、**すべて基準どおり**だった（`src` / `tests` / `examples` のコード変更は 0 行。
+  `pixi run fmt` は 20 ファイル無変更）。**`pixi run check` 6/6 PASS**（21:47:53 → 21:49:17、**全体 84 s**）。
+  唯一の変更は PLAN.md の検査コマンドを `rg` → `grep` に直したこと（下記 PLAN 訂正）。T8 の完了基準どおり `HANDOFF.md` は触っていない
+- T8 完了基準の実測:
+  (1) docstring 診断（`_ffi` と合成 dunder を除外）= **0 件** ✓（`check` 3/6 段も `missing doc strings outside _ffi: 0`）
+  (2) `pixi run fmt` 後 `git diff --quiet -- src tests examples hello.mojo` = **exit 0** ✓
+  (3) `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` = **0 件（exit 1）** ✓
+  (4) `pixi run check` = **exit 0 / `final_check: PASS`**、`build/final_check.log` の `warning:` 行 = **0** ✓
+  (5) docstring 文言 3 件 ✓: `Connection.execute`（`connection.mojo:204-210`）に「複数文は最後の文の結果・途中の失敗はそのエラー」（D9）/
+      `PQfnumber` の小文字化規則は `result.mojo:180`（`column_index`）・`:402`・`:462`（`Row.get(name)` の 2 オーバーロード）の 3 箇所（P7）/
+      `escape_literal` に `` yields ` E'a\\b'` ``（`connection.mojo:287`、P13）
+  (6) `check` 各段の所要と結果: 1/6 fmt 0 s（20 files unchanged）・2/6 precompile 1 s・3/6 docstring 診断 0 件 0 s・4/6 `examples/basic.mojo` 1 s（`n = 1` / `s = hello` / `z = NULL`）・
+      **5/6 両サーバー 82 s（PG17 41 s + PG14 41 s を直列）で 210 PASS / 0 FAIL**（105 ×2。turn 9 から増減なし）・6/6 `warning:` 0 件。最長は `test_leak.mojo` 37 s / 36 s、次が `test_connection.mojo`
+- 追従先チェックリスト（**全 7 行**を実行。T8 は該当・非該当を問わず全行）:
+  (1) libpq バインディング 50 本 → `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` = **50**、`tests/test_ffi.mojo` の名前リスト（PLAN の ERE 版）= **50**、`assert_equal(len(names), 50)`（`test_ffi.mojo:99`）が機械判定、PLAN 本文の「50 本」と一致 ✓（3 つとも 50）
+  (2) `Row.get[T]` 対応型 → `grep -c 'Int16'` が `decode_text.mojo` 3 / `result.mojo` 1 / `__init__.mojo` 1 / `test_decode_text.mojo` 4 で**4 ファイル全部に出る** ✓
+  (3) `PgErrorKind` → `grep -c 'TYPE_MISMATCH' src/pq/errors.mojo` = **3**（≥ 2。定数・`write_to`・docstring 一覧）✓
+  (4) テストファイル → 新規なし。`check` 5/6 のログに 8 ファイル × 2 サーバー ✓
+  (5) `examples/` → `pixi.toml:17 example-basic` と `tests/final_check.sh:87`（4/6 段）の両方 ✓
+  (6) 公開 struct / メソッドの docstring → (1) の診断 0 件 ✓
+  (7) libpq を呼ぶ経路 → `grep -rc get_function src/pq` が **9 ファイルすべて 0**、`PQfreemem` は `connection.mojo:317`（escape_literal）と `:356`（escape_identifier）の**各 1 回だけ** ✓
+- 想定外: (1) **`rg`（ripgrep）がこの環境に無い**（`command -v rg` 空、`~/.cargo/bin` にも無い。`/bin/bash: rg: コマンドが見つかりません`）。
+  turn 8 / turn 9 の PROGRESS は `rg ...` で ✓ と書いているが、実際には MCP 側の検索ツール経由だったと思われる（素のシェルでは実行不能）。`grep` の等価コマンドに置き換えて同じ結論を得た（下記 PLAN 訂正）
+  (2) `grep -c` / `grep -r` は**ヒット 0 件で exit 1** を返す（`get_function` 0 件・`fn` 0 件・docstring 診断 0 件はいずれも「exit 1 が合格」）。`rg` 前提の判定文を機械化するときは注意
+  (3) T8 は**コード変更ゼロで全基準を満たした**（turn 1〜9 が各ターンで `check` を通していたため）。整形・docstring・警告の負債が最終タスクに溜まらなかった
+  (4) リークサンプル列に turn 9 の **+83 ページの一段が今回は PG14 側で再現**（`connect/query/close`: 37752 → 37754 → **37837** 以降平坦）。PG17 側は 37775 → 37777 で完全に平坦。
+    turn 9 の訂正（tolerance 256）で吸収され PASS。「任意のサーバー・任意のループ・任意の位置で 1 回だけ」という turn 9 の見立てを支持する追加の実測
+- やり直し: 0 回
+- PLAN 訂正: 1 件（ツール可用性のみ。要件・決定・期待値には触れない）。
+  PLAN 冒頭の無人シェル注意に「`rg` はこの環境に無い」を追記し、**追従先チェックリスト 5 行**（Int16 / TYPE_MISMATCH / examples/ / PQfreemem / 50 本）と **T8 完了基準 2 行**（`fn` 検査 / docstring 文言検査）の `rg ...` を
+  `grep ...` の等価コマンドに書き換えた（`\s` は BRE/ERE に無いので `[[:space:]]`、複数ファイル横断は `-r`）。判定内容と期待値は同一
+- 既存テストの期待値の変更: **なし**（`tests/` を 1 行も編集していない）
+- verify への申し送り:
+  (1) **PLAN 全 8 タスクが完了**。`pixi run check` が唯一の最終判定（exit 0 / `final_check: PASS` / 210 PASS 0 FAIL / `warning:` 0 件）。1 回 84 s なので verify は 1 回で足りる
+  (2) 未解決として積み上がった「契約外の提案」は turn 5 / 7 / 8 / 9 の PROGRESS に列挙済み。T8 では**一切実装していない**（挙動変更なしの基準どおり）。主なもの:
+    `OID_TEXT` / `OID_VARCHAR` / `OID_BPCHAR` / `OID_NAME` が宣言のみで未使用（turn 8 (1)）/ `status()` 定数の import 元を公開 API に寄せるか（turn 8 (2)）/
+    `execute` のエラー分類（sqlstate 無し + `CONNECTION_BAD` を `CONNECTION` に寄せるか。turn 6 と turn 8 (5)）/ `is_null` の `String` 版が無い / `Row.__init__` が公開 /
+    escape の未テストケース（マルチバイト UTF-8・空文字列・埋め込み NUL。turn 8 (4)）/ リーク検出の陽性側が未実証（turn 9 (1)）/ 83 ページの一段の出所未特定（turn 9 (2)）
+  (3) docstring 診断の既知の盲点（T8 完了基準に明記）: 手書きで docstring の無い `__init__` も合成 dunder の除外に引っかかる。現状は struct docstring で代替する規約
+- 次への注意: 実装フェーズは完了。次は `/gsd-lite-verify`（`phase: "verify"`）。verify は `pixi run db-up` → `pixi run check` の順で回すこと（`check` はテスト前に DB を起こさない）
