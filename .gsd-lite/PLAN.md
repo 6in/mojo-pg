@@ -201,6 +201,69 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T7
   - 並列サブ作業: なし（整形は全ファイルに当たるので分けない）
 
+### verify round 1 の差し戻し（turn 11）
+
+期待結果は下の 1 表にまとめる。F1〜F3 の完了基準とテストはこの表を参照するだけで、exit / kind を本文に重複して書かない。
+
+| # | 条件 | 期待結果 |
+|---|---|---|
+| E1 | `src/pq` のコピー（`-I <scratch>` で差し替え。verify が `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-011-leaksrc/` でやった方法）から `Result.__deinit__` の `PQclear` を消して `tests/test_leak.mojo` を回す | `test_connect_query_close_does_not_leak` が **FAIL**（他 3 ループは問わない） |
+| E2 | 同じ方法で `Connection._adopt` の失敗経路の `PQfinish` を消す | `test_failed_open_does_not_leak` が **FAIL** |
+| E3 | 同じ方法で `escape_literal` の `PQfreemem` を消す | `test_escape_literal_does_not_leak` が **FAIL** |
+| E4 | 同じ方法で `execute` の非成功経路（決めた事項 6 の最終行）の `PQclear` を消す | `test_failed_execute_does_not_leak` が **FAIL** |
+| E5 | 無改変の `src` で `pixi run test`（両サーバー）を **3 回連続** | `test_leak.mojo` 8 本すべて PASS ×3（偽陽性なし） |
+| E6 | E1〜E4 のどのリーク状態でも | サンプル取得時に `rss_pages() - samples[0] > 65536`（256 MiB）になった時点でその場で fail し、残りの反復を回さない（マシンを使い切らない） |
+| E7 | `SELECT pg_terminate_backend(pg_backend_pid())` の **1 回目**の `execute` | `PgError` で `kind == CONNECTION`、`sqlstate == ""`、message に `server closed the connection unexpectedly` を含む（2 回目は従来どおり `CONNECTION`） |
+| E8 | 構文エラー `SELEC 1`（接続は生きている、sqlstate `42601`） | 従来どおり `kind == SERVER`（E7 の規則は「sqlstate が空 **かつ** `PQstatus == CONNECTION_BAD`」のときだけ効く） |
+| E9 | `COPY (SELECT 1) TO STDOUT` の `execute`（接続は生きている、sqlstate 空） | 従来どおり `kind == SERVER`、message `unexpected result status 3`（E7 の規則で CONNECTION に化けない） |
+| E10 | 埋め込み NUL（`chr(0)`）を含む引数: `open(String)` / `open(Dict)` のキーか値 / `execute(sql)` / `escape_literal` / `escape_identifier` / `column_index` / `Row.get[T](name)` / `Row.get_optional[T](name)` | libpq を呼ぶ**前**に `PgError(kind=TYPE_MISMATCH, message="embedded NUL byte in <引数名>")`。接続・結果の状態は変わらない（直後の `execute("SELECT 1")` が通る） |
+| E11 | NUL を含まない従来の入力すべて | 挙動不変（既存 210 テストが PASS） |
+| E12 | `tests/test_connection.mojo` に追加: `DO $$ BEGIN RAISE EXCEPTION 'boom' USING DETAIL = 'd', HINT = 'h'; END $$` | `kind == SERVER`、`sqlstate == "P0001"`、`message == "boom"`、`detail == "d"`、`hint == "h"`、`context` に `inline_code_block` を含む |
+| E13 | `tests/test_result.mojo` に追加: `get[Int32]("nope")` / `get_optional[Int32]("nope")`（存在しない列名）、`get_optional[String]("s")`（存在する列名、非 NULL と NULL の両方） | 前 2 つは `TYPE_MISMATCH`、後者は `Optional("...")` / `None` |
+| E14 | `tests/test_smoke.mojo` の `test_libpq_is_a_single_handle` | `libpq_ptr()` を 2 回呼んで `Int(ptr)` が一致する（`PQlibVersion` の一致では「1 ハンドル」を検証できない） |
+| E15 | `docker ps` | 54317 / 54314 の公開が `127.0.0.1:543xx->5432/tcp` のみ（`0.0.0.0` / `[::]` に出ない） |
+| E16 | `pixi run check` | 6/6 PASS、`warning:` 0 件、docstring 診断 0 件、fmt 差分なし |
+
+- [ ] F1: リークテストの検出力（verify round 1 の最重要指摘。`PQclear` を全部消しても 9 サンプルが完全に平坦で PASS した = 偽陰性）
+  - 背景（verify turn 11 実測）: `mojo run` はコンパイラを同一プロセスで動かすので、コンパイル後に解放された ≈100 MB 超のヒープが常駐のまま malloc のフリーリストに残る。
+    `SELECT 1` の `PGresult`（数 KB）× 10,000 回のリークはその中に収まり、RSS は 1 ページも増えない（warm cache・baseline 37765 ページの条件でも同じ）。
+    `tests/test_leak.mojo:45-48` の「100 バイト/回でも全区間で増える」は成立していない
+  - 完了基準: 表の **E1〜E6** を満たす。E1〜E4 の positive control は scratch のコピーで行い、FAIL した 4 本のサンプル列を PROGRESS に貼る（`src/pq` 本体は変更しない）。
+    `tests/test_leak.mojo` の docstring（`:36-49` の tolerance 説明、`:11` の「CI runs Linux」= CI は無い）を実測に合わせて書き直す。決めた事項 12 と T7 完了基準の数値（payload / tolerance / 早期 fail 閾値）を更新する。
+    `is_leaking` の単体テスト 4 ケースは変更しない
+  - 推奨手段（impl が選んでよい。判定は E1〜E6 だけ）: (a) 1 反復あたりの解放忘れが ≥ 64 KiB になるよう payload を大きくする —
+    本体ループは `SELECT repeat('x', 65536)`、escape ループは 64 KiB の文字列、failed-execute ループは `DO $$ BEGIN RAISE EXCEPTION '%', repeat('x', 65536); END $$`
+    （失敗 `PGresult` が 64 KiB のメッセージを抱える）、failed-open は `PGconn` 自体が ≈40 KiB なので据え置きで E2 が通るか先に確かめる。
+    (b) RSS の代わりに glibc `mallinfo2()`（`uordblks + hblkhd`）を FFI で読む（解放済みプールの影響を受けない。struct 戻りの扱いが要プローブ）。
+    (c) `mojo build` したバイナリで走らせる（コンパイラのヒープが無くなる。`run_tests.sh` の変更が要る）。(a) が最小
+  - 対象: `tests/test_leak.mojo`（必要なら `tests/run_tests.sh`）、`.gsd-lite/PLAN.md` の決めた事項 12 / T7
+  - 依存: なし
+  - 並列サブ作業: なし
+
+- [ ] F2: `execute` の接続断を `CONNECTION` に分類 + 埋め込み NUL の事前拒否（コード変更。turn 6 / 8 の申し送りと security review の指摘）
+  - 完了基準: 表の **E7〜E11** を満たす。
+    (a) `Connection.execute`: 決めた事項 6 の最終行で全フィールドを `String` にコピーして `PQclear` した**後**、`sqlstate == ""` かつ `PQstatus(conn) == CONNECTION_BAD` なら `kind` を `CONNECTION` にする（message / severity 等は同じ値を入れる）。
+    決めた事項 6 の表にこの行を足す。`tests/test_connection.mojo:496-522` の期待値とコメントを E7 に合わせる（`PgErrorKind.CONNECTION` の docstring「connection is no longer usable」と一致させるため）。
+    (b) NUL: `String` の bytes に 0 が含まれるかを見るヘルパー 1 本（`_reject_nul(s, what) raises PgError` 等）を置き、E10 の 8 経路で libpq 呼び出しの前に呼ぶ。`errors.mojo` の `TYPE_MISMATCH` の docstring に「libpq に渡せない引数（埋め込み NUL）」を足す。
+    `connection.mojo:290` / `:329` の「Any byte sequence is accepted」を「NUL 以外の任意のバイト列」に直す。
+    (c) テスト: `tests/test_connection.mojo` に E7 / E9 / E10（8 経路すべて。各経路 1 本でよいが、`open` の 2 つは NUL が password の値に入るケースで「message に NUL 以降の文字列も password も出ない」まで見る）、E8 は既存テストで担保
+  - 対象: `src/pq/connection.mojo`, `src/pq/result.mojo`, `src/pq/errors.mojo`, `tests/test_connection.mojo`, `.gsd-lite/PLAN.md` の決めた事項 6
+  - 依存: F1（同じ `pixi run check` を回すので順に）
+  - 並列サブ作業: なし
+
+- [ ] F3: 文書・テスト・テスト環境の軽微な訂正（1 ターンにまとめる）
+  - 完了基準: 表の **E12〜E16** を満たし、次の文書訂正を行う:
+    (a) `src/pq/connection.mojo:8-11` / `:143-145` / `:172-174`: 「pq は conninfo / params を一切足さない。libpq は認証失敗ではパスワードを出さないが、**conninfo の構文エラー**（`missing "=" after "<token>"`、`invalid percent-encoded token`）ではその断片を echo するので、プログラムから渡す資格情報は `open(Dict)` を使う」に書き換える（security review の実測: `password=sec ret` → `missing "=" after "ret"`）。
+    (b) `connection.mojo:279-281`: `standard_conforming_strings` に従うという記述を削る（`PQescapeLiteral` は参照しない。バックスラッシュがあれば常に ` E'...'`）。
+    (c) `connection.mojo:120`: `"PQconnectdb returned NULL"` → `open(Dict)` からも投げるので `"libpq returned NULL (out of memory)"` に。
+    (d) `Connection.execute` の docstring に「`COPY ... TO STDOUT` / `FROM STDIN` は未対応。`SERVER`（`unexpected result status 3/4`）になり、接続は次の `execute` で libpq が回復させる」を足す（verify turn 11 実測）。
+    (e) `tests/test_connection.mojo:424-425` の「Row.get は T5 で来る」という古いコメントを削除。
+    (f) `tests/docker-compose.yml` の ports を `127.0.0.1:54317:5432` / `127.0.0.1:54314:5432` にし `pixi run db-up` で作り直す（E15。superuser `pq/pq` が LAN に出ている）。
+    (g) E12 / E13 / E14 のテスト追加（REQ §4.4 の `detail` / `hint` / `context` を初めて assert する）
+  - 対象: `src/pq/connection.mojo`, `tests/test_connection.mojo`, `tests/test_result.mojo`, `tests/test_smoke.mojo`, `tests/docker-compose.yml`
+  - 依存: F2
+  - 並列サブ作業: なし
+
 ## 決めた事項
 
 1. **ファイル構成**（HANDOFF §4 の案から Phase 1 分だけ。`value.mojo` / `params.mojo` / `_platform` は作らない）:

@@ -262,3 +262,21 @@
     escape の未テストケース（マルチバイト UTF-8・空文字列・埋め込み NUL。turn 8 (4)）/ リーク検出の陽性側が未実証（turn 9 (1)）/ 83 ページの一段の出所未特定（turn 9 (2)）
   (3) docstring 診断の既知の盲点（T8 完了基準に明記）: 手書きで docstring の無い `__init__` も合成 dunder の除外に引っかかる。現状は struct docstring で代替する規約
 - 次への注意: 実装フェーズは完了。次は `/gsd-lite-verify`（`phase: "verify"`）。verify は `pixi run db-up` → `pixi run check` の順で回すこと（`check` はテスト前に DB を起こさない）
+
+## turn 11 — verify — round 1: 差し戻し（指摘 3 件 = F1 リークテストの偽陰性 / F2 接続断の分類 + NUL 拒否 / F3 文書・テスト・compose）。マージなし
+- やったこと: `pixi run db-up` → `pixi run check`（6/6 PASS、210 PASS / 0 FAIL、警告 0、docstring 診断 0、fmt 差分なし、90 s）。追従先チェックリスト 7 行を再実行して全一致。
+  コードレビューとセキュリティを読み取り専用サブエージェント 2 本に並行させ（FFI 50 本のシグネチャをヘッダと全照合、全 `raise PgError` の文言追跡、FFI 境界の生存確認: いずれもバグなし）、
+  親は堅牢性の格子（conninfo / Dict / SQL / 列名 / escape / `PQ_MOJO_LIBPQ` × 空・NUL・巨大・不正）を scratch プローブ 2 本で一括実施（トレースバック 0、秘密情報の漏れ 0）。
+  リークテストの陽性側を `src/pq` のコピー（`-I scratch`）から `PQclear` を消して実測 → **PASS してしまう**（偽陰性）。VERIFICATION.md round 1 を作成、PLAN.md に F1〜F3 と期待結果表 E1〜E16 を追記
+- 想定外: (1) **リークテストが `PQclear` 全削除を検出できない**。1 回目（cold compile、baseline 88,406 ページ）だけでなく 2 回目（warm、baseline 37,765 = 実運用と同じ）でも 9 サンプル `[37765, 37767 ×8]` で完全に平坦。
+  `mojo run` のプロセス内コンパイラが残す解放済み常駐ヒープが数 KB × 10,000 のリークを吸収する。`test_leak.mojo:45-48` の「100 バイト/回でも全区間で増える」は成立しない。impl の turn 9 申し送り「陽性側は未実証」が的中
+  (2) `-I <dir>` で `src/pq` のコピーに差し替える方法は素直に効く（`row_count + 424242` のマーカーで確認）。`src` を触らずに positive control ができるので F1 の完了基準にこの方法を指定した
+  (3) scratch プローブで `String(m[byte=0:200], "...")` は「aliasing values passed immutably」でコンパイルエラー → 一時変数に逃がす。probe の docstring 先頭小文字で lint 警告（scratch なので放置）
+  (4) `COPY ... TO STDOUT` / `FROM STDIN` は `SERVER` `unexpected result status 3/4` になり次の `execute` で libpq が回復させる（要件外だが docstring に書く → F3d）。複数文 `CREATE TEMP TABLE; COPY FROM STDIN` の失敗は暗黙トランザクションごと巻き戻る（PG の仕様）
+  (5) security review の実測: conninfo の**構文エラー**では libpq がトークンを echo する（`password=sec ret` → `missing "=" after "ret"`）。認証失敗では出ない。docstring の「conninfo を echo しない」は過大 → F3a
+  (6) `tests/docker-compose.yml`（Phase 0 の既存ファイル、差分外）が `0.0.0.0` で superuser を公開 → F3f
+- やり直し: 1 回（badlib プローブのコンパイルエラー 1 件。上記 (3)）
+- 次への注意: impl は **F1 → F2 → F3 の順に 1 ターン 1 タスク**。期待結果は PLAN の表 E1〜E16 だけを見る（本文に exit / kind を重複して書いていない）。
+  F1 の positive control は `cp -r src/pq <scratch>/pq` → 該当の free を消す → `mojo run -I <scratch> tests/test_leak.mojo` で、`src` 本体は変更しない。リーク状態での実行はメモリを食うので E6 の早期 fail を先に入れてから E1〜E4 を回すこと。
+  F2 の NUL 拒否は kind を `TYPE_MISMATCH` に固定（判断を impl に迫らない）。F3f は compose 変更後 `pixi run db-up` で作り直し `docker ps` で E15 を確認。
+  verify round 2 は「round 1 の格子の再確認 + F1〜F3 の回帰」だけを行う（新しいクラスの探索はしない）。`pixi run check` は 1 回 90 s、F1 で payload を大きくすると `test_leak` が伸びる見込み
