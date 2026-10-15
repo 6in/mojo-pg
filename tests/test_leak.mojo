@@ -33,13 +33,19 @@ comptime DEFAULT_CONNINFO = (
 comptime WRONG_PASSWORD: StaticString = "WRONG_pw_123"
 """A password that always fails authentication, to drive the failed-open path."""
 
-comptime TOLERANCE_PAGES = 16
+comptime TOLERANCE_PAGES = 256
 """How much total RSS growth (in pages) a non-leaking loop may show.
 
-The allocator and libpq both keep caches that settle over the first few
-hundred iterations, so a flat-but-not-identical sample series is normal. 16
-pages (64 KiB on Linux) is far below what a per-iteration leak of a `PGconn`
-or `PGresult` would produce over a thousand iterations.
+Measured on PG14 and PG17: a non-leaking loop is stable to within 2 pages,
+except for a *single* one-off step of exactly 83 pages (~332 KiB) that lands
+at an arbitrary iteration of an arbitrary loop — a lazy first-use allocation
+somewhere under libpq, not per-iteration growth. 256 pages (1 MiB) clears two
+such steps.
+
+This only has to be tighter than a *bursty* leak: a steady one shows up as
+strictly increasing samples, which `is_leaking` reports no matter how small
+each step is. A leak of even 100 bytes per iteration grows every single
+sampling interval of every loop here, so the tolerance never has to catch it.
 """
 
 comptime MAIN_ITERATIONS = 10000
@@ -271,6 +277,29 @@ def _describe(samples: List[Int]) -> String:
     return out^
 
 
+def _assert_stable(
+    label: String, samples: List[Int], expected_samples: Int
+) raises:
+    """Check that a loop's RSS samples show no leak.
+
+    The series is printed even when it passes: a loop that drifts without
+    tripping the verdict is the early warning for a leak, and the numbers are
+    the only evidence left once the process exits.
+
+    Args:
+        label: Name of the loop, for the message.
+        samples: RSS readings in pages, in the order they were taken.
+        expected_samples: How many samples the loop should have taken.
+
+    Raises:
+        Error: If the sample count is wrong or the series shows a leak.
+    """
+    var series = label + " RSS pages: " + _describe(samples)
+    print(series)
+    assert_equal(len(samples), expected_samples)
+    assert_false(is_leaking(samples, TOLERANCE_PAGES), series)
+
+
 # --- is_leaking unit tests (no database) -------------------------------------
 
 
@@ -310,11 +339,7 @@ def test_connect_query_close_does_not_leak() raises:
         _ = conn^
         if _is_sample_due(i, MAIN_WARMUP, every):
             samples.append(rss_pages())
-    assert_equal(len(samples), MAIN_SAMPLES)
-    assert_false(
-        is_leaking(samples, TOLERANCE_PAGES),
-        "connect/query/close RSS pages: " + _describe(samples),
-    )
+    _assert_stable("connect/query/close", samples, MAIN_SAMPLES)
 
 
 def test_failed_open_does_not_leak() raises:
@@ -330,11 +355,7 @@ def test_failed_open_does_not_leak() raises:
         _ = error^
         if _is_sample_due(i, ERROR_WARMUP, every):
             samples.append(rss_pages())
-    assert_equal(len(samples), ERROR_SAMPLES)
-    assert_false(
-        is_leaking(samples, TOLERANCE_PAGES),
-        "failed-open RSS pages: " + _describe(samples),
-    )
+    _assert_stable("failed-open", samples, ERROR_SAMPLES)
 
 
 def test_escape_literal_does_not_leak() raises:
@@ -348,11 +369,7 @@ def test_escape_literal_does_not_leak() raises:
         _ = quoted^
         if _is_sample_due(i, ERROR_WARMUP, every):
             samples.append(rss_pages())
-    assert_equal(len(samples), ERROR_SAMPLES)
-    assert_false(
-        is_leaking(samples, TOLERANCE_PAGES),
-        "escape_literal RSS pages: " + _describe(samples),
-    )
+    _assert_stable("escape_literal", samples, ERROR_SAMPLES)
     _ = conn^
 
 
@@ -367,11 +384,7 @@ def test_failed_execute_does_not_leak() raises:
         _ = error^
         if _is_sample_due(i, ERROR_WARMUP, every):
             samples.append(rss_pages())
-    assert_equal(len(samples), ERROR_SAMPLES)
-    assert_false(
-        is_leaking(samples, TOLERANCE_PAGES),
-        "failed-execute RSS pages: " + _describe(samples),
-    )
+    _assert_stable("failed-execute", samples, ERROR_SAMPLES)
     _ = conn^
 
 
