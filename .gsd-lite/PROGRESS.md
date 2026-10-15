@@ -513,3 +513,173 @@ PLAN T4 (b)-1 の期待値を後者に訂正した（要件・決定に反しな
 | テストファイルを足す | `pixi run test` のログに新ファイル名が 2 回出る | `test_transaction.mojo` / `test_savepoint.mojo` とも `== 127.0.0.1:54317` と `== 127.0.0.1:54314` の **2 回** ✓ |
 | `__del__` を書かない（決めた事項 14-4） | `grep -rn '__del__' src tests examples` | 0 件 ✓ |
 | 既定ハンドラが黙っている（T5 (b)-12 / T7 (d)） | `grep -c 'implicit ROLLBACK failed' build/final_check.log` | **0** ✓ |
+
+## turn 8 — impl — T6 `tests/test_leak.mojo` に Phase 2 の 4 ループ + 陽性対照 3 本
+
+- やったこと: `tests/test_leak.mojo` に Phase 2 の 4 ループ（計 12 テスト）と Phase 2 API 用の
+  ラッパ 6 本（`_execute_params` / `_prepare` / `_stmt_execute` / `_transaction` / `_tx_execute` /
+  `_tx_commit`）と `_payload_bytes` を追加し、陽性対照 3 本を scratch の `src` コピー + `mojo build`
+  で実測して 3 経路すべての検出力を示した。両サーバー PASS / `check` 6/6 / `package` 警告ゼロ。
+- 想定外: PLAN の所要見積もり（`check` 2〜3 分）が過大だった（実測 82 s）。Phase 2 の 4 ループは
+  接続を 1 本使い回すので 10,000 回でも計 18 s にしかならない。PLAN を訂正した（下記）。
+- やり直し: 0 回
+- 次への注意: 下記「次への注意」節
+
+### (a) 4 ループ（各 10,000 回 / `MAIN_WARMUP` 1,000 / 9 サンプル / `TOLERANCE_PAGES` 256 / 接続 1 本）
+
+| テスト | ラベル | 回す経路 | 1 回あたりの `PGresult` |
+|---|---|---|---|
+| `test_execute_params_does_not_leak` | `execute(sql, params)` | `conn.execute("SELECT $1::bytea, $2::text", [<64 KiB bytea>, <64 KiB text>])` | `_ParamBuffers`（送信側）+ `PGresult` 1 個。結果はテキスト形式なので bytea が hex で返り、往路より復路が太い |
+| `test_prepared_does_not_leak` | `prepare/execute/drop` | `prepare("SELECT repeat('x', 65536) WHERE $1 = 1")` → `execute([Int32(1)])` → 結果と stmt を破棄 | 4 個（PQprepare / PQdescribePrepared / PQexecPrepared / `__deinit__` の DEALLOCATE）。4 個目だけが `Result` 経由でなく手で `PQclear` |
+| `test_transaction_commit_does_not_leak` | `transaction/commit` | `conn.transaction()` → `tx.execute("SELECT repeat('x', 65536)")` → `tx.commit()` | 3 個（BEGIN / SELECT / COMMIT）。すべて `Connection.execute` 経由 = `Result` が所有 |
+| `test_transaction_drop_does_not_leak` | `transaction/drop` | `conn.transaction()` → `tx.execute(...)` → `_ = tx^` | 3 個。3 個目（`__deinit__` の ROLLBACK）は raise できないので生 `PQexec` + 手動 `PQclear` |
+
+- 接続を 1 本使い回すのは PLAN (a) どおり（connect ループは Phase 1 が持つ）。
+  `_ = conn^` を各ループの最後に置いて `_assert_stable` より後まで生かしている
+- `params` は `Param` リストをループ外で 1 回作って読み取り参照で渡す（`Connection.execute` の
+  `params` は immutable 引数）。`_ParamBuffers` は `execute` の中で毎回作り直されるので
+  測りたい経路は変わらない。Mojo 側の割り当てノイズだけがループから落ちる
+- ASAP 破棄の規約（決めた事項 13）どおり、`tx` の最後の行を `_tx_commit(tx)` / `_ = tx^`、
+  `stmt` の最後の行を `_ = stmt^` にしてコメントで理由を書いた
+
+### (b) サンプル列（成功時も `print`。`_assert_stable` は Phase 1 と同じものを使用）
+
+`pixi run test`（`PQ_TEST_LEAK_SERVERS` 未設定 = 両サーバー）の 8 系列:
+
+```
+== 127.0.0.1:54317
+connect/query/close  [4092, 4093, 4093, 4093, 4093, 4093, 4093, 4093, 4093]
+failed-open          [4556, 4556, 4556, 4556]
+escape_literal       [4581, 4581, 4581, 4581]
+failed-execute       [4581, 4581, 4581, 4581]
+execute(sql, params) [4675, 4675, 4676, 4676, 4676, 4676, 4676, 4676, 4676]
+prepare/execute/drop [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679]
+transaction/commit   [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679]
+transaction/drop     [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679]
+
+== 127.0.0.1:54314
+connect/query/close  [4092, 4093, 4093, 4176, 4176, 4176, 4176, 4176, 4176]   ← +83 の一段 1 回
+failed-open          [4556, 4556, 4556, 4556]
+escape_literal       [4581, 4581, 4581, 4581]
+failed-execute       [4581, 4581, 4581, 4581]
+execute(sql, params) [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4695]   ← 末尾 +16
+prepare/execute/drop [4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695]
+transaction/commit   [4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695]
+transaction/drop     [4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695, 4695]
+```
+
+- Phase 2 の 4 系列の総増分は PG17 で 0〜1 ページ、PG14 で 0〜16 ページ。tolerance 256 に十分収まる。
+  PG14 の params 系列の末尾 +16 と、connect 系列の +83 の一段（T1 で 256 を維持した理由そのもの）が
+  この回も再現した。T1 の判断（16 に下げない）は正しかった
+- `check`（`PQ_TEST_LEAK_SERVERS=1`、PG17 のみ）でも 4 系列とも 0〜16 ページで平坦
+- モジュール docstring に 12 テストの一覧（4 unit + Phase 1 の 4 + Phase 2 の 4）と所要を書いた
+
+### (c) 陽性対照 3 本（PG17。`scratch/turn-008-leaksrc-<name>/` に `src` をコピー → 1 行だけ壊して `mojo build -I <copy>`）
+
+① `src/pq/result.mojo:99` の `self._pq[].PQclear(self._res)` を `pass` に
+（`scratch/turn-008-leaksrc-result`、バイナリ `scratch/turn-008-test_leak_result`）:
+
+```
+FAIL test_execute_params_does_not_leak
+  execute(sql, params) RSS pages: [203313, 252141, 300969]
+  — grew 97656 pages past the first sample, over the 65536 allowed; aborting the loop (leaking)
+FAIL test_connect_query_close_does_not_leak  [37747, 54589, 71431, 88273, 105113]  (+67366)
+FAIL test_prepared_does_not_leak             [335744, 353178, 370612, 388045, 405479]  (+69735)
+FAIL test_transaction_commit_does_not_leak   [439323, 456253, 473183, 490112, 507042]  (+67719)
+FAIL test_transaction_drop_does_not_leak     [540792, 557667, 574542, 591417, 608292]  (+67500)
+→ 12 tests run: 7 passed, 5 failed
+```
+`Result` は 4 ループすべての共通経路なので全部 FAIL する（PLAN が「connect ループも FAIL するが
+問わない」とした範囲）。params ループは 3 サンプル目で `ABORT_PAGES` を超えて打ち切り = 約 1.2 GB で
+止まる。1 サンプル間隔（1,000 回）あたり約 48,800 ページ ≈ 190 MB で、1 回の往復が
+64 KiB の bytea（hex で約 128 KiB）+ 64 KiB の text を運ぶ計算と合う。
+
+② `src/pq/prepared.mojo:120`（`__deinit__` の DEALLOCATE 結果の `PQclear`）を `pass` に
+（`scratch/turn-008-leaksrc-prepared`、バイナリ `scratch/turn-008-test_leak_prepared`）:
+
+```
+FAIL test_prepared_does_not_leak
+  AssertionError: prepare/execute/drop RSS pages:
+  [4690, 4721, 4776, 4831, 4886, 4940, 4995, 5050, 5104]
+他 11 テストは PASS（execute(sql, params) / transaction の 3 系列はすべて完全に平坦）
+→ 12 tests run: 11 passed, 1 failed
+```
+総増分 414 ページ（約 1.7 MB、10,000 回で 1 個あたり約 170 B）。tolerance 256 を超え、かつ
+9 サンプルすべてが単調増加なので `is_leaking` の 2 信号の両方が立つ。PLAN が懸念した
+「数 MB では RSS に出ないかもしれない」は起きず、**ループだけを狙い撃ちできた**（他 3 系列が平坦な
+ことが、この対照が prepared 経路だけを壊したことの裏付け）。payload を増やす必要はなかった。
+
+③ `src/pq/transaction.mojo:182`（`__deinit__` の `PGRES_COMMAND_OK` 時の `PQclear`）を削除
+（`scratch/turn-008-leaksrc-tx`、バイナリ `scratch/turn-008-test_leak_tx`）:
+
+```
+FAIL test_transaction_drop_does_not_leak
+  AssertionError: transaction/drop RSS pages:
+  [4642, 4674, 4728, 4783, 4838, 4892, 4947, 5002, 5056]
+他 11 テストは PASS（transaction/commit は完全に平坦 = COMMIT 経路は別物）
+→ 12 tests run: 11 passed, 1 failed
+```
+総増分 414 ページ（②と同じ規模）。**壊した 1 行は turn 7 の申し送り (1) どおり `:182`（COMMAND_OK 時）**で、
+`:199`（失敗時）ではない。正常系の 10,000 回ループが通るのは COMMAND_OK 側だけなので、
+この選択でなければ対照は FAIL しなかった。`transaction/commit` が平坦なまま残るのも想定どおり
+（COMMIT の `PGresult` は `Connection.execute` 経由で `Result` が所有する）。
+
+### (d) 検証コマンド
+
+- `/home/parallels/.pixi/bin/pixi run db-up` → `tests-pg17-1` / `tests-pg14-1` とも Healthy
+- `/home/parallels/.pixi/bin/pixi run test` → **両サーバー全ファイル PASS（exit 0）**。
+  `Summary ... 0 failed` が 26 件（13 ファイル × 2 サーバー）、`N failed`（N ≥ 1）が 0 件。
+  **test_leak は 12 tests run: 12 passed を両サーバーで記録**（`grep -c 'test_leak.mojo'` = 7 行 =
+  `mojo build` 1 + 各サーバーの `==` / `--` 2 組 + 旧 skip 行なし）。
+  **test_leak の所要: PG17 57 s / PG14 58 s**（T1 時点の 40 s から +17 s = Phase 2 の 4 ループ分）。
+  内訳（PG17、TestSuite の表示）: connect 35.6 s / failed-open 3.5 s / escape_literal 0.18 s /
+  failed-execute 0.51 s / **params 3.9 s / prepared 5.5 s / tx commit 4.4 s / tx drop 4.4 s**
+- `/home/parallels/.pixi/bin/pixi run check` → **6/6 PASS**（`final_check: PASS`）。
+  **所要 82 s**（02:15:36 → 02:16:58）。1/6 fmt 差分なし、3/6 `missing doc strings outside _ffi: 0`、
+  5/6 で `-- 127.0.0.1:54314 tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=1)`、
+  6/6 `matched lines in build/final_check.log: 0`（`warning:` も libpq の `WARNING:` も 0 件）
+- `/home/parallels/.pixi/bin/pixi run package` → 出力はタスク見出し行のみ = **警告ゼロ**
+- `/home/parallels/.pixi/bin/pixi run fmt` → `1 file reformatted`（`test_leak.mojo`。親が統合後に 1 回だけ）。
+  整形後に `check` を回して 1/6 段が PASS
+
+### 追従先チェックリストの照合（T6 該当行）
+
+| 行 | 確かめ方 | 結果 |
+|---|---|---|
+| リークループを足す（T6） | `grep -c '^def test_' tests/test_leak.mojo` = 12 | **12** ✓（4 unit + Phase 1 の 4 + Phase 2 の 4） |
+| テストファイルを足す | 新規ファイルなし（既存ファイルへの追記のみ） | 該当なし。`run_tests.sh` の `test_leak` 特別扱いは変更していない ✓ |
+| 既定ハンドラが黙っている | `grep -c 'implicit ROLLBACK failed' build/final_check.log` | **0** ✓（`transaction/drop` を 10,000 回回しても既定ハンドラが鳴らない = ROLLBACK がすべて成功している） |
+| `fn` を書かない | `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo \| wc -l` | **0** ✓ |
+
+### PLAN 訂正
+
+- `PLAN 訂正: 「所要の目安」の `check` 2〜3 分 → 82 s（test_leak 1 サーバー 57〜58 s）`
+  （根拠: Phase 2 の 4 ループは接続を 1 本使い回すので 10,000 回でも計 18 s。
+  `Connection.open` の ~3.5 ms/回が乗る Phase 1 の connect ループ 35 s がこの 1 ファイルの大半を
+  占め続ける。T6 本文と「検証コマンド」節の両方を直した）
+
+### 契約外の変更 1 件（報告）
+
+- `tests/run_tests.sh:95` のコメント「`tests/test_leak.mojo` alone runs for ~40 s」を `~57 s` に更新した。
+  追従先チェックリストに無い行だが、T6 がまさにこの数字を陳腐化させた変更なので直した。
+  コメント 1 行のみで挙動は変えていない
+
+### 次への注意
+
+1. **T7 (d) の `grep -c 'implicit ROLLBACK failed' build/final_check.log` = 0 はこの turn の
+   `check` で既に満たしている**（turn 7 の申し送り (4) の再掲 + `transaction/drop` 10,000 回という
+   より強い裏付けが付いた）。T7 では再掲するだけでよい。
+2. **T7 (a) の `examples/params.mojo` は `tx.commit()` を tx の最後の行に置く**（P1 の規約）。
+   T6 の `transaction/commit` ループがまさにこの形で、`_assert_stable` より後に `_ = conn^` を
+   置いている。`tx.rollback_to("sp")` → `tx.commit()` の順で書けば ASAP 破棄に引っかからない。
+3. **T7 (c) で残っている docstring 照合は 1 項目だけ**: `PreparedStatement` docstring の
+   「ROLLBACK しても文は残るが、tx 内 DDL の巻き戻し後の `execute` はサーバーエラーになり得る」
+   （RESEARCH §3-8）。他の 5 項目は T5 までに済んでいる（turn 7 の申し送り (3)）。
+4. **`check` は 82 s / `pixi run test` は 5〜6 分**。T7 は `check` を複数回回す可能性があるので、
+   1 回 82 s + `examples/params.mojo` の追加で 4/6 段が 1 本増える分（`mojo run` で ~5 s）を見込む。
+5. **陽性対照のバイナリと src コピーは `scratch/turn-008-*` に残してある**（`.gsd-lite/logs/` は
+   gitignore 済み）。verify が検出力を再確認したいときはビルドし直さずそのまま実行できる。
+   ただし①のバイナリは 5 テストが FAIL して約 2.4 GB まで RSS を伸ばすので、実行には注意。
+6. **`pixi run test` の全体 wall clock はこの turn では計測していない**（ログへのリダイレクトで
+   回したため）。計測した数字は `check` の 82 s と test_leak の 57 s / 58 s。T7 で全段の所要を
+   書くときは `date -Iseconds` を前後で挟むこと。
