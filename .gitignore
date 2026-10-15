@@ -1,0 +1,9 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# mojo build output
+build/
+*.mojopkg
+.gsd-lite/logs/
+.gsd-lite/loop.pid

@@ -1,0 +1,20 @@
+[workspace]
+name = "pgcon"
+description = "mojo-libpq: PostgreSQL client for Mojo via libpq C FFI"
+version = "0.1.0"
+license = "Apache-2.0"
+channels = ["https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
+
+[dependencies]
+mojo = ">=1.1.0,<2"
+libpq = ">=14"
+
+[tasks]
+hello = "mojo hello.mojo"
+hello-libpq = "mojo examples/hello_libpq.mojo"
+build = "mkdir -p build && mojo build -o build/hello_libpq examples/hello_libpq.mojo"
+test = "bash tests/run_tests.sh"
+fmt = "mojo format src/ tests/ examples/ hello.mojo"
+db-up = "docker compose -f tests/docker-compose.yml up -d --wait"
+db-down = "docker compose -f tests/docker-compose.yml down -v"
