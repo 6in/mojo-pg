@@ -190,3 +190,33 @@
   **T7 は実行時間が長い**: 本体 10,000 回 ≈ 35 s/サーバー + 異常系 3 ループ ×1,000 回。`test_connection.mojo` が既に ≈ 74 s/サーバー（PG17 実測）あるので、T7 投入後の `pixi run test` は 1 回 4〜5 分を見込むこと（`check` も同じだけ伸びる）。
   T7 の `is_leaking` 単体テスト 4 ケースは DB 不要なので、本体ループの前に置けば失敗が早く分かる。macOS 判定（`CompilationTarget.is_macos()` / `os_is_macos()`）と `size_of` の import 元は未プローブ（PLAN「impl への申し送り」）—— コンパイルエラーになったら scratch で名前を確かめてから PLAN 訂正する。
   **実装 → コミット → `pixi run check`** の順を守る（上記 想定外 (1)）。`fmt` は親が統合後に 1 回だけ走らせる方針を継続（3 ターン連続で衝突ゼロ）
+
+## turn 9 — impl — T7 `tests/test_leak.mojo`（10,000 回ループ + 異常系 3 本 + `is_leaking` 単体 4 ケース）
+- やったこと: `rss_pages()`（`/proc/self/statm` の 2 番目）/ `is_leaking(samples, tolerance_pages)`（単調増加 **or** 最終−初回 > tolerance）/ DB 不要の単体テスト 4 ケース（本体ループより先に宣言）/
+  本体 10,000 回（ウォームアップ 1,000・9 サンプル）/ 異常系 3 本（誤パスワード `open` 失敗・`escape_literal`・`execute("SELEC 1")` 失敗、各 1,000 回・ウォームアップ 200・4 サンプル）。
+  並列サブ作業なしの単独タスクなのでサブエージェントは使わず自分で実装。**`pixi run check` 6/6 PASS**（1/6 fmt 差分なし・2/6 precompile・3/6 docstring 診断 0 件・4/6 `examples/basic.mojo`・5/6 両サーバー **210 PASS / 0 FAIL**（105 ×2。+8 ×2 = +16）・6/6 `warning:` 0 件）、全体 92 s。`test_leak.mojo` 単体は 38〜43 s/サーバー（PLAN 見積り ≈35 s とほぼ一致）
+- 想定外: (1) **tolerance 16 ページだと 4 回に 1 回ほど偽陽性**になる（下記 PLAN 訂正）。リークしていないループは ±2 ページで安定するのに、
+  **1 回だけ 83 ページ（≈332 KiB）の一段**が任意のループ・任意の位置で入る。1 回目の `check`（本体ループ・PG17）と、その後 3 回連続で回した 3 回目（異常系 `failed-open`・PG17）で再現し、
+  訂正後の `check` では PG17 の本体ループのサンプル 3 でまた同じ **+83**（37731 → 37814）が出て今度は PASS。4 ループ・PG14 / PG17 で常に同値なので libpq 配下の遅延初期化（1 回だけの確保）と判断
+  (2) `with open(...) as f:` の中で `var` 宣言した値は **with ブロックの外から見えない**（`error: use of unknown declaration 'text'`）。`read()` → `split` → `atol` を with の中に収め、`return` も中で行う形にした（scratch プローブで確定）
+  (3) **リスト literal `[100, 101, 102, 103]` は `Array[Int, 4]`** で `List[Int]` 引数に渡せない（`cannot be converted from 'Array[Int, Int(4)]'`）。`var samples: List[Int] = [...]` と**型注釈を付ける**と List になる（`tests/test_decode_text.mojo` の既存流儀と同じ）
+  (4) `CompilationTarget.is_macos()`（`std.sys.info`）と `/proc/self/statm` 読みは**どちらもプローブ一発で動いた**（PLAN「未プローブ」項目の解消）。macOS 判定は実行時 `if` で十分（`/proc` 読みは macOS でもコンパイルは通る）
+- やり直し: 1 回（上記 想定外 (1) の tolerance。コンパイルエラー 2 件（(2)(3)）は scratch プローブと 1 行修正で、立て直しには数えていない）
+- PLAN 訂正: 1 件（実測反映。`tolerance_pages` は DECISIONS D6 が固定していない PLAN 側の数値なので要件・決定には触れない）。
+  T7 完了基準と決めた事項 12 の `tolerance` を **16 → 256 ページ（1 MiB = 観測された一段 2 回分）**。
+  **検出力は落ちない**根拠: 定常リークは `is_leaking` の「全隣接差分 > 0」側が拾う（100 B/回でも本体 1,000 回区間 = 24 ページ、異常系 200 回区間 = 5 ページで**全区間が増える**ので単調増加が成立する）。
+  tolerance はバースト型リーク専用の保険であり、1 段だけの確保は単調増加にはならない（4 サンプル中 1 区間しか正にならない）。`is_leaking` の**単体テスト 4 ケースは tolerance を引数で渡すので 16 のまま**（完了基準どおり）
+- 既存テストの期待値の変更: **なし**。既存テストファイルは 1 つも編集していない（新規 `tests/test_leak.mojo` のみ）。`tests/run_tests.sh` には**ファイルごとの所要秒を出力する 3 行を追加**しただけ（T7 完了基準の「所要時間が分かる出力（任意）」。判定ロジックは未変更）
+- 追従先チェックリスト: 該当 1 行のみ。
+  「テストファイルを足す」→ 追従先は無し（`run_tests.sh` は glob）。`pixi run test` のログに `tests/test_leak.mojo` が両サーバー分出る ✓。
+  横断検査: `rg '^\s*fn ' src tests examples hello.mojo` = 0 件 ✓、3/6 段の docstring 診断 0 件 ✓（`src/pq` 対象なので本タスクは非該当だが素通し確認）。
+  非該当: 「libpq 関数のバインディング」/「`Row.get[T]` の対応型」/「`PgErrorKind` を足す」/「`examples/` を足す」/「公開 struct / メソッドを足す」（`src/pq` は 1 行も変更していない）/「libpq を呼ぶ新しい経路を足す」（既存の `open` / `execute` / `escape_literal` だけを回している）
+- verify への申し送り:
+  (1) **リーク検出の「陽性側」は未実証**。`is_leaking` の判定ロジックは単体テスト 4 ケースで検査しているが、「実際に `PQclear` を消したら本体ループが FAIL する」ことは確かめていない（`src/pq` を壊す変更が必要なので実装せず）。
+  やるなら `__deinit__` の `PQclear` を一時的にコメントアウトして 1 回回す（期待: 9 サンプルが単調増加して FAIL）
+  (2) 83 ページの一段の**出所は特定していない**（libpq / OpenSSL / glibc arena のいずれか）。tolerance で吸収しているだけなので、将来この値が変われば再調整が要る。サンプル列を常に print しているので `check` のログで追跡できる
+  (3) 本体ループは `conn` / `result` の破棄を**スコープ終端（ループ 1 周ごと）に任せている**。turn 7 で判明したとおり `_ = x^` は生存マーカーで破棄命令ではないので、10,000 回がサーバーの接続上限に当たらず RSS も平坦という実測が、1 周ごとに `PQfinish` が走っている間接的な証拠になっている
+- 次への注意: 残りは **T8（品質仕上げ）だけ**で、これが最後のタスク。完了基準はほぼ「機械判定を並べて結果を PROGRESS に書く」なので実装は少ないが、
+  **`pixi run check` が 1 回 92 s、`test` が 85 s** かかるので回す回数を計画すること（T8 は `check` 1 回で足りる）。
+  T8 の `rg` 検査（`execute` の docstring の D9 文言 / `column_index` と `Row.get(name)` の `PQfnumber` 小文字化 / `escape_literal` の ` E'...'` 例）は turn 8 で ✓ を確認済みだが、**T8 で改めて実行して結果を書く**こと。
+  追従先チェックリストは**全行**を実行する（50 本の一致・`get_function` 0 件・`PQfreemem` 2 箇所を特に）。`fmt` → コミット → `check` の順は維持（turn 8 想定外 (1)）
