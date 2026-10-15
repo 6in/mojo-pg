@@ -43,6 +43,7 @@ from pq._ffi.types import (
 )
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
+from pq.prepared import PreparedStatement
 from pq.result import Result
 
 
@@ -82,6 +83,13 @@ struct Connection(Movable):
     """Borrowed process-wide libpq table, retained so `__deinit__` cannot raise.
     """
 
+    var _stmt_counter: List[Int]
+    """One-element cell holding the last prepared-statement number issued.
+
+    A `List` rather than a plain `Int` because `prepare` only borrows the
+    connection immutably; see `_next_stmt_name`.
+    """
+
     def __init__(
         out self,
         conn: PGconnPtr,
@@ -95,6 +103,9 @@ struct Connection(Movable):
         """
         self._conn = conn
         self._pq = pq
+        # `_stmt_counter` starts at 0, so the first `prepare` issues
+        # `pq_stmt_1`. Numbering is per connection.
+        self._stmt_counter = [0]
 
     def __deinit__(deinit self):
         """Close the connection with `PQfinish` unless it is already NULL."""
@@ -342,6 +353,142 @@ struct Connection(Movable):
         _ = buffers^
         _ = sql^
         return self._take_result(res)
+
+    def _next_stmt_name(self) -> String:
+        """Consume the next prepared-statement number and build its name.
+
+        Names are `pq_stmt_1`, `pq_stmt_2`, ... per connection. A number is
+        consumed even when the `prepare` that asked for it then fails: reusing
+        it would risk `42P05` (`prepared statement already exists`) against a
+        statement the failure left behind, and a gap in the sequence costs
+        nothing.
+
+        `prepare` borrows the connection immutably -- that is what lets a
+        `PreparedStatement` coexist with further `Connection.execute` calls --
+        so the counter cannot be a plain `var` field. It lives in a
+        one-element `List` instead, and the write goes through a pointer
+        rebound to `MutUntrackedOrigin`, the same escape hatch
+        `_ffi.loader.libpq_ptr` uses to hand out a mutable view of a
+        process-global. The heap cell is reached through `unsafe_ptr()`, so no
+        part of `self` is mutated and nothing else aliases that address.
+
+        Returns:
+            The name for the statement about to be prepared.
+        """
+        var cell = Pointer[Int, MutUntrackedOrigin](
+            unsafe_from_address=Int(self._stmt_counter.unsafe_ptr())
+        )
+        cell[] += 1
+        return String("pq_stmt_", cell[])
+
+    def prepare(
+        ref self,
+        var sql: String,
+        param_types: List[UInt32] = List[UInt32](),
+    ) raises PgError -> PreparedStatement[origin_of(self)]:
+        """Prepare `sql` on the server and return a handle to it.
+
+        Exactly one statement is allowed, with `$1`..`$n` placeholders, as for
+        `execute(sql, params)`. The statement is given a generated name --
+        `pq_stmt_1`, `pq_stmt_2`, ... per connection, readable through
+        `PreparedStatement.name()` -- so no caller-supplied identifier is ever
+        interpolated into SQL.
+
+        Two round trips happen here: `PQprepare`, then `PQdescribePrepared` to
+        read back the parameter count and the type OIDs the server resolved.
+        That is what makes `PreparedStatement.param_count()` and
+        `param_type_oid()` answerable without a further round trip, and what
+        lets `PreparedStatement.execute` reject a wrong parameter count
+        client-side.
+
+        `param_types` is a *hint* for types the server cannot infer, exactly
+        like the `paramTypes` argument of `PQprepare`: an entry of 0 leaves
+        that parameter to inference, and a shorter list than the statement has
+        placeholders leaves the rest to inference too. The authoritative types
+        are always the ones `PQdescribePrepared` reports, so
+        `param_type_oid()` can differ from what was passed in.
+
+        The returned statement borrows the connection immutably, so
+        `Connection.execute` stays callable while it is alive, but the
+        statement cannot outlive the connection -- that is a compile error.
+        Destroying it sends `DEALLOCATE`; see the `pq.prepared` module
+        docstring for when Mojo destroys it and why `PREPARE` surviving a
+        `ROLLBACK` is expected.
+
+        Nothing is left on the server when this raises: a failed `PQprepare`
+        created no statement, and a failed `PQdescribePrepared` is followed by
+        a best-effort `DEALLOCATE` whose own outcome is discarded before the
+        describe error is re-raised.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            param_types: Optional type OID hints, `param_types[0]` for `$1`.
+                An entry of 0 asks the server to infer that parameter.
+
+        Returns:
+            A `PreparedStatement` bound to this connection's origin.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte, or `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under
+                exactly the classification `_take_result` applies, for either
+                the prepare or the describe -- `42601` for a syntax error,
+                `42P18` when a parameter type cannot be determined, `42P05`
+                for a name collision. Server errors carry `sqlstate`,
+                `severity`, `detail`, `hint`, `position` and `context` when
+                libpq supplies them.
+        """
+        _reject_nul(sql, "sql")
+        var name = self._next_stmt_name()
+        # One dummy element past the hints, so `unsafe_ptr()` is a valid
+        # non-NULL address even for an empty list -- the same rule
+        # `_ParamBuffers` follows.
+        var hints = List[UInt32](capacity=len(param_types) + 1)
+        for i in range(len(param_types)):
+            hints.append(param_types[i])
+        hints.append(UInt32(0))
+        var res = self._pq[].PQprepare(
+            self._conn,
+            CStr(unsafe_from_address=Int(name.as_c_string_span().ptr())),
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+            c_int(len(param_types)),
+            OidPtr(unsafe_from_address=Int(hints.unsafe_ptr())),
+        )
+        _ = hints^
+        _ = sql^
+        # A failing prepare left no statement on the server, so there is
+        # nothing to clean up before this propagates.
+        _ = self._take_result(res)
+        var res2 = self._pq[].PQdescribePrepared(
+            self._conn,
+            CStr(unsafe_from_address=Int(name.as_c_string_span().ptr())),
+        )
+        var desc: Result
+        try:
+            desc = self._take_result(res2)
+        except e:
+            # The statement exists but the caller gets no handle for it, so
+            # nothing would ever DEALLOCATE it. Try once through the raw
+            # PQexec and discard the outcome entirely: the describe failure is
+            # what the caller needs to see, and a failed cleanup must not
+            # replace it with a less informative error.
+            var drop = String("DEALLOCATE ", name)
+            var dropped = self._pq[].PQexec(
+                self._conn,
+                CStr(unsafe_from_address=Int(drop.as_c_string_span().ptr())),
+            )
+            _ = drop^
+            if not dropped.is_null():
+                self._pq[].PQclear(dropped)
+            raise e^
+        var count = Int(self._pq[].PQnparams(desc._res))
+        var types = List[UInt32](capacity=count)
+        for i in range(count):
+            types.append(self._pq[].PQparamtype(desc._res, c_int(i)))
+        # `desc` is a `Result`, so its PQclear happens on destruction here.
+        return PreparedStatement[origin_of(self)](
+            Pointer(to=self), name^, types^
+        )
 
     def _take_result(self, res: PGresultPtr) raises PgError -> Result:
         """Adopt a finished `PGresult` or raise the error it reports.
