@@ -84,15 +84,7 @@ fi
 
 # ------------------------------------------------------- 4. examples run
 stage "4/6 examples/basic.mojo"
-# INTENTIONAL: if examples/basic.mojo does not exist yet this stage FAILS
-# rather than skipping. It is delivered by task T6; until then `check` is
-# supposed to be red.
-if [ ! -f examples/basic.mojo ]; then
-    say "examples/basic.mojo is missing (delivered by T6) -- failing on purpose"
-    fail "4/6 examples (missing examples/basic.mojo)"
-else
-    run_logged mojo run -I src examples/basic.mojo || fail "4/6 examples"
-fi
+run_logged mojo run -I src examples/basic.mojo || fail "4/6 examples"
 
 # -------------------------------------------------------------- 5. tests
 stage "5/6 tests (both servers)"

@@ -11,7 +11,7 @@ nor the parameter dictionary appears in any raised message; only libpq's own
 password.
 """
 
-from std.ffi import c_int
+from std.ffi import c_int, c_size_t
 
 from pq._ffi.functions import LibpqFFI
 from pq._ffi.loader import libpq_ptr
@@ -19,6 +19,7 @@ from pq._ffi.types import (
     CONNECTION_OK,
     CStr,
     CStrArray,
+    MutRawPtr,
     PG_DIAG_CONTEXT,
     PG_DIAG_MESSAGE_DETAIL,
     PG_DIAG_MESSAGE_HINT,
@@ -270,3 +271,118 @@ struct Connection(Movable):
             position=position,
             context=context,
         )
+
+    def escape_literal(self, var s: String) raises PgError -> String:
+        """Quote `s` as a SQL string literal with `PQescapeLiteral`.
+
+        The returned text already carries its surrounding quotes, so it is
+        substituted into SQL directly rather than wrapped again. Quoting is
+        connection-aware: it follows the server's `standard_conforming_strings`
+        setting and the client encoding, and `s` is measured in *bytes*, so a
+        multi-byte value is escaped whole.
+
+        So `escape_literal("O'Reilly")` yields `'O''Reilly'`, while a value
+        that needs a backslash escape comes back in libpq's E-string form,
+        which carries a deliberate leading space: `escape_literal("a\\b")`
+        yields ` E'a\\b'`.
+
+        Args:
+            s: The value to quote. Any byte sequence is accepted.
+
+        Returns:
+            An owned copy of libpq's quoted text; the libpq buffer is released
+            before returning.
+
+        Raises:
+            PgError: `PgErrorKind.SERVER` when `PQescapeLiteral` returns NULL,
+                carrying libpq's own `PQerrorMessage` text.
+        """
+        var byte_length = s.byte_length()
+        var quoted = self._pq[].PQescapeLiteral(
+            self._conn,
+            CStr(unsafe_from_address=Int(s.as_c_string_span().ptr())),
+            c_size_t(byte_length),
+        )
+        _ = s^
+        if not quoted:
+            raise PgError(
+                PgErrorKind.SERVER,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        # Copy first, then free: `owned` must not outlive the libpq buffer.
+        var p = quoted.value()
+        var owned = String(unsafe_from_utf8_ptr=p)
+        self._pq[].PQfreemem(MutRawPtr(unsafe_from_address=Int(p)))
+        return owned^
+
+    def escape_identifier(self, var s: String) raises PgError -> String:
+        """Quote `s` as a SQL identifier with `PQescapeIdentifier`.
+
+        The returned text is double-quoted and ready to use as a table or
+        column name, so `escape_identifier("x")` yields `"x"` and an embedded
+        double quote is doubled. As with `escape_literal`, `s` is measured in
+        bytes and quoting follows the connection's client encoding.
+
+        Args:
+            s: The identifier to quote. Any byte sequence is accepted.
+
+        Returns:
+            An owned copy of libpq's quoted identifier; the libpq buffer is
+            released before returning.
+
+        Raises:
+            PgError: `PgErrorKind.SERVER` when `PQescapeIdentifier` returns
+                NULL, carrying libpq's own `PQerrorMessage` text.
+        """
+        var byte_length = s.byte_length()
+        var quoted = self._pq[].PQescapeIdentifier(
+            self._conn,
+            CStr(unsafe_from_address=Int(s.as_c_string_span().ptr())),
+            c_size_t(byte_length),
+        )
+        _ = s^
+        if not quoted:
+            raise PgError(
+                PgErrorKind.SERVER,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        # Copy first, then free: `owned` must not outlive the libpq buffer.
+        var p = quoted.value()
+        var owned = String(unsafe_from_utf8_ptr=p)
+        self._pq[].PQfreemem(MutRawPtr(unsafe_from_address=Int(p)))
+        return owned^
+
+    def server_version(self) -> Int:
+        """Return the server version as reported by `PQserverVersion`.
+
+        Returns:
+            The version as a single integer, for example 140012 for 14.12 and
+            170002 for 17.2; 0 when the version is unknown.
+        """
+        return Int(self._pq[].PQserverVersion(self._conn))
+
+    def status(self) -> Int:
+        """Return the connection status as reported by `PQstatus`.
+
+        Returns:
+            `CONNECTION_OK` while the connection is usable, `CONNECTION_BAD`
+            once it has failed, as an `Int` for comparison against those
+            constants.
+        """
+        return Int(self._pq[].PQstatus(self._conn))
+
+    def transaction_status(self) -> Int:
+        """Return the transaction status as reported by `PQtransactionStatus`.
+
+        Returns:
+            One of the `PQTRANS_*` constants as an `Int`: `PQTRANS_IDLE` when
+            no transaction is open, `PQTRANS_ACTIVE` while a command is in
+            flight, `PQTRANS_INTRANS` inside a transaction block,
+            `PQTRANS_INERROR` inside a failed one, and `PQTRANS_UNKNOWN` when
+            the connection is bad.
+        """
+        return Int(self._pq[].PQtransactionStatus(self._conn))

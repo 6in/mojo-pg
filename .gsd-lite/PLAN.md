@@ -149,7 +149,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `result.mojo` の Row / RowIter / Iterable（対象: `src/pq/result.mojo`）
     - B: `tests/test_result.mojo` を上の箇条書きから独立に書く（契約: NULL は `NULL_VALUE`、OID 不一致・範囲外・列名無しは `TYPE_MISMATCH`）（対象: `tests/test_result.mojo`）
 
-- [ ] T6: `escape_literal` / `escape_identifier` / `server_version` / `status` / `transaction_status` + `examples/basic.mojo` + 公開 API の再エクスポート
+- [x] T6: `escape_literal` / `escape_identifier` / `server_version` / `status` / `transaction_status` + `examples/basic.mojo` + 公開 API の再エクスポート
   - 完了基準:
     - `src/pq/connection.mojo`: `escape_literal(self, var s: String) raises PgError -> String` / `escape_identifier(...)`（`PQescapeLiteral(conn, ptr, c_size_t(byte_length))`。NULL 戻り → `PgError(SERVER, PQerrorMessage(conn))`。非 NULL → `String` にコピー → `PQfreemem` の順、各メソッド 1 箇所。P13 / P14）、
       `server_version(self) -> Int`、`status(self) -> Int`（`CONNECTION_*` と比較）、`transaction_status(self) -> Int`（`PQTRANS_*` と比較）

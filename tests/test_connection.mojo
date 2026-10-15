@@ -15,6 +15,12 @@ wording.
 from std.os import getenv
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
+from pq._ffi.types import (
+    CONNECTION_OK,
+    PQTRANS_IDLE,
+    PQTRANS_INERROR,
+    PQTRANS_INTRANS,
+)
 from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.result import Result
@@ -205,6 +211,44 @@ def _execute_error(conn: Connection, var sql: String) raises -> PgError:
     except e:
         return e.copy()
     raise Error("expected a PgError from Connection.execute")
+
+
+def _escape_literal(conn: Connection, var s: String) raises -> String:
+    """Quote `s` as a SQL literal on `conn`.
+
+    Args:
+        conn: An open connection.
+        s: The value to quote.
+
+    Returns:
+        libpq's quoted literal, surrounding quotes included.
+
+    Raises:
+        Error: If `escape_literal` raised a `PgError`.
+    """
+    try:
+        return conn.escape_literal(s^)
+    except e:
+        raise Error(String(e))
+
+
+def _escape_identifier(conn: Connection, var s: String) raises -> String:
+    """Quote `s` as a SQL identifier on `conn`.
+
+    Args:
+        conn: An open connection.
+        s: The identifier to quote.
+
+    Returns:
+        libpq's quoted identifier, surrounding double quotes included.
+
+    Raises:
+        Error: If `escape_identifier` raised a `PgError`.
+    """
+    try:
+        return conn.escape_identifier(s^)
+    except e:
+        raise Error(String(e))
 
 
 def _column_name(result: Result, i: Int) raises -> String:
@@ -522,6 +566,64 @@ def test_column_type_oid_reports_int4() raises:
     assert_equal(_column_type_oid(result, 0), UInt32(23))
     assert_true(_column_type_oid_kind(result, 5) == PgErrorKind.TYPE_MISMATCH)
     _ = result^
+    _ = conn^
+
+
+# --- quoting -----------------------------------------------------------------
+
+
+def test_escape_literal_doubles_quotes() raises:
+    var conn = _connect(_conninfo())
+    assert_equal(_escape_literal(conn, "O'Reilly"), "'O''Reilly'")
+    _ = conn^
+
+
+def test_escape_literal_uses_e_string_for_backslash() raises:
+    var conn = _connect(_conninfo())
+    # A backslash forces libpq's E-string form, whose leading space is
+    # intentional so the result can be pasted straight after a keyword.
+    var quoted = _escape_literal(conn, "a\\b")
+    assert_equal(quoted[byte=0:3], " E'")
+    _ = conn^
+
+
+def test_escape_identifier_doubles_double_quotes() raises:
+    var conn = _connect(_conninfo())
+    assert_equal(_escape_identifier(conn, 'x"y'), '"x""y"')
+    _ = conn^
+
+
+# --- connection introspection ------------------------------------------------
+
+
+def test_server_version_is_at_least_14() raises:
+    var conn = _connect(_conninfo())
+    assert_true(conn.server_version() >= 140000)
+    _ = conn^
+
+
+def test_status_is_connection_ok() raises:
+    var conn = _connect(_conninfo())
+    assert_equal(conn.status(), Int(CONNECTION_OK))
+    _ = conn^
+
+
+def test_transaction_status_follows_the_transaction() raises:
+    var conn = _connect(_conninfo())
+    assert_equal(conn.transaction_status(), Int(PQTRANS_IDLE))
+
+    var begun = _execute(conn, "BEGIN")
+    _ = begun^
+    assert_equal(conn.transaction_status(), Int(PQTRANS_INTRANS))
+
+    var error = _execute_error(conn, "SELEC 1")
+    assert_true(error.kind == PgErrorKind.SERVER)
+    assert_equal(conn.transaction_status(), Int(PQTRANS_INERROR))
+
+    var rolled_back = _execute(conn, "ROLLBACK")
+    _ = rolled_back^
+    assert_equal(conn.transaction_status(), Int(PQTRANS_IDLE))
+
     _ = conn^
 
 
