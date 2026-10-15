@@ -165,7 +165,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `connection.mojo` の 5 メソッド + `tests/test_connection.mojo` 追記（対象: `src/pq/connection.mojo`, `tests/test_connection.mojo`）
     - B: `examples/basic.mojo` + `pixi.toml` + `src/pq/__init__.mojo` 再エクスポート（対象: `examples/basic.mojo`, `pixi.toml`, `src/pq/__init__.mojo`, `tests/final_check.sh`）
 
-- [ ] T7: リークテスト `tests/test_leak.mojo`（10,000 回 connect/query/close + 異常系ループ + 判定ロジック単体テスト、macOS skip）
+- [x] T7: リークテスト `tests/test_leak.mojo`（10,000 回 connect/query/close + 異常系ループ + 判定ロジック単体テスト、macOS skip）
   - 完了基準:
     - `rss_pages() raises -> Int`（`/proc/self/statm` の 2 番目。RESEARCH probe-leak `rss_pages()` と同じ）
     - 判定関数 `is_leaking(samples: List[Int], tolerance_pages: Int) -> Bool` = 「全隣接差分が > 0（単調増加）」**または**「`samples[-1] - samples[0] > tolerance_pages`」。単体テスト: `[100,101,102,103]` → True、`[100,100,101,100]` → False、`[100,100,100,120]`（tolerance 16）→ True、`[100,100,100,100]` → False
