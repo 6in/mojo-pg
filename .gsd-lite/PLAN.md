@@ -32,7 +32,8 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - T1 以降 `check` の 5/6 段は `PQ_TEST_LEAK_SERVERS=1` で `test_leak` を **PG17（54317）だけ**回す。`pixi run test` は両方で回す（REQ §5.3）
   - 6/6 段は `warning:`（コンパイラ）に加えて **`WARNING:`（libpq の notice processor がサーバー WARNING を stderr に出したもの）も 0 件**を要求する（T1 で追加。P13）
 - 所要の目安: Phase 1 末の `check` は 96 s（test_leak 42〜43 s/サーバー）。T1 で 1 サーバー化、T6 で Phase 2 ループ 4 本（各 10,000 回）が乗る。
-  **T6 完了時点の実測: `check` 82 s（test_leak 1 サーバー 57〜58 s）、`pixi run test` 5〜6 分**（当初見込みの `check` 2〜3 分は過大 — T6 の PLAN 訂正）。impl は所要を PROGRESS に書く
+  **T6 完了時点の実測: `check` 82 s（test_leak 1 サーバー 57〜58 s）、`pixi run test` 5〜6 分**（当初見込みの `check` 2〜3 分は過大 — T6 の PLAN 訂正）。impl は所要を PROGRESS に書く。
+  **T7 完了時点の実測: `check` 111 s**（4/6 段が example 2 本で 4 s、test_leak 59 s。82 s からの差の大半は同一コードでの実行ごとのばらつき — turn 9 の PLAN 訂正。目安は 80〜115 s と読む）
 
 ## 追従先チェックリスト
 
@@ -268,7 +269,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T5
   - 並列サブ作業: なし（1 ファイル。陽性対照の 3 ビルドは親が順に回す。各ビルド cached 0.9 s）
 
-- [ ] T7: `examples/params.mojo` + `pixi.toml` / `final_check.sh` 4/6 + `src/pq/__init__.mojo` の文書 + 品質仕上げ（docstring 診断 0 / fmt 差分 0 / 警告 0 / `fn` 0 / `check` 6/6 / 追従先チェックリスト照合）
+- [x] T7: `examples/params.mojo` + `pixi.toml` / `final_check.sh` 4/6 + `src/pq/__init__.mojo` の文書 + 品質仕上げ（docstring 診断 0 / fmt 差分 0 / 警告 0 / `fn` 0 / `check` 6/6 / 追従先チェックリスト照合）
   - 完了基準:
     - (a) `examples/params.mojo`: `from pq import Connection, Param, PgError` のみ（`Transaction` / `PreparedStatement` は `conn.transaction()` / `conn.prepare()` の戻りとして使う。型名を書くなら `from pq import Transaction` を足してよい）。
       `PQ_TEST_CONNINFO`（無ければ 54317 既定）で接続 → `CREATE TEMP TABLE` → `conn.execute(INSERT, [Int32(1), "one"])` → `conn.execute("SELECT ... WHERE id = $1", [Int32(1)])` を `for row in res` で表示 →
@@ -288,6 +289,11 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `examples/params.mojo` + `pixi.toml` + `final_check.sh` 4/6（対象: `examples/params.mojo`, `pixi.toml`, `tests/final_check.sh`）
     - B: `src/pq/__init__.mojo` の docstring + (c) の docstring 照合と不足分の追記（対象: `src/pq/__init__.mojo`, 必要なら `src/pq/{transaction,prepared,connection}.mojo` の docstring 行のみ）
     - 親: (d) / (e) の機械判定（`fmt` は親が統合後に 1 回だけ）
+  - **PLAN 訂正（turn 9 実測）**: (c) の残り項目は申し送りの「4 番だけ」ではなく **2 番（`execute(sql, params)` の
+    「single statement」）も欠けていた**（docstring が "Exactly one statement" で D13 の文言と一致していなかった）。
+    2 件とも turn 9 で追記した。(e) の `grep -n '50 本' .gsd-lite/PLAN.md .gsd-lite/PROGRESS.md` は **0 件ではなく 2 件**
+    だが、どちらもチェックリスト自身の行（PLAN:41「50 → 53 本」）と turn 3 の履歴記述（PROGRESS:52）で、
+    現在のコードについての陳腐化した主張ではない。チェックリストの「= 0 件」はこの 2 行を除いた意味と読む
 
 ## 決めた事項
 

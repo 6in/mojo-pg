@@ -683,3 +683,188 @@ FAIL test_transaction_drop_does_not_leak
 6. **`pixi run test` の全体 wall clock はこの turn では計測していない**（ログへのリダイレクトで
    回したため）。計測した数字は `check` の 82 s と test_leak の 57 s / 58 s。T7 で全段の所要を
    書くときは `date -Iseconds` を前後で挟むこと。
+
+## turn 9 — impl — T7 仕上げ（examples/params.mojo / `__init__` 文書 / 品質照合）
+
+- やったこと: サブエージェント 2 本で A（`examples/params.mojo` + `pixi.toml` + `final_check.sh` 4/6）と
+  B（`src/pq/__init__.mojo` の文書 + (c) の docstring 照合）を並行実装し、親が統合して `fmt` 1 回 →
+  `check` 6/6 PASS（111 s）→ (d)/(e) の機械判定を全部回した。PLAN の全 7 タスクが完了。
+- 想定外: (1) 前ターンの申し送り「(c) で残っているのは 4 番だけ」が**不正確で、2 番（`execute(sql, params)`
+  の「single statement」）も欠けていた**（docstring が "Exactly one statement" で D13 の文言と一致せず）。
+  依頼文に「鵜呑みにせず 6 項目すべて自分で grep して確かめる」と書いておいたので B が検出した。
+  (2) `check` が 82 s → 111 s。example 2 本分（+4 s）と test_leak の +2 s では説明できない差で、
+  同一コードでの実行ごとのばらつきと見る（PLAN 訂正に範囲で書いた）。
+  (3) `fmt` が **30 files unchanged**（差分ゼロ）。両サブエージェントに「行幅を手で 80 桁に合わせる」と
+  指示したのが効いて、統合時の整形差分が 1 件も出なかった。
+- やり直し: 0 回
+- 次への注意: 下記「次への注意」節
+
+### (a) `examples/params.mojo`（101 行・新規）
+
+- import は `from pq import Connection, Param, PgError` の **3 本だけ**。`Transaction` も
+  `PreparedStatement` も名前として書いていない（`tx` は `conn.transaction()` の戻りのまま使う）。
+  `Param` は `var kept: List[Param] = [Int32(2), "two"]` で型名として実際に使われているので未使用 import ではない
+- 流れ: `_conninfo()`（`PQ_TEST_CONNINFO`、無ければ 54317）→ `CREATE TEMP TABLE pq_p2_example(id int4, label text)`
+  → `conn.execute(INSERT, [Int32(1), "one"])` → `conn.execute("SELECT id, label ... WHERE id = $1", [Int32(1)])` を
+  `for row in res` で表示 → `var tx = conn.transaction()` → `tx.execute(INSERT, kept)` → `tx.savepoint("sp")` →
+  `tx.execute(INSERT, undone)` → `tx.rollback_to("sp")` → **`tx.commit()`（91 行目 = `tx` を使う最後の行）** →
+  `_count(conn)`（93 行目、commit より後の `conn.execute`）で件数表示
+- **P1 の ASAP 破棄の規約どおり**: `tx.commit()` が最後の `tx` 使用で、状態確認はその後。件数が
+  `EXPECTED_ROWS`（2）と違えば `print` して `exit(1)`。`PgError` は `except e` で `print` + `exit(1)`
+- 実行出力（`pixi run example-params`、exit 0・警告 0 行）:
+
+```
+id = 1
+label = one
+rows = 2
+```
+
+- `rows = 2` が savepoint の効果そのもの: conn 経由 1 行 + tx 経由 1 行で、`rollback_to("sp")` が
+  2 本目の tx 内 insert（id=3）を巻き戻している
+- **陽性対照**（A が実施）: `EXPECTED_ROWS` を一時的に 3 にして実行 → `expected 3 rows, got 2` を出して
+  **exit 1**。件数判定が飾りでないことを実測で確認してから 2 に戻した
+- **PG14 でも同一出力・exit 0**（`env PQ_TEST_CONNINFO="...port=54314..." pixi run mojo run -I src examples/params.mojo`）
+- `pixi.toml:18` に `example-params = "mojo run -I src examples/params.mojo"`（`example-basic` の直下）
+- `tests/final_check.sh` の 4/6 段（見出し `4/6 examples`）は basic と params を**別々の `run_logged` で**回し、
+  `examples_failed` に畳んでから 1 回 `fail` する:
+
+```sh
+stage "4/6 examples"
+examples_failed=0
+run_logged mojo run -I src examples/basic.mojo || examples_failed=1
+run_logged mojo run -I src examples/params.mojo || examples_failed=1
+if [ "$examples_failed" -ne 0 ]; then
+    fail "4/6 examples"
+fi
+```
+
+  `|| fail` に直結しないのは、スクリプト冒頭の POLICY（`final_check.sh:4-11`「どの段も早期 exit しない —
+  6/6 段が `$LOG` 全体を数えるので、途中で抜けると測る対象が黙って縮む」）に合わせたため。`set -e` は
+  意図的に使われていないのでこの書き方で動く
+
+### (b) `src/pq/__init__.mojo` の文書（+48 行、モジュール docstring のみ）
+
+- 4 行目に「Phase 2 adds `params`, `prepared`, `transaction`.」
+- 新 `## Parameters` 節: REQ §4.1 の送信形式表（列は **Mojo 型 / 送信形式 / OID / 備考**）と
+  `conn.execute(sql, [1, "a", Param.null()])` の例。表は `src/pq/params.mojo` の 19 本の
+  `@implicit __init__` に突き合わせて書いた（**REQ §4.1 と実装の食い違いなし**):
+  `Bool` 16 / `Int16` 21 / `Int32` 23 / `Int64`・`Int` 20 / `Float32` 700 / `Float64` 701 はバイナリ、
+  `String`・`StringLiteral` は **OID 0 のテキスト**（サーバーが推論）、`List[UInt8]` は **17 のバイナリ**
+- NULL の段落は決めた事項 4 / 14-5 どおり: `Param.null()` と `Param.null(oid)`、`SELECT $1::int4` は `null(23)`、
+  **素の `None` リテラルは変換されない**ので `Optional[Int](None)` / `var x: Optional[Int] = None` と書く
+- 新 `## Transactions` 節: P1 の規約 1 段落（`Transaction[origin]` / `PreparedStatement[origin]` は
+  **最後に使う行**の直後に破棄される → `commit()` / `rollback()` / `_ = tx^` / `_ = stmt^` を最後に置き、
+  状態確認は**その後**の `conn.execute`。`_ = x^` は破棄ではなく「ここまで生かす」マーカー）
+- `## PgErrorKind` に決めた事項 20 の非対称を追記: **`sql` の NUL は `TYPE_MISMATCH`、`String`
+  パラメータ値の NUL は `USAGE`**。既存の `USAGE` 項目と「exactly six values」は T2 で入っていたので触っていない
+
+### (c) docstring 照合（6 項目。実行した `grep` と出力）
+
+| # | 項目 | コマンドと結果 |
+|---|---|---|
+| 1 | `Transaction` に「last use」/「ASAP」+ 負の例 | `grep -nE 'last use\|ASAP' src/pq/transaction.mojo` → 4 行（`:42` ASAP / `:101` ASAP / `:108` `tx.commit()  # last use` / `:114` `_ = tx.execute(a)  # last use of tx`）。`grep -c 'conn.execute(b)' src/pq/transaction.mojo` → **1** ✓ |
+| 2 | `execute(sql, params)` に「single statement」（D13） | `grep -n 'single statement' src/pq/connection.mojo` → `296: Only a single statement is allowed, because ...` ✓ **（turn 9 で追記。それまで 0 件 — 下記「申し送りの訂正」）** |
+| 3 | `set_rollback_failure_handler` に「copied when `transaction()`」（D9） | ``grep -n 'copied when `transaction()`' src/pq/connection.mojo`` → `808: The handler is **copied when \`transaction()\`** is called, ...` ✓ |
+| 4 | `PreparedStatement` に ROLLBACK / DDL 巻き戻しの注意（RESEARCH §3-8） | `grep -n 'survives `ROLLBACK`\|rollback undoes DDL\|rolled-back transaction' src/pq/prepared.mojo` → `:40` / `:43`（既存・モジュール docstring）+ **`:73`（turn 9 で追記・struct docstring）** ✓ |
+| 5 | `commit()` に「`ROLLBACK` command tag → `PgError`」（D10） | ``grep -n 'command tag `ROLLBACK`' src/pq/transaction.mojo`` → `238:` ✓（`:246-247` にも `COMMIT resulted in ROLLBACK: the transaction was aborted` の文言）|
+| 6 | `__deinit__` と書き `__del__` と書かない | `grep -rn '__del__' src/pq` → **0 matches in 13 files** ✓。``grep -rn '`__deinit__`' src/pq`` → 8 hits（result 2 / transaction 4 / prepared 1 / connection 1）|
+
+**申し送りの訂正**: turn 8 の申し送り (3) は「(c) で残っているのは 4 番だけ」としていたが、**2 番も
+欠けていた**（`connection.mojo:296` が "Exactly one statement is allowed" で、D13 の `single statement`
+という文言と一致していなかった）。4 番は `prepared.mojo` のモジュール docstring（`:40`/`:43`）には既にあり、
+PLAN T7 (c) が名指しする `PreparedStatement` **struct** の docstring にはなかったので `:73` に足した。
+どちらも挙動は変えていない（`git diff src/pq/connection.mojo src/pq/prepared.mojo` が docstring 行のみ）。
+
+### (d) 品質（各段の所要つき）
+
+| 判定 | コマンド | 結果 |
+|---|---|---|
+| docstring 診断 0 | `check` 3/6 段（追従先チェックリスト 3 行目のコマンド） | **`missing doc strings outside _ffi: 0`** ✓ |
+| fmt 差分 0 | `pixi run fmt`（親が統合後に 1 回だけ）→ `check` 1/6 段 | **`All done! 30 files left unchanged.`** = 差分ゼロ。1/6 段も PASS ✓ |
+| `fn` 0 件 | `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` | **0 件**（exit 1、出力なし）✓ |
+| 既定ハンドラが黙る | `grep -c 'implicit ROLLBACK failed' build/final_check.log` | **0** ✓ |
+| `check` 6/6 | `/home/parallels/.pixi/bin/pixi run check` | **`final_check: PASS`** ✓ |
+| `package` 警告ゼロ | `/home/parallels/.pixi/bin/pixi run package` | 出力はタスク見出し行のみ ✓ |
+
+所要（`date -Iseconds` と `check` のステージ見出しの時刻から）: 全体 **02:27:05 → 02:29:04**。
+`fmt` 8 s（02:27:05 → 02:27:13）、`check` **111 s**（02:27:13 → 02:29:04）。`check` の内訳:
+1/6 fmt 1 s / 2/6 precompile 1 s / 3/6 docstring 0 s / **4/6 examples 4 s（basic + params の 2 本）** /
+5/6 tests 105 s / 6/6 warnings 0 s。5/6 の中で **test_leak が 59 s**（12/12 PASS、PG17 のみ）。
+
+`check` の 6/6 段は `warning:`（コンパイラ）も `WARNING:`（libpq の notice processor 経由のサーバー警告）も
+**0 件**（`matched lines in build/final_check.log: 0`）。5/6 段で両サーバーの全ファイルが PASS
+（`test_leak` は `PQ_TEST_LEAK_SERVERS=1` で `-- 127.0.0.1:54314 tests/test_leak.mojo skipped` の 1 行）。
+
+**`pixi run test`（両サーバーで test_leak も 2 回）は turn 9 では回していない**。理由: T7 の変更は
+docstring と新規 example だけで `src/pq` の挙動も `tests/test_leak.mojo` も 1 行も変えていないため、
+turn 8 で取った両サーバー 12/12 の測定が有効なまま。`check` の 5/6 段が両サーバーの他 12 ファイルを
+すべて回しているので、T7 (d) の完了基準（`check` 6/6）は満たしている。REQ §5.3 の「両サーバーで leak」は
+turn 8 の実測が根拠（verify が再確認するなら `pixi run test` を 1 回。5〜6 分）。
+
+リーク系列（`check` の 5/6 段、PG17）— Phase 2 の 4 系列は完全に平坦:
+
+```
+connect/query/close  [4092, 4176, 4176, 4176, 4176, 4176, 4176, 4176, 4176]
+failed-open          [4556, 4556, 4556, 4556]
+escape_literal       [4581, 4581, 4581, 4581]
+failed-execute       [4581, 4581, 4581, 4581]
+execute(sql, params) [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679]
+prepare/execute/drop [4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679, 4679]
+transaction/commit   [4680, 4680, 4680, 4680, 4680, 4680, 4680, 4680, 4680]
+transaction/drop     [4680, 4680, 4680, 4680, 4680, 4680, 4680, 4680, 4680]
+```
+
+### (e) 追従先チェックリスト全行の照合（素のシェル。コマンドと出力）
+
+| 行 | コマンド | 結果 |
+|---|---|---|
+| libpq 53 本 | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` | **53** ✓ |
+| 〃 | `grep -cE '^        (String\()?"PQ[A-Za-z]+"\)?,$' tests/test_ffi.mojo` | **53** ✓ |
+| 〃 | `grep -c fifty tests/test_ffi.mojo` | **0**（exit 1）✓ |
+| 〃 | `grep -n '50 本' .gsd-lite/PLAN.md .gsd-lite/PROGRESS.md` | **2 件**（PLAN:41 = チェックリスト自身の「50 → **53 本**」の行、PROGRESS:52 = turn 3 の履歴記述）。どちらも**現在のコードについての陳腐化した主張ではない**ので ✓ と判定（PLAN 訂正に明記）|
+| `PgErrorKind` の「five」 | `grep -rnE 'exactly five\|the five failure\|five failure' src/pq` | **0 件**（exit 1）✓。`__init__.mojo:10` の「the five `PQTRANS_*`」は別物なので残っている |
+| 〃 | `grep -c 'USAGE' src/pq/errors.mojo` | **3**（≥ 3）✓ |
+| 公開 struct 3 型の再エクスポート | `grep -nE 'Param\|PreparedStatement\|Transaction' src/pq/__init__.mojo` | 3 型とも出る: docstring の再エクスポート一覧 `:8-9`、import `:113` `Param` / `:114` `PreparedStatement` / `:116` `Transaction` ✓ |
+| 〃 docstring 診断 | `check` 3/6 段 | `missing doc strings outside _ffi: 0` ✓ |
+| `examples/` を足す | `grep -rn 'examples/' pixi.toml tests/final_check.sh` | `pixi.toml:18 example-params = "mojo run -I src examples/params.mojo"` と `tests/final_check.sh:120 run_logged mojo run -I src examples/params.mojo` で**両方に出る** ✓ |
+| テストファイルを足す | 新規テストファイルなし（T7 は example のみ） | 該当なし。`run_tests.sh` の `test_leak` 特別扱いは未変更 ✓ |
+| libpq を呼ぶ新経路 | `grep -rn 'PQfreemem(' src/pq/*.mojo` | **2 行**（`connection.mojo:667` `escape_literal` / `:709` `escape_identifier`）✓ |
+| 〃 | `grep -rn 'PQexec(' src/pq/*.mojo` | **4 行**（`connection.mojo:279` `execute(sql)` / `:527` describe 失敗時の DEALLOCATE / `prepared.mojo:114` `__deinit__` / `transaction.mojo:167` `__deinit__`）✓ |
+| 〃 | `grep -rc get_function src/pq` | 13 ファイル**全 0** ✓ |
+| 埋め込み NUL の経路 | `grep -rn '_reject_nul' src/pq` | `connection.mojo:352` が `execute(sql, params)`（`:286` 開始）の中にある ✓。他に `:180` conninfo / `:213-214` params key・value / `:278` `execute(sql)` / `:492` `prepare` / `:649`・`:691` escape 系 / `result.mojo:203` / 定義 `errors.mojo:165` |
+| テスト環境の環境変数 | `grep -rn PQ_TEST_LEAK_SERVERS tests/run_tests.sh tests/final_check.sh` | **5 行**（≥ 2）✓（`run_tests.sh:19` コメント / `:82-85` 判定 / `final_check.sh:119` 5/6 段）|
+| リークループ（T6） | `grep -c '^def test_' tests/test_leak.mojo` | **12** ✓ |
+| `PQ_MOJO_LIBPQ`（T1 (b)） | `grep -n 'that one path only' src/pq/_ffi/loader.mojo` | **1 件**（`loader.mojo:10`）✓ |
+| savepoint が `escape_identifier` 経由 | `grep -rn 'escape_identifier' src/pq/transaction.mojo` | `:309` `savepoint` / `:339` `rollback_to` / `:365` `release` の 3 箇所とも ✓ |
+| `fn` を書かない | `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` | **0 件** ✓ |
+
+### サブエージェント運用（2 本並行。報告のうち親が判断した点）
+
+- A / B の対象ファイルは重ならず、統合時の衝突は 0 件。`fmt` は親が 1 回だけ回し、差分ゼロ
+- **依頼文に「申し送りを鵜呑みにせず 6 項目すべて自分で grep して確かめる」と書いたことが効いた**
+  （(c) 2 番の欠落を検出）。仕様を「必ず満たす 1 行の断言」として抜き書きする構成も、A が
+  `tx.commit()` を最後の行に置く規約と件数の期待値 2 を取り違えずに実装できた理由
+- 固定文言（契約外の挙動は実装せず報告だけ）どおり、A は『契約外の提案』3 件（savepoint の効果を
+  行の中身でも表示 / `final_check.sh` の examples 段を配列ループ化 / `pixi.toml` に集約タスク）を
+  実装せず報告のみで返した。**親もいずれも採らなかった**（完了基準は「件数表示」で、2 本では YAGNI）。
+  B は『契約外の提案』なし
+
+### 契約外の変更 0 件
+
+T7 では完了基準の範囲外の変更をしていない（turn 8 の `run_tests.sh` コメント更新のような例はなし）。
+
+### 次への注意
+
+1. **PLAN の全 7 タスクが完了した**ので次は `/gsd-lite-verify`。`phase: "verify"` に遷移済み。
+2. **verify が `pixi run check` を回すときの目安は 80〜115 s**（turn 8 で 82 s、turn 9 で 111 s。
+   同一コード・同一マシンでこの幅があるので、1 回の数字で遅くなったと判断しないこと）。
+   `pixi run test`（両サーバー・test_leak 2 回）は 5〜6 分。
+3. **`pixi run test` を turn 9 では回していない**（理由は (d) 節末尾）。verify が REQ §5.3 の
+   「両サーバーで leak」を自分で確かめたいなら `pixi run test` を 1 回回す。turn 8 の実測が根拠として残っている。
+4. **陽性対照のバイナリと src コピーは `.gsd-lite/logs/.../scratch/turn-008-*` に残っている**（gitignore 済み）。
+   リーク検出力を再確認したいならビルドし直さず実行できる。ただし①のバイナリは 5 テストが FAIL して
+   RSS が約 2.4 GB まで伸びるので注意（turn 8 の申し送り (5) の再掲）。
+5. **(e) の `grep -n '50 本'` が 0 件にならない**のは仕様（チェックリスト自身の行と履歴記述の 2 件）。
+   verify はこれを差し戻さないこと。PLAN T7 の「PLAN 訂正（turn 9 実測）」に理由を書いた。
+6. **turn 8 の申し送りが 1 項目外していた実例がある**（(c) の残りが「4 番だけ」ではなく 2 番もあった）。
+   verify は PROGRESS の申し送りを前提にせず、完了基準そのものを `grep` で確かめ直すこと。
