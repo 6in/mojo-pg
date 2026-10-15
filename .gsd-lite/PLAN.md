@@ -96,7 +96,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `decode_text.mojo`（対象: `src/pq/decode_text.mojo`）
     - B: `tests/test_decode_text.mojo` を「決めた事項」5 の表から独立に書く（契約: `from pq.decode_text import decode_text, parse_bytea_hex`、OID 不一致・パース失敗は `kind == TYPE_MISMATCH`）（対象: `tests/test_decode_text.mojo`）
 
-- [ ] T4: `Connection`（open ×2 / execute / deinit）+ `Result` 本体（所有・メタデータ）+ 接続・実行の異常系テスト
+- [x] T4: `Connection`（open ×2 / execute / deinit）+ `Result` 本体（所有・メタデータ）+ 接続・実行の異常系テスト
   - 完了基準:
     - `src/pq/connection.mojo` `struct Connection(Movable)`: `_conn: PGconnPtr`, `_pq: Pointer[LibpqFFI, MutUntrackedOrigin]`。
       `@staticmethod open(var conninfo: String) raises PgError -> Connection`（`PQconnectdb`）、`@staticmethod open(params: Dict[String, String]) raises PgError -> Connection`（`PQconnectdbParams`, `expand_dbname=0`。P6: 値は `var` の所有コピーで `as_c_string_span()` し、呼び出し後まで生存）。
@@ -107,9 +107,15 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
       `column_type_oid(i) raises PgError -> UInt32`、`affected_rows() -> Int`（`PQcmdTuples` が空なら 0）、内部 `_check_cell(row, col) raises PgError`（範囲外は `PgError(TYPE_MISMATCH, "row index N out of range (0..M)")` / 列も同様。P8）、
       `_is_null(row, col) -> Bool`、`_text(row, col) -> String`（`PQgetvalue` を即コピー。NULL ポインタなら TYPE_MISMATCH）
     - `tests/test_connection.mojo`（PQ_TEST_CONNINFO 必須）に少なくとも: 正常 open → `execute("SELECT 1")` の `row_count()==1` / `column_count()==1`；誤パスワード（conninfo 末尾に ` password=WRONG_pw_123` を足す）→ `kind==CONNECTION` かつ message に `WRONG_pw_123` を含まない（P21。Dict 版でも同じ）；
-      到達不能 Dict `{host:127.0.0.1, port:1, connect_timeout:1}` → CONNECTION；Dict 版正常（conninfo を空白と `=` で分解した Dict）に `application_name` = 100 文字を足して `SELECT current_setting('application_name')` が一致（P6、SSO 超え）；
+      到達不能 Dict `{host:127.0.0.1, port:1, connect_timeout:1}` → CONNECTION；Dict 版正常（conninfo を空白と `=` で分解した Dict）に `application_name` = **63 バイト**を足して `SELECT current_setting('application_name')` が一致（P6、SSO 超え。
+      **PLAN 訂正（turn 6 実測）**: 元は「100 文字」だったが PostgreSQL は `application_name` を NAMEDATALEN-1 = 63 バイトに切り詰め `NOTICE: identifier ... will be truncated` を吐くので 100 文字での一致は原理的に成立しない。
+      63 バイトなら切り詰めが起きず完全一致で検査でき、NOTICE もログに出ない。SSO 境界（23 バイト）は 63 でも十分超える）；
       構文エラー `SELEC 1` → `kind==SERVER`, `sqlstate=="42601"`, `severity=="ERROR"`, `position=="1"`, message に `syntax error`；空文字 / `"   "` → `kind==SERVER`, `message=="empty query"`；複数文 `CREATE TEMP TABLE t(x int); INSERT INTO t VALUES (1),(2)` → `affected_rows()==2`；
-      複数文の途中失敗 `SELECT 1; SELEC 2; SELECT 3` → SERVER 42601；`SELECT pg_terminate_backend(pg_backend_pid())` → 1 回目の execute は `PgError`（kind が SERVER なら sqlstate `57P01`、CONNECTION でも可）、**2 回目の execute は `kind==CONNECTION`** かつ message 非空、クラッシュしない（P4 の「サーバー停止後」代替。未検証の手口なので実測と違えば PLAN 訂正）；
+      複数文の途中失敗 `SELECT 1; SELEC 2; SELECT 3` → SERVER 42601；`SELECT pg_terminate_backend(pg_backend_pid())` → 1 回目の execute は `PgError` で **`kind==SERVER` かつ `sqlstate==""` かつ message に `server closed the connection unexpectedly`**、
+      **2 回目の execute は `kind==CONNECTION`** かつ message 非空、クラッシュしない（P4 の「サーバー停止後」代替）。
+      **PLAN 訂正（turn 6 実測、PG14 / PG17 同一）**: 元は「SERVER なら sqlstate `57P01`、CONNECTION でも可」という未検証の期待だったが、libpq は FATAL 57P01 を**一度も届けない**（ソケットが先に閉じる）。
+      `PQexec` はクライアント側生成の `PGRES_FATAL_ERROR`（sqlstate 空）を返すので、決めた事項 6 の表どおり SERVER に分類される。2 回目が CONNECTION になるので P4 の設計自体は成立。
+      **verify への申し送り**: 「結果に sqlstate が無く `PQstatus` が `CONNECTION_BAD` なら CONNECTION に寄せる」という分類規則の追加は決めた事項 6 に触るので本ターンでは実装していない（kind の意味としては CONNECTION の方が正しいという指摘）；
       `var r = conn.execute(...)` の後 `conn` を使わず `_ = conn^` で先に破棄しても `r.row_count()` が読める（P18）；0 行の `SELECT 1 WHERE false` で `row_count()==0`、`column_index("nope")` → TYPE_MISMATCH、`column_name(5)` → TYPE_MISMATCH、`column_name(-1)` → TYPE_MISMATCH、stderr に libpq の `out of range` が出ない（目視ではなくテストが先に弾くので出ない）
     - 負のコンパイル確認（run_tests 外）: `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-NNN-neg-copy.mojo` で `var c2 = c1`（Connection のコピー）がコンパイルエラーになることを `mojo run` で確かめ、結果を PROGRESS に書く（P3）。`tests/test_connection.mojo` にコメントで同じことを記録
     - `pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ

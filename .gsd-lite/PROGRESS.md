@@ -83,3 +83,40 @@
   `Connection` / `Result` が持つのは `libpq_ptr()`（`Pointer[LibpqFFI, MutUntrackedOrigin]`）。テストから `raises PgError` の API を呼ぶには
   `PgError` → `Error` 変換ヘルパーが必要（`tests/test_decode_text.mojo` の `_ok` / `_error_kind` / `_error_message` がそのまま参考になる形）。
   `pg_terminate_backend` の切断シミュレーション（T4 完了基準）は research 未検証なので、実測が期待表と違えば実測を正に PLAN 訂正する
+
+## turn 6 — impl — T4 `Connection` + `Result` 本体 + 接続・実行の異常系テスト
+- やったこと: サブエージェント 3 本（A: `src/pq/connection.mojo` / B: `src/pq/result.mojo` / C: `tests/test_connection.mojo` を契約から独立に）で並行実装し統合。
+  `pixi run test` は両サーバーで 156 件 PASS / 0 FAIL（connection 14 / decode_text 49 / errors 3 / ffi 7 / loader_fail 1 / smoke 4 ×2）、`FAIL` `warning:` `out of range` `NOTICE` はログ全体で grep 0 件、
+  `pixi run package` exit 0、`pixi run fmt` 差分なし（17 ファイル）、docstring 診断（合成 dunder 除外）0 件
+- 負のコンパイル確認（P3）: `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-006-neg-copy.mojo` の `var c2 = c1` は
+  `error: value of type 'Connection' cannot be implicitly copied, it does not conform to 'ImplicitlyCopyable'` + `note: consider transferring the value with '^'` でコンパイル失敗。**期待どおり**（`Connection` は `Movable` のみ）
+- 想定外: (1) **`pg_terminate_backend` の実測が期待表と違った**（PLAN 訂正へ）。libpq は FATAL `57P01` を**一度も届けない**（ソケットが先に閉じる）。
+  1 回目の execute は `kind=SERVER` / `sqlstate=""` / message `server closed the connection unexpectedly`、2 回目以降は `kind=CONNECTION` / `no connection to the server`。PG14 / PG17 同一。
+  決めた事項 6 の表（FATAL_ERROR → SERVER）に実装は忠実なので**実装は変えず PLAN の期待値を実測に合わせた**
+  (2) **PostgreSQL は `application_name` を NAMEDATALEN-1 = 63 バイトに切り詰め** `NOTICE: identifier ... will be truncated` を stderr に吐く。
+  → 完了基準の「100 文字で一致」は原理的に成立しない。**63 バイトに変更**して完全一致で検査できるようにした（NOTICE もログから消えた。SSO 境界 23 バイトは 63 でも超える）
+  (3) `PQerrorMessage(NULL conn)` は `"connection pointer is NULL\n"` を返しクラッシュしない（A 実測）。`execute` の NULL 結果経路のメッセージは degenerate な場合でも壊れない
+  (4) `expand_dbname=0` の字義性を A が実測: `dbname` に `postgresql://...` URI を入れると**データベース名として扱われ** URI の host は無視されて unix socket にフォールバックする（docstring の「URI は `open(String)` を使え」の裏付け）
+  (5) 複数文の失敗の `position` は**文字列全体での位置**（`SELECT 1; SELEC 2; SELECT 3` で `11`、`1` ではない）
+  (6) **列名はサーバー版で違う**: 別名なしの `true` の `column_name` は PG17 が `?column?`、PG14 が `bool`。OID と値は全バージョン同一。**T5 で列名を assert しないこと**
+  (7) `pixi run fmt` はリポジトリ全体（`src/ tests/ examples/ hello.mojo`）を対象にするので、並行実装中にサブエージェントが走らせると**他のサブエージェントの編集中ファイルを書き換える**。
+  実際に A の fmt が B の `result.mojo` を reformat した（B は `precompile` 警告ゼロを再確認済みで被害なし）。**次回は fmt を親だけが統合後に走らせる**とサブエージェントに明記する
+- やり直し: 0 回（統合時のコード修正なし。親が直したのは C のテスト 2 本の期待値のみ = 上記 想定外 (1)(2)）
+- PLAN 訂正: 2 件（どちらも要件・決定に触れない実測反映）。
+  (a) T4 完了基準の `application_name` を「100 文字」→「**63 バイト**」（NAMEDATALEN-1。根拠: 切り詰め + NOTICE の実測）
+  (b) T4 完了基準の `pg_terminate_backend` の 1 回目を「SERVER なら sqlstate 57P01、CONNECTION でも可」→「**SERVER かつ sqlstate 空かつ message に `server closed the connection unexpectedly`**」（根拠: PG14 / PG17 での実測）
+- 既存テストの期待値の変更: なし（新規 3 ファイルのみ。既存ファイルは未編集）。親が変更したのは**このターンで新規作成された** `tests/test_connection.mojo` の 2 本（上記 PLAN 訂正に対応）
+- 追従先チェックリスト: 該当 3 行を実行。
+  「テストファイルを足す」→ `pixi run test` のログに `tests/test_connection.mojo` が 2 回（両サーバー）出る ✓。
+  「公開 struct / メソッドを足す」→ docstring 診断（`_ffi` と合成 dunder を除外）0 件 ✓。
+  「libpq を呼ぶ新しい経路を足す」→ `grep -c get_function src/pq` = 0 ✓、`char*` は全箇所で即 `String` コピー（`connection.mojo` / `result.mojo` の struct フィールドは `PGconnPtr` / `PGresultPtr` / `Pointer[LibpqFFI,...]` / `Int` のみで生ポインタを保持しない）✓、`PQfreemem` はまだ 0 箇所（escape 2 メソッドは T6）。
+  非該当: 「libpq 関数のバインディング」（`functions.mojo` 未編集）/「`Row.get[T]` の対応型」（T5）/「`PgErrorKind` を足す」（追加なし）/「`examples/` を足す」（追加なし）
+- verify への申し送り: **`execute` のエラー分類**。「結果に sqlstate が無く `PQstatus` が `CONNECTION_BAD`」のケース（= 接続が死んだ）を `SERVER` ではなく `CONNECTION` に寄せる規則の追加は、
+  決めた事項 6 の表に触るので本ターンでは実装していない。kind の意味（`CONNECTION` = 接続がもう使えない）としては CONNECTION の方が正しいという C の独立指摘なので、判断を verify に委ねる。
+  併せて: 接続失敗の message には host / port / user が平文で入る（password は入らない）。P21 を「conninfo の文字列が一切入らない」と文字どおり取ると不整合なので「秘密情報を含まない」への文言修正を提案
+- 次への注意: T5（`Row` / `RowIter` / `Iterable`）は `src/pq/result.mojo` に**追記**する（`Result` 本体は完成済み。`_check_cell` / `_is_null` / `_text` が `Row.get` 用の内部 API）。
+  `Row.get` は必ず `_is_null` → `_text` の順で呼ぶこと（`_text` は SQL NULL と空文字の両方で `""` を返すので区別できない）。
+  `Result.__init__` は `raises` 無しなので NULL 結果を弾けない（`execute` が `PQresultStatus` を先に見て守っている。T5 で別経路から `Result` を作らないこと）。
+  `column_index(name: String)` は `as_c_string_span()` が `mut self` なので毎回 `name.copy()` している。`var name: String` に変えれば 1 コピー省けるが T5 の呼び出し側に影響するので T5 で判断（B の契約外の提案）。
+  **T5 のテストで列名を assert しない**（上記 想定外 (6)）。`application_name` の値一致を T5 で見るなら 63 バイト前提。
+  `tests/test_connection.mojo` は 1 サーバーあたり ≈ 50 s かかる（`connect_timeout=1` の到達不能テストと切断テストが主因）。T7 のリークテスト（≈ 35 s/サーバー）と合わせると `pixi run test` が 1 回 3 分前後になる見込み
