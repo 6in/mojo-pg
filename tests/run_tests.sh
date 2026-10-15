@@ -92,7 +92,7 @@ for conninfo in "${conninfos[@]}"; do
             continue
         fi
         echo "== $label $f"
-        # Per-file wall clock: tests/test_leak.mojo alone runs for ~40 s, so
+        # Per-file wall clock: tests/test_leak.mojo alone runs for ~57 s, so
         # the timings are what tells a slow suite apart from a hung one.
         started=$SECONDS
         mojo run -I src "$f" || status=1

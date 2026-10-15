@@ -31,8 +31,8 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     T1 で「コピーに `mojo format` → `diff -r`」に変えたあとは作業木のままで回せる
   - T1 以降 `check` の 5/6 段は `PQ_TEST_LEAK_SERVERS=1` で `test_leak` を **PG17（54317）だけ**回す。`pixi run test` は両方で回す（REQ §5.3）
   - 6/6 段は `warning:`（コンパイラ）に加えて **`WARNING:`（libpq の notice processor がサーバー WARNING を stderr に出したもの）も 0 件**を要求する（T1 で追加。P13）
-- 所要の目安: Phase 1 末の `check` は 96 s（test_leak 42〜43 s/サーバー）。T1 で 1 サーバー化、T6 で Phase 2 ループ 4 本（各 10,000 回）が乗るので
-  `check` は 2〜3 分、`pixi run test` は 4〜6 分を見込む。impl は所要を PROGRESS に書く
+- 所要の目安: Phase 1 末の `check` は 96 s（test_leak 42〜43 s/サーバー）。T1 で 1 サーバー化、T6 で Phase 2 ループ 4 本（各 10,000 回）が乗る。
+  **T6 完了時点の実測: `check` 82 s（test_leak 1 サーバー 57〜58 s）、`pixi run test` 5〜6 分**（当初見込みの `check` 2〜3 分は過大 — T6 の PLAN 訂正）。impl は所要を PROGRESS に書く
 
 ## 追従先チェックリスト
 
@@ -245,7 +245,12 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `tests/test_transaction.mojo` を (b) から独立に書く（対象: `tests/test_transaction.mojo`。契約: `from pq.transaction import Transaction`、`Transaction[origin]` をフルに書く、ハンドラは非キャプチャ `def(e: PgError)` で `setenv`）
     - C: `tests/test_savepoint.mojo` を (c) から独立に書く（対象: `tests/test_savepoint.mojo`）
 
-- [ ] T6: `tests/test_leak.mojo` に Phase 2 の 4 ループ（params / prepared / tx commit / tx 破棄 ROLLBACK）+ 陽性対照 3 本
+- [x] T6: `tests/test_leak.mojo` に Phase 2 の 4 ループ（params / prepared / tx commit / tx 破棄 ROLLBACK）+ 陽性対照 3 本
+  - **PLAN 訂正（turn 8 実測）**: 「所要の目安」の `check` 2〜3 分は過大だった。Phase 2 の 4 ループは
+    接続を 1 本使い回すので 10,000 回でも計 **18 s**（params 3.9 / prepared 5.5 / tx commit 4.4 /
+    tx drop 4.3）にしかならず、`test_leak` は 1 サーバー 40 s → **57〜58 s**、`check` 全体は
+    **82 s**（02:15:36 → 02:16:58）に収まった。`Connection.open` の ~3.5 ms/回が乗る Phase 1 の
+    connect ループ（35 s）が依然この 1 ファイルの大半で、Phase 2 のループは相対的に安い
   - 完了基準:
     - (a) 各 10,000 回、`MAIN_WARMUP` 1,000、9 サンプル、tolerance は T1 で決めた `TOLERANCE_PAGES`、接続は 1 本を使い回す（connect ループは Phase 1 が持つ）:
       `test_execute_params_does_not_leak`: `conn.execute("SELECT $1::bytea, $2::text", [<64 KiB bytea>, <64 KiB text>])` → 結果を破棄（`_ParamBuffers` と `PGresult` の両方が毎回解放されることを RSS で）；

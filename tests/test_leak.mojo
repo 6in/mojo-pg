@@ -30,10 +30,25 @@ by its own unit tests there.
 The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
 `postgres://` URI: these tests append ` password=...` to it).
 
-This file is slow by design: the main loop alone is ~35 s per server once the
-binary is built, on top of the one-off `mojo build`. The `is_leaking` unit
-tests need no database and are declared first so a broken verdict fails
-before any loop runs.
+Twelve tests, in the order they run:
+
+- Four `is_leaking` unit tests. They need no database and are declared first
+  so a broken verdict fails before any loop runs.
+- Four Phase 1 loops: `connect/query/close`, `failed-open`, `escape_literal`,
+  `failed-execute`. These cover `PQfinish`, `PQclear` on the failure path and
+  `PQfreemem`.
+- Four Phase 2 loops: `execute(sql, params)`, `prepare`/`execute`/drop,
+  `transaction` + `commit`, and `transaction` + implicit `ROLLBACK` on drop.
+  These cover the `PGresult`s that `_ParamBuffers`, `PreparedStatement` and
+  `Transaction` own on top of the ones `Result` owns -- including the two
+  `__deinit__` paths that call `PQexec` directly (`DEALLOCATE` and the
+  implicit `ROLLBACK`) and so have to `PQclear` without a `Result` to do it.
+
+This file is slow by design: measured per server once the binary is built, the
+Phase 1 connect loop alone is ~35 s, the other three Phase 1 loops ~4 s, and
+the four Phase 2 loops ~18 s, for ~57 s in total on top of the one-off
+`mojo build`. The Phase 2 loops are cheap next to the connect loop because
+they reuse one connection; `Connection.open` is what costs ~3.5 ms a time.
 """
 
 from std.os import getenv
@@ -42,7 +57,10 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from pq.connection import Connection
 from pq.errors import PgError
+from pq.params import Param
+from pq.prepared import PreparedStatement
 from pq.result import Result
+from pq.transaction import Transaction
 
 comptime DEFAULT_CONNINFO = (
     "host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test"
@@ -239,6 +257,133 @@ def _execute(conn: Connection, var sql: String) raises -> Result:
         raise Error(String(e))
 
 
+def _execute_params(
+    conn: Connection, var sql: String, params: List[Param]
+) raises -> Result:
+    """Run `sql` on `conn` with bound parameters.
+
+    Args:
+        conn: An open connection.
+        sql: The single statement to run.
+        params: The values bound to `$1`, `$2`, ... in order.
+
+    Returns:
+        The result of the statement.
+
+    Raises:
+        Error: If `execute` raised a `PgError`.
+    """
+    try:
+        return conn.execute(sql^, params)
+    except e:
+        raise Error(String(e))
+
+
+def _prepare(
+    conn: Connection, var sql: String
+) raises -> PreparedStatement[origin_of(conn)]:
+    """Prepare `sql` on `conn`, letting the server infer the parameter types.
+
+    Args:
+        conn: An open connection.
+        sql: The single statement to prepare.
+
+    Returns:
+        The prepared statement.
+
+    Raises:
+        Error: If `prepare` raised a `PgError`.
+    """
+    try:
+        return conn.prepare(sql^)
+    except e:
+        raise Error(String(e))
+
+
+def _stmt_execute[
+    origin: ImmOrigin, //
+](stmt: PreparedStatement[origin], params: List[Param]) raises -> Result:
+    """Execute `stmt` with bound parameters.
+
+    Parameters:
+        origin: Origin of the `Connection` the statement views; inferred.
+
+    Args:
+        stmt: The prepared statement to run.
+        params: The values bound to `$1`, `$2`, ... in order.
+
+    Returns:
+        The result of the statement.
+
+    Raises:
+        Error: If `PreparedStatement.execute` raised a `PgError`.
+    """
+    try:
+        return stmt.execute(params)
+    except e:
+        raise Error(String(e))
+
+
+def _transaction(conn: Connection) raises -> Transaction[origin_of(conn)]:
+    """Begin a transaction block on `conn`.
+
+    Args:
+        conn: An idle, open connection.
+
+    Returns:
+        The open transaction block, with its `BEGIN` already sent.
+
+    Raises:
+        Error: If `transaction` raised a `PgError`.
+    """
+    try:
+        return conn.transaction()
+    except e:
+        raise Error(String(e))
+
+
+def _tx_execute[
+    origin: ImmOrigin, //
+](mut tx: Transaction[origin], var sql: String) raises -> Result:
+    """Run `sql` inside `tx` without parameters.
+
+    Parameters:
+        origin: Origin of the `Connection` the block views; inferred.
+
+    Args:
+        tx: The open transaction block.
+        sql: The statement to run.
+
+    Returns:
+        The result of the statement.
+
+    Raises:
+        Error: If `execute` raised a `PgError`.
+    """
+    try:
+        return tx.execute(sql^)
+    except e:
+        raise Error(String(e))
+
+
+def _tx_commit[origin: ImmOrigin, //](mut tx: Transaction[origin]) raises:
+    """Commit `tx`.
+
+    Parameters:
+        origin: Origin of the `Connection` the block views; inferred.
+
+    Args:
+        tx: The open transaction block.
+
+    Raises:
+        Error: If `commit` raised a `PgError`.
+    """
+    try:
+        tx.commit()
+    except e:
+        raise Error(String(e))
+
+
 def _open_error(var conninfo: String) raises -> PgError:
     """Return the `PgError` raised by `Connection.open(conninfo)`.
 
@@ -385,6 +530,21 @@ def _payload(size: Int) -> String:
     return out^
 
 
+def _payload_bytes(size: Int) -> List[UInt8]:
+    """Build the oversized `bytea` value a loop binds to a parameter.
+
+    Args:
+        size: Length in bytes.
+
+    Returns:
+        `size` bytes, the one at index `i` being `i % 251`.
+    """
+    var out = List[UInt8]()
+    for i in range(size):
+        out.append(UInt8(i % 251))
+    return out^
+
+
 def _assert_stable(
     label: String, samples: List[Int], expected_samples: Int
 ) raises:
@@ -516,6 +676,102 @@ def test_failed_execute_does_not_leak() raises:
         if _is_sample_due(i, ERROR_WARMUP, every):
             _sample("failed-execute", samples)
     _assert_stable("failed-execute", samples, ERROR_SAMPLES)
+    _ = conn^
+
+
+# --- the Phase 2 loops -------------------------------------------------------
+#
+# All four reuse a single connection: `Connection.open` is already covered by
+# the main loop above, and at ~4 ms a round trip it is what the loop should be
+# spending its time on. The payloads are PAYLOAD_BYTES wide for the same
+# reason as in the Phase 1 loops -- see `PAYLOAD_BYTES`.
+
+
+def test_execute_params_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    # Two owners have to free per iteration here, not one: the `_ParamBuffers`
+    # holding the bound values on the way out, and the `PGresult` holding them
+    # again on the way back (text format, so the bytea arrives hex-encoded and
+    # the result is the wider of the two).
+    var params: List[Param] = [
+        _payload_bytes(PAYLOAD_BYTES),
+        _payload(PAYLOAD_BYTES),
+    ]
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var result = _execute_params(conn, "SELECT $1::bytea, $2::text", params)
+        _ = result^
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("execute(sql, params)", samples)
+    _assert_stable("execute(sql, params)", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+def test_prepared_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    # Four results per iteration: PQprepare's, PQdescribePrepared's,
+    # PQexecPrepared's, and the one the DEALLOCATE in
+    # `PreparedStatement.__deinit__` gets back. Only the third is big, and
+    # only the fourth is cleared by hand rather than by a `Result`.
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ") WHERE $1 = 1"
+    var params: List[Param] = [Int32(1)]
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var stmt = _prepare(conn, sql.copy())
+        var result = _stmt_execute(stmt, params)
+        _ = result^
+        _ = stmt^
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("prepare/execute/drop", samples)
+    _assert_stable("prepare/execute/drop", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+def test_transaction_commit_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var tx = _transaction(conn)
+        var result = _tx_execute(tx, sql.copy())
+        _ = result^
+        # The last use of `tx`, as the `Transaction` docstring requires: the
+        # BEGIN and COMMIT results both go through `Connection.execute`, so
+        # a `Result` owns them.
+        _tx_commit(tx)
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("transaction/commit", samples)
+    _assert_stable("transaction/commit", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+def test_transaction_drop_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var tx = _transaction(conn)
+        var result = _tx_execute(tx, sql.copy())
+        _ = result^
+        # Dropping `tx` uncommitted runs the implicit ROLLBACK in
+        # `Transaction.__deinit__`, which cannot raise and so calls `PQexec`
+        # and `PQclear` directly instead of going through `Result`.
+        _ = tx^
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("transaction/drop", samples)
+    _assert_stable("transaction/drop", samples, MAIN_SAMPLES)
     _ = conn^
 
 
