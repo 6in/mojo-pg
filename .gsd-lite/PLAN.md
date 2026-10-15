@@ -165,14 +165,23 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `Connection.execute(sql, params)` + `__init__.mojo` の 1 行（対象: `src/pq/connection.mojo`, `src/pq/__init__.mojo`。契約: 決めた事項 5 の `_ParamBuffers` アクセサ名と 6 の手順）
     - C: `tests/test_params.mojo` を (c) の箇条書きから独立に書く（対象: `tests/test_params.mojo`。契約: `from pq.params import Param`、エラー kind は上の各項目どおり）
 
-- [ ] T4: `prepared.mojo`（`PreparedStatement[origin]`）+ `Connection.prepare` + 接続ごとの連番 + `tests/test_prepared.mojo`
+- [x] T4: `prepared.mojo`（`PreparedStatement[origin]`）+ `Connection.prepare` + 接続ごとの連番 + `tests/test_prepared.mojo`
+  - **PLAN 訂正（turn 6 実測）**: (b)-1 の `execute([1, 2, "x"])` は**失敗する**（`SERVER` / `22003` ではなく
+    **`22P03` `incorrect binary data format in bind parameter 1`**）。リスト literal の `1` は `Param(Int)`
+    = OID 20 の 8 byte バイナリだが、`PQexecPrepared` には `paramTypes` 引数が無く、パラメータ型は
+    `PQprepare` の時点で int4 に確定しているため、サーバーは 8 byte を int4 として読んで長さ不一致になる。
+    **`execute(sql, params)`（`PQexecParams`）とは非対称**: あちらは OID 20 を一緒に送るので assignment cast
+    が効き `Int(5)` が int4 列に入る（T3 (c)-6 の B1）。prepared 経路では効かない。
+    期待値を **`execute([Int32(1), Int32(2), "x"])` → `get[Int32](0) == 3`** に訂正した
+    （`$1::int4` に束縛する値は `Int32` で書く。決めた事項 9 の「execute は個数だけ検査し型強制はしない」の帰結で、
+    要件・決定には反しない）。実測: `scratch/turn-006-probe-int8-int4.mojo`
   - 完了基準:
     - (a) `src/pq/prepared.mojo` と `Connection.prepare(ref self, var sql: String, param_types: List[UInt32] = List[UInt32]()) raises PgError -> PreparedStatement[origin_of(self)]` を **決めた事項 9 / 10** どおり。
       `Connection` に `var _stmt_counter: List[Int]`（`__init__` で `[0]`）と `_next_stmt_name(self) -> String`（`pq_stmt_N`。不変 `self` からの更新は `MutUntrackedOrigin` キャスト、plan プローブ (4)）。
       `src/pq/__init__.mojo` に `from .prepared import PreparedStatement`
     - (b) `tests/test_prepared.mojo` に少なくとも:
       1. `prepare("SELECT $1::int4 + $2::int4, $3")` → `name() == "pq_stmt_1"`、`param_count() == 3`、`param_type_oid(0) == 23` / `(1) == 23` / `(2) == OID_TEXT`（`from pq.decode_text import OID_TEXT`。D2 の実測 25）、`param_type_oid(3)` / `(-1)` → `TYPE_MISMATCH`（message `parameter index 3 out of range (0..2)`。P20）；
-         `execute([1, 2, "x"])` → `get[Int32](0) == 3`、`get[String](1) == "x"`（D7）；同じ接続で 2 本目を `prepare` → `"pq_stmt_2"`；**別の `Connection` を開くと最初が `"pq_stmt_1"`**（接続ごとのカウンタ。P9）
+         `execute([Int32(1), Int32(2), "x"])` → `get[Int32](0) == 3`、`get[String](1) == "x"`（D7。**`[1, 2, "x"]` は `22P03`** — 上の PLAN 訂正）；同じ接続で 2 本目を `prepare` → `"pq_stmt_2"`；**別の `Connection` を開くと最初が `"pq_stmt_1"`**（接続ごとのカウンタ。P9）
       2. **個数不一致はローカル検査（D15）**: `execute([1])` → `kind == USAGE`、message に `3` と `1` を含む、sqlstate 空。`execute("BEGIN")` の中で同じことをしても `transaction_status() == PQTRANS_INTRANS` のまま（サーバーに届けば 08P01 で abort する。C1 と対照）→ `ROLLBACK`
       3. **`__deinit__` の DEALLOCATE と ASAP（P2）**: `var stmt = prepare(...)`; `var name = stmt.name()`; `execute("SELECT count(*) FROM pg_prepared_statements WHERE name = $1", [name])` が **1**（この行より後に `stmt` を使う行を置く）→ `_ = stmt^` → 同じ count が **0**
       4. **26000 経路（P19 / 決めた事項 14）**: `prepare` → `conn.execute("DEALLOCATE " + stmt.name())` → `stmt.execute([...])` → `kind == SERVER`, sqlstate `"26000"` → `_ = stmt^` が静かに終わる（テスト PASS、トレースバック無し）→ `conn.execute("SELECT 1")` が通る

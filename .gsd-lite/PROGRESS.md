@@ -291,3 +291,127 @@ final_check: FAIL
 
 - 未該当（後続タスクの担当）: `PreparedStatement` / `Transaction` の再エクスポート（T4 / T5）/
   `examples/` 追加（T7）/ leak 12 本（T6）/ `PgErrorKind` 追加（T2 で完了）
+
+## turn 6 — impl — T4 prepared（`PreparedStatement[origin]` / `Connection.prepare` / test_prepared 13 本）
+
+- やったこと: サブエージェント 2 本（A: `src/pq/prepared.mojo` + `Connection.prepare` / `_stmt_counter` /
+  `_next_stmt_name` + `__init__.mojo` の再エクスポート / B: `tests/test_prepared.mojo` を仕様リスト 1〜12 から
+  独立に 13 本）を対象ファイル非重複で並行実装。親で統合 → B が報告した PLAN との食い違いを自前のプローブで
+  確認 → PLAN 訂正 → `fmt` 1 回 → `package` → docstring 診断 → `test`（両サーバー）→ `check`。
+  完了基準 (a)〜(c) をすべて満たしてコミット（890e76e）
+- 想定外: **(1) PLAN T4 (b)-1 の `execute([1, 2, "x"])` が通らない**（下の PLAN 訂正）。リスト literal の
+  `1` は `Param(Int)` = OID 20 の 8 byte バイナリで、`PQexecPrepared` には `paramTypes` 引数が無く
+  パラメータ型は `PQprepare` 時点で int4 に確定しているため、サーバーが 8 byte を int4 として読んで
+  `22P03 incorrect binary data format in bind parameter 1` になる。**`execute(sql, params)`（`PQexecParams`）
+  との非対称**で、あちらは OID 20 を同送するので assignment cast が効き `Int(5)` が int4 列に入る（T3 (c)-6）。
+  サブエージェント B が「仕様が実物と合わない」として報告してきたので、鵜呑みにせず親が
+  `scratch/turn-006-probe-int8-int4.mojo` で両形を実測して確認した（出力は下記）。
+  (2) **T3 の申し送り (4) の所要の数値は誤り**（`Summary [ N ]` の N は**ミリ秒**で、秒ではない）。
+  実測: `mojo run -I src tests/test_prepared.mojo` の `real` が **1.1 s**（13 テスト、内 100 回の
+  prepare ループ込み。`Summary [ 109.666 ]` = 109 ms）。したがって「`Connection.open` が ~3.6〜4.0 s/回」
+  「test_params が 117 s / 142 s」も ms の読み違いで、正しくは ~4 ms/回・~100 ms/ファイル。
+  **テストの所要が伸びているという T3 の懸念は成立しない**（`pixi run test` の所要は `test_leak` の
+  41 s × 2 サーバーとファイルごとの mojo コンパイル 1〜4 s が支配的で、DB 往復はほぼ無視できる）。
+  T7 で所要を書くときも verify への「接続を共有する案」の申し送りは不要。
+  (3) `self._conn[]._pq[].PQexec(...)` は `mojo format` が `._pq[]` を括弧で包む形に崩すので、
+  A が `var pq = self._conn[]._pq` を挟んで format 安定にした（`prepared.mojo:112, 175`）
+- やり直し: 0 回
+- 次への注意: (1) **PLAN「未プローブ」の 3 項目が全部解消**: `param_types: List[UInt32] = List[UInt32]()`
+  の既定引数は**通る**（2 オーバーロードへの分割は不要）、`-> PreparedStatement[origin_of(self)]` +
+  `Pointer(to=self)` は `ref self` で**通る**、`connection.mojo` ↔ `prepared.mojo` の循環 import も
+  **通る**（どちらも絶対形 `from pq.xxx import`）。T5 の `transaction.mojo` を同じ循環に足すのも同型。
+  (2) **T5 の `Transaction.prepare` は `self._conn[].prepare(sql^, param_types)` に委譲して
+  `PreparedStatement[Self.origin]` を返せる**見込み（どちらも同じ不変 `Connection` 借用由来で origin が一致。
+  PLAN「未プローブ」の懸念はこれで小さいが、実際に通すのは T5）。
+  (3) **T5 は `Connection` の `__init__` と フィールド宣言ブロックを触る**（`_rollback_failure_handler` の追加）。
+  T4 が同じ場所に `_stmt_counter` を足したので、フィールド宣言は `connection.mojo:78-91`、
+  `__init__` 本体は `:96-108` にマージすること。
+  (4) `prepare` の **describe 失敗時の DEALLOCATE 経路（`connection.mojo:467-483`）は未実行のまま**。
+  `PQprepare` 成功直後に `PQdescribePrepared` が失敗する状況（2 往復の間に接続が落ちる）を作れないため、
+  仕様どおり書いてコンパイルは通っているがテストが通っていない。verify への申し送り。
+  (5) T4 が足した生の `PQexec` は 2 箇所（`connection.mojo:476` の describe 失敗時 DEALLOCATE と
+  `prepared.mojo:114` の `__deinit__`）。追従先チェックリストの `PQexec(` は現在 **3 行**で、
+  T5 の `Transaction.__deinit__` が 4 行目になる見込み（PLAN の「4 行」と一致）
+
+### T4 完了基準の実測
+
+- (a) `src/pq/prepared.mojo`（245 行）: `struct PreparedStatement[origin: ImmOrigin](Movable)` で
+  **`Copyable` にしていない**（`__deinit__` の DEALLOCATE 二重送信を型で防ぐ）。フィールドは
+  `_conn: Pointer[Connection, Self.origin]` / `_name: String` / `_param_types: List[UInt32]` の 3 本だけ。
+  `Connection.prepare(ref self, var sql: String, param_types: List[UInt32] = List[UInt32]()) raises PgError
+  -> PreparedStatement[origin_of(self)]` が `connection.mojo:384`、`_next_stmt_name` が `:357`、
+  `var _stmt_counter: List[Int]` が `:86`（`__init__` で `[0]`）。`src/pq/__init__.mojo:66` に
+  `from .prepared import PreparedStatement`、docstring の再エクスポート列挙（`:7-9`）にも追加 ✓
+  - 決めた事項 9 の手順どおり: `_reject_nul` → `_next_stmt_name` → `PQprepare`（hints は
+    `capacity=len+1` の末尾ダミー付き `List[UInt32]`）→ `_take_result`（失敗はそのまま raise。
+    この時点でサーバーに文は無い）→ `PQdescribePrepared` → `_take_result` が失敗したら
+    **生の `PQexec` で `DEALLOCATE` を試み `PQclear` して結果を捨て、元のエラーを `raise e^`** →
+    `PQnparams` / `PQparamtype` を `List[UInt32]` に読む → `desc` は `Result` なので自動 `PQclear`
+  - `execute` は **個数検査（USAGE、サーバーに送らない）→ `_ParamBuffers`（NUL は USAGE）→
+    `PQexecPrepared`（`types_ptr()` は渡さない）→ `_ = buffers^` → `_take_result`** の順 ✓
+  - `__deinit__` は `DEALLOCATE <name>` を生の `PQexec` で送り、非 NULL なら `PQclear`。
+    **結果も接続状態も見ず、raise もハンドラ呼び出しもしない** ✓
+- (b) `tests/test_prepared.mojo` **13 本**（`grep -c '^def test_' tests/test_prepared.mojo` → 13）。
+  PLAN (b)-1〜12 の対応: 1 → 2 本（`test_prepare_describes_and_executes` /
+  `test_statement_numbering_is_per_connection`）/ 2 → 1 / 3 → 1 / 4 → 1 / 5 → 1 / 6 → 1 / 7 → 1 /
+  8 → 1 / 9 → 1 / 10 → 1 / 11 → 1 / 12 → 1。**両サーバーで 13/13 PASS** ✓
+  - 仕様どおり実測一致した要所: `pq_stmt_1` → `pq_stmt_2` の連番と**別接続で `pq_stmt_1` に戻る**、
+    `param_type_oid(0..2) == 23 / 23 / 25`、範囲外が `TYPE_MISMATCH`
+    `parameter index 3 out of range (0..2)`、個数不一致が `USAGE` / `sqlstate` 空で
+    **`BEGIN` 中でも `PQTRANS_INTRANS` のまま**（08P01 が届いていない証拠）、
+    `pg_prepared_statements` の count が生存中 1 → `_ = stmt^` の後 0、手動 `DEALLOCATE` 後の
+    `execute` が `SERVER` / `26000` で破棄は静か、**`BEGIN` → `prepare` → `ROLLBACK` → `execute` が成功**
+    （PLAN 14-1 の PREPARE 非トランザクショナル）、aborted tx 内の破棄では DEALLOCATE が 25P02 で
+    無視され**文がサーバーに残る（count 1。決めた事項 22）**、`prepare("SELEC 1")` / `prepare("SELECT 1; SELECT 2")`
+    が `42601`、`param_types=[20]` の明示と `[23]` + `Param.null()`、`prepare("SELECT $1")` の text 推論、
+    NUL が `USAGE`、100 回ループ後に count 0、接続断後の `execute` が `CONNECTION`
+  - B が仕様から解釈を選んだ点（親が確認して妥当と判断）: `param_type_oid(-1)` は `TYPE_MISMATCH` と
+    `"out of range"` の部分一致だけを固定（文言は index 3 の分だけ PLAN が決めている）；
+    (b)-7 の「失敗した prepare が番号を消費するか」は PLAN に無いので assert していない
+    （実装は消費する。A のプローブで `pq_stmt_4` を確認済み）；(b)-12 の `pg_terminate_backend` 自体の
+    kind / sqlstate は固定せず raise することだけを固定
+- (c) 検証コマンド:
+  - `/home/parallels/.pixi/bin/pixi run test` → **両サーバー全ファイル PASS（0 failed、exit 0）**。内訳（各サーバー同数）:
+    test_connection 28 / test_decode_text 49 / test_encode_binary 14 / test_errors 7 / test_ffi 7 /
+    test_leak 8 / test_loader_fail 1 / test_params 31 / **test_prepared 13** / test_result 15 / test_smoke 4。
+    leak の RSS 系列は両サーバーとも完全に平坦（PG14 `failed-open [4467 ×4]` / `failed-execute [4576 ×4]`）。
+    ログに `warning:` / `WARNING:` は **0 件**
+  - `/home/parallels/.pixi/bin/pixi run check` → **6/6 PASS**（`final_check: PASS`）。**作業木が未コミットのまま**成功。
+    所要 **61 s**（01:35:06 → 01:36:07）。3/6 段 `missing doc strings outside _ffi: 0`、
+    5/6 段で `-- 127.0.0.1:54314 tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=1)`、
+    6/6 段 `matched lines in build/final_check.log: 0`
+  - `/home/parallels/.pixi/bin/pixi run package` → 出力はタスク見出し行のみ = **警告ゼロ** ✓
+  - docstring 診断 → **0** ✓
+  - `/home/parallels/.pixi/bin/pixi run fmt` → `reformatted tests/test_prepared.mojo` /
+    `1 file reformatted, 25 files left unchanged`（親が統合後に 1 回だけ。`check` の 1/6 段より前に実施）
+
+### PLAN 訂正の実測（`scratch/turn-006-probe-int8-int4.mojo`）
+
+```
+name: pq_stmt_1 param_count: 3
+oids: 23 23 25
+Int form oids: 20 20
+Int form: kind = Server  sqlstate = 22P03
+Int form: message = incorrect binary data format in bind parameter 1
+Int32 form: OK sum = 3
+```
+
+`prepare("SELECT $1::int4 + $2::int4, $3")` に対し `[1, 2, "x"]`（`Param(Int)` = OID 20 / 8 byte）は
+`22P03` で失敗し、`[Int32(1), Int32(2), "x"]`（OID 23 / 4 byte）は成功して 3 を返す。
+PLAN T4 (b)-1 の期待値を後者に訂正した（要件・決定に反しない: 決めた事項 9 は
+「`execute` は個数だけ検査し型強制はしない」と定めており、型の整合は呼び出し側の責任）。
+
+#### 追従先チェックリストの照合（T4 該当行）
+
+| 行 | 確かめ方 | 結果 |
+|---|---|---|
+| 公開 struct を足す（`PreparedStatement`） | `grep -nE 'Param\|PreparedStatement\|Transaction' src/pq/__init__.mojo` | `:7-8`（docstring の再エクスポート列挙に `Param` と `PreparedStatement`）/ `:65` `from .params import Param` / `:66` `from .prepared import PreparedStatement` の 4 件 ✓（`Transaction` は T5） |
+| 公開 struct を足す（docstring 診断） | `mojo precompile --diagnose-missing-doc-strings ...` の 'doc string' 件数 | **0** ✓ |
+| libpq を呼ぶ新しい経路を足す | `grep -rn 'PQexec(' src/pq/*.mojo` | **3 行**（`connection.mojo:268` `execute(sql)` / `connection.mojo:476` describe 失敗時の DEALLOCATE / `prepared.mojo:114` `__deinit__`）。PLAN の「4 行（connection ×2 / transaction / prepared）」と整合し、残り 1 行は T5 の `Transaction.__deinit__` ✓ |
+| libpq を呼ぶ新しい経路を足す（`PQfreemem`） | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行 | `connection.mojo:617, 659`（escape_literal / escape_identifier）の **2 行**のまま ✓ |
+| libpq を呼ぶ新しい経路を足す（`get_function` 禁止） | `grep -rc get_function src/pq` 全 0 | 0 件 ✓ |
+| テストファイルを足す | `pixi run test` のログに新ファイル名が 2 回出る | `grep -c '== 127.0.0.1:5431[47] tests/test_prepared.mojo'` → **2** ✓ |
+| `__del__` を書かない（決めた事項 14-4） | `grep -rn '__del__' src/pq tests examples` | 0 件 ✓ |
+| `fn` を使わない | `grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` | 0 件 ✓ |
+
+- 未該当（後続タスクの担当）: `Transaction` の再エクスポート（T5）/ `examples/` 追加（T7）/ leak 12 本（T6）
