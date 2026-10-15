@@ -12,8 +12,9 @@ libpq = ">=14"
 
 [tasks]
 hello = "mojo hello.mojo"
-hello-libpq = "mojo examples/hello_libpq.mojo"
-build = "mkdir -p build && mojo build -o build/hello_libpq examples/hello_libpq.mojo"
+# -I src: examples import `pq`.
+hello-libpq = "mojo run -I src examples/hello_libpq.mojo"
+build = "mkdir -p build && mojo build -I src -o build/hello_libpq examples/hello_libpq.mojo"
 test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
 db-up = "docker compose -f tests/docker-compose.yml up -d --wait"

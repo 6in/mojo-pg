@@ -66,7 +66,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `_ffi/types.mojo` + `_ffi/functions.mojo` + `_ffi/__init__.mojo` + `tests/test_ffi.mojo`（対象: `src/pq/_ffi/*`, `tests/test_ffi.mojo`）
     - C: `run_tests.sh` 2 サーバー化 + `final_check.sh` + `pixi.toml` タスク + `src/pq/__init__.mojo` docstring 修正（対象: `tests/run_tests.sh`, `tests/final_check.sh`, `pixi.toml`, `src/pq/__init__.mojo`）
 
-- [ ] T2: `_ffi/loader.mojo`（`_Global` + `LoadState` + `libpq()`）、smoke / hello をローダー経由に書き換え、ロード失敗テスト
+- [x] T2: `_ffi/loader.mojo`（`_Global` + `LoadState` + `libpq()`）、smoke / hello をローダー経由に書き換え、ロード失敗テスト
   - 完了基準:
     - `src/pq/_ffi/loader.mojo`: `_candidates() -> List[String]`（`PQ_MOJO_LIBPQ` があればそれ 1 本、無ければ Linux `libpq.so.5`, `libpq.so` / macOS `libpq.5.dylib`, `libpq.dylib`, `/opt/homebrew/opt/libpq/lib/libpq.5.dylib`, `/usr/local/opt/libpq/lib/libpq.5.dylib`）、
       `_open() -> LoadState`（非 raising。候補を順に `LibpqFFI(path)` → 成功したら `PQlibVersion() < 140000` なら失敗扱いにして次へ。全失敗で `error` に「`libpq not found. tried: <path>: <原因>; ...`」）、
