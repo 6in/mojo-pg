@@ -51,7 +51,13 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 ## Tasks
 
-- [ ] T1: 持ち越し整理（REQ §6）+ リーク測定を `mojo build` バイナリに切り替え（§5.3）+ `final_check.sh` の fmt 判定 / WARNING 計数
+- [x] T1: 持ち越し整理（REQ §6）+ リーク測定を `mojo build` バイナリに切り替え（§5.3）+ `final_check.sh` の fmt 判定 / WARNING 計数
+  - **PLAN 訂正（turn 3 実測）**: (d) の 1/6 段は `mojo format --quiet build/fmtcheck/src ...` と**ディレクトリを渡しては動かない**。
+    `mojo format` はディレクトリ走査時に `.gitignore` の除外を尊重し、コピー先の `build/` が除外されるため
+    `No Mojo files are present to be formatted` で何も整形せず、`diff -r` が常に一致して**段が常に PASS する無言の no-op**になる。
+    `find build/fmtcheck -name '*.mojo' -type f -print0` の**明示的なファイル列**を渡す形に変更した（明示指定されたファイルは除外されない。Mojo 1.1.0 実測）。
+    陽性対照で `src/pq/errors.mojo` を崩すと実際の `pixi run check` が 1/6 段だけで FAIL することを確認済み
+  - **PLAN 訂正（turn 3 実測）**: (f) の `TOLERANCE_PAGES` は **256 を維持**（16 には下げない）。built binary の 16 系列中 2 系列に +83 ページの一段が出たため（PLAN の分岐どおり）
   - 完了基準:
     - (a) docstring 3 件（REQ §6-1。前回 VERIFICATION round 2 残留リスク）:
       `src/pq/connection.mojo:239-240` の `execute` Raises の `CONNECTION` 説明を「libpq returns no result at all, or the connection was lost while running `sql` **and libpq reported it without an SQLSTATE**（sqlstate 付きの FATAL が先に届いた切断は `SERVER` のまま、次の `execute` で `CONNECTION`）」に；
