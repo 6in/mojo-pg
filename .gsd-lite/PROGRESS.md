@@ -62,3 +62,24 @@
   T4 以降で `Connection` / `Result` が使うのは `libpq_ptr()`（`Pointer[LibpqFFI, MutUntrackedOrigin]` を返す。`__deinit__` から `PQfinish` / `PQclear` を呼ぶ用）で、**T2 では `libpq()` 側しか runtime で通っていない**（origin キャストは `libpq()` が内部で `libpq_ptr()` を呼ぶので実行はされている）。
   テストから `libpq()` を呼ぶときは `PgError` → `Error` の変換ヘルパーが必要（上記 想定外 (3)）。`PQ_MOJO_LIBPQ` を設定すると**それ 1 本だけ**が候補になり OS 既定へのフォールバックは無い（契約どおりの仕様。typo で分かりにくい失敗になりうる点は verify に申し送る）
 
+
+## turn 5 — impl — T3 `decode_text.mojo`（OID 完全一致の型スイッチ）+ 境界値テスト
+- やったこと: サブエージェント 2 本（A: `src/pq/decode_text.mojo` / B: `tests/test_decode_text.mojo` を契約表から独立に）で並行実装し統合。
+  `pixi run test` は両サーバーで 64 件 PASS（decode_text 49 / errors 3 / ffi 7 / loader_fail 1 / smoke 4、`FAIL` と `warning:` は grep 0 件）、`pixi run package` exit 0、`pixi run fmt` 差分なし（14 ファイル）
+- 想定外: (1) **ジェネリックなヘルパーの中で `_ = decode_text[T](...)` と書くと `T: Copyable` では通らない**
+  （`abandoned without being explicitly destroyed: unhandled explicitly destroyed type 'AnyType'`）。テスト側のヘルパーは境界を `T: Copyable & Deinitable` にして解決。
+  具体型での `_ = decode_text[Int32](...)` は問題なし。`decode_text` 自身の境界は契約どおり `T: Copyable` のまま（**T5 の `Row.get[T]` も `T: Copyable` で宣言できるが、テストからジェネリックに捨てるときだけ `Deinitable` が要る**）。
+  (2) `from math import isnan` は不可（`unable to locate module 'math'`）→ **`from std.math import isnan, isinf`**。
+  (3) `atol("-9223372036854775808")` は成功する（RESEARCH は `"9223372036854775808"` の失敗だけを記録していた）ので int8 の両境界が通る。`atol` は Int 幅なので int8 に自前の範囲チェックは不要。
+  (4) `except e:` で `e` を使わなくても未使用警告は出ない（`_ = e` は不要）
+- やり直し: 0 回（統合時の修正なし。B は実装を読まずに契約表だけで書いて初回から 49 件 PASS = 仕様と実装が独立に一致）
+- PLAN 訂正: なし。契約の補足として、決めた事項 5 の「OID 不一致は `column is <oid> but <T の PG 名> was requested`」に加え、
+  T3 完了基準の「全 TypeMismatch の message に期待型名と入力テキストを含む」を満たすため実装の文言を
+  `column is oid 23 but int2 was requested (text: "1")` / `cannot decode "abc" as int4` に確定（どちらも型名 + 入力テキストを含む。テストは部分文字列包含だけを見る）
+- 既存テストの期待値の変更: なし（新規 2 ファイルのみ。既存ファイルは未編集）
+- 追従先チェックリスト: 「`Row.get[T]` の対応型を足す」行は**今回は未適用**。`src/pq/result.mojo`（T4/T5）と `src/pq/__init__.mojo` の型一覧（T6）がまだ無く、
+  今回は対応型の追加ではなく初回作成だから。**T5 / T6 で型マッピング表を書くときに `decode_text.mojo` の表（決めた事項 5）と 1 対 1 で突き合わせること**
+- 次への注意: T4（`Connection` + `Result` 本体）は 3 サブ作業（A: connection / B: result / C: test_connection）。T3 の成果物は読み取り専用で使う（`decode_text` を呼ぶのは T5 の `Row.get`）。
+  `Connection` / `Result` が持つのは `libpq_ptr()`（`Pointer[LibpqFFI, MutUntrackedOrigin]`）。テストから `raises PgError` の API を呼ぶには
+  `PgError` → `Error` 変換ヘルパーが必要（`tests/test_decode_text.mojo` の `_ok` / `_error_kind` / `_error_message` がそのまま参考になる形）。
+  `pg_terminate_backend` の切断シミュレーション（T4 完了基準）は research 未検証なので、実測が期待表と違えば実測を正に PLAN 訂正する
