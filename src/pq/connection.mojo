@@ -24,7 +24,9 @@ from pq._ffi.types import (
     CONNECTION_OK,
     CStr,
     CStrArray,
+    IntPtr,
     MutRawPtr,
+    OidPtr,
     PG_DIAG_CONTEXT,
     PG_DIAG_MESSAGE_DETAIL,
     PG_DIAG_MESSAGE_HINT,
@@ -40,6 +42,7 @@ from pq._ffi.types import (
     PGresultPtr,
 )
 from pq.errors import PgError, PgErrorKind, _reject_nul
+from pq.params import Param, _ParamBuffers
 from pq.result import Result
 
 
@@ -255,6 +258,88 @@ struct Connection(Movable):
             self._conn,
             CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
         )
+        _ = sql^
+        return self._take_result(res)
+
+    def execute(
+        self, var sql: String, params: List[Param]
+    ) raises PgError -> Result:
+        """Run one parameterised statement with `PQexecParams`.
+
+        Placeholders are `$1` through `$n`, numbered from 1 rather than
+        written as `?`, so `params[0]` binds `$1`. The call always goes
+        through `PQexecParams`, including when `params` is empty: it never
+        falls back to `PQexec`.
+
+        Exactly one statement is allowed, because `PQexecParams` builds an
+        unnamed prepared statement: `SELECT 1; SELECT 2` is rejected with
+        SQLSTATE `42601` (`cannot insert multiple commands into a prepared
+        statement`). A single trailing semicolon -- `SELECT 1;` -- succeeds.
+
+        Each `Param` carries its own type OID and wire format:
+
+        | Mojo type | type OID | format |
+        |---|---|---|
+        | `Bool` | 16 | binary, 1 byte |
+        | `Int16` | 21 | binary, 2 byte big-endian |
+        | `Int32` | 23 | binary, 4 byte big-endian |
+        | `Int64` / `Int` | 20 | binary, 8 byte big-endian |
+        | `Float32` | 700 | binary, 4 byte IEEE 754 |
+        | `Float64` | 701 | binary, 8 byte IEEE 754 |
+        | `String` / `StringLiteral` | **0 (unspecified)** | text |
+        | `List[UInt8]` | 17 | binary, the bytes as-is |
+        | `Param.null()` / `Param.null(oid)` | 0 / the given OID | NULL |
+
+        A `String` goes out with OID 0 -- type unspecified -- so the server
+        infers it from context: in `SELECT $1` it becomes `text` (OID 25),
+        while `SELECT $1 + 1` infers `int4`, so `"7"` arrives as 8. An `Int`
+        is sent as `int8` (OID 20), yet PostgreSQL's assignment cast still
+        lets `Int(5)` reach an `int4` column on `INSERT`; a value outside
+        that column's range, such as `Int(3000000000)`, is `22003`.
+
+        The number of parameters is left to the server rather than counted
+        client-side, so passing fewer than the placeholders need is SQLSTATE
+        `08P01`, and the connection remains usable afterwards.
+
+        Results always come back in text form; a binary `result_format` is
+        Phase 3.
+
+        The result is adopted by `_take_result`, the same path `execute(sql)`
+        takes, so both classify failures identically.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            params: The values to bind, `params[0]` binding `$1`.
+
+        Returns:
+            The `Result` of the statement, owning the `PGresult*`.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte, `PgErrorKind.USAGE` when the value of a `String`
+                parameter contains a NUL byte (`embedded NUL byte in
+                parameter $N`; nothing is sent to the server), and
+                `PgErrorKind.CONNECTION` or `PgErrorKind.SERVER` under
+                exactly the classification `_take_result` applies --
+                `CONNECTION` when libpq returns no result at all or the
+                connection was lost and libpq reported it without an
+                SQLSTATE, `SERVER` when the server reports a diagnostic,
+                carrying `sqlstate`, `severity`, `detail`, `hint`,
+                `position` and `context` when libpq supplies them.
+        """
+        _reject_nul(sql, "sql")
+        var buffers = _ParamBuffers(params)
+        var res = self._pq[].PQexecParams(
+            self._conn,
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+            c_int(buffers.count()),
+            buffers.types_ptr(),
+            buffers.values_ptr(),
+            buffers.lengths_ptr(),
+            buffers.formats_ptr(),
+            c_int(0),
+        )
+        _ = buffers^
         _ = sql^
         return self._take_result(res)
 

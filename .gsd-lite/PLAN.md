@@ -123,7 +123,13 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - C: `encode_binary.mojo` + `test_encode_binary.mojo`（対象: `src/pq/encode_binary.mojo`, `tests/test_encode_binary.mojo`。契約: 決めた事項 8 のシグネチャ、期待値は (f)）
     - D: `Result.command_tag()` + `test_result.mojo` 追記 + `Connection._take_result` 抽出（対象: `src/pq/result.mojo`, `tests/test_result.mojo`, `src/pq/connection.mojo`）
 
-- [ ] T3: `params.mojo`（`Param` + `_ParamBuffers`）+ `Connection.execute(sql, params)` + `tests/test_params.mojo`
+- [x] T3: `params.mojo`（`Param` + `_ParamBuffers`）+ `Connection.execute(sql, params)` + `tests/test_params.mojo`
+  - **PLAN 補強（turn 5 実測）**: (a) の「バイナリはそのまま」は保ちつつ、`_ParamBuffers` が
+    バイナリ用バッファを `capacity=len+1` で確保するようにした。libpq は `values[i]` が NULL なら
+    `lengths[i]` に関わらず SQL NULL と解釈するため、**空 `bytea` パラメータが黙って NULL になる**
+    経路があった（空 `List[UInt8]` の `unsafe_ptr()` が NULL を返すかは stdlib の実装詳細）。
+    決めた事項 5 の末尾ダミー 1 要素と同じ趣旨の非 NULL 保証を内側のバッファにも広げた形。
+    送るバイト列は `_data` のままで `lengths` も変えていない
   - 完了基準:
     - (a) `src/pq/params.mojo`: **決めた事項 4** の `Param`（`@implicit` 構築 19 本 + `Param.null()` / `Param.null(oid)`、`oid()` / `is_null()` / `is_binary()`）と **決めた事項 5** の `_ParamBuffers`（`PQexecParams` / `PQexecPrepared` 用の types / values / lengths / formats。
       `lengths` / `formats` は **`List[c_int]`**（P3）、各 List に末尾ダミー 1 要素、テキストは NUL 付きバイト列、String パラメータに NUL があれば **`PgError(USAGE, "embedded NUL byte in parameter $N")`**（N は 1 始まり。P4）。
