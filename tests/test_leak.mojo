@@ -6,9 +6,18 @@ only grows. These tests run each path thousands of times and watch the
 process's RSS instead of asking libpq for a count: that catches a leak no
 matter which of the three frees was forgotten.
 
+Every loop allocates and frees at least `PAYLOAD_BYTES` of libpq-owned memory
+per iteration. That sizing is the whole test, not a detail: `mojo run` hosts
+the compiler in this same process, and the ~100 MiB of compile-time heap it
+frees before `main()` runs stays resident on glibc's free lists. A few-KiB
+`PGresult` per iteration is recycled inside that pool and never moves RSS by a
+single page -- which is why a `SELECT 1` loop passed with every `PQclear`
+deleted (verify round 1, measured: 9 flat samples). The payloads below are
+sized so the pool cannot absorb the leak.
+
 RSS is sampled from `/proc/self/statm`, which only exists on Linux. On macOS
 the loops are skipped rather than reimplemented: `is_leaking` is still covered
-by its own unit tests there, and CI runs Linux.
+by its own unit tests there.
 
 The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
 `postgres://` URI: these tests append ` password=...` to it).
@@ -31,7 +40,49 @@ comptime DEFAULT_CONNINFO = (
 )
 
 comptime WRONG_PASSWORD: StaticString = "WRONG_pw_123"
-"""A password that always fails authentication, to drive the failed-open path."""
+"""A password that always fails authentication, to drive the failed-open path.
+
+The loop appends `OPEN_PAYLOAD_BYTES` of filler to it; see there for why.
+"""
+
+comptime PAYLOAD_BYTES = 65536
+"""Bytes of libpq-owned memory every iteration of every loop must churn.
+
+64 KiB is the floor that makes a forgotten free visible above the compiler's
+freed heap (see the module docstring). Raising it is not free either: a
+leaking loop grows by `PAYLOAD_BYTES` x the sampling interval between samples,
+and that has to stay small enough that the first sample is taken before
+`ABORT_PAGES` is reached.
+
+The failed-open loop uses `OPEN_PAYLOAD_BYTES` instead: it runs 1,000
+iterations rather than 10,000, so it needs more per iteration.
+"""
+
+comptime OPEN_PAYLOAD_BYTES = 262144
+"""Bytes of unparsable conninfo to hand the second failing open per iteration.
+
+The failed-open loop has no `PGresult` to inflate, so it has to inflate the
+`PGconn` itself, and the wrong-password open cannot do that on its own: a
+failed `PGconn` is only ~40 KiB, so 1,000 of them vanished into the compiler's
+freed heap and the loop passed with `PQfinish` deleted (measured). Inflating
+the *password* is not the answer either -- libpq re-keys an HMAC with it on
+each of SCRAM's 4,096 iterations, so a 256 KiB password cost 424 ms per open
+(measured) and pushed the loop to seven minutes.
+
+A conninfo token with no `=` is instead rejected before any round trip, and
+libpq echoes it back verbatim in the connection's error message
+(`missing "=" after "xxx..."`), which lives inside the `PGconn`. 256 KiB x
+1,000 iterations overruns the pool for free.
+"""
+
+comptime ABORT_PAGES = 65536
+"""RSS growth, in pages (256 MiB), at which a loop is cut short as leaking.
+
+`is_leaking` only gets to speak once a loop has finished, and a leaking main
+loop would ask for 64 KiB x 10,000 = 640 MiB before that. `_sample` fails on
+the spot instead, so a real leak costs a few hundred MiB rather than the
+machine.
+"""
 
 comptime TOLERANCE_PAGES = 256
 """How much total RSS growth (in pages) a non-leaking loop may show.
@@ -42,10 +93,11 @@ at an arbitrary iteration of an arbitrary loop — a lazy first-use allocation
 somewhere under libpq, not per-iteration growth. 256 pages (1 MiB) clears two
 such steps.
 
-This only has to be tighter than a *bursty* leak: a steady one shows up as
-strictly increasing samples, which `is_leaking` reports no matter how small
-each step is. A leak of even 100 bytes per iteration grows every single
-sampling interval of every loop here, so the tolerance never has to catch it.
+Total growth, not monotonicity, is the signal that actually fires here: a real
+leak moves thousands of pages per sampling interval, far past this tolerance.
+The monotonic-growth check in `is_leaking` is the backup — the compiler's
+freed heap can flatten the first interval or two before the pool runs out, and
+a flat step there would otherwise clear the loop.
 """
 
 comptime MAIN_ITERATIONS = 10000
@@ -277,6 +329,47 @@ def _describe(samples: List[Int]) -> String:
     return out^
 
 
+def _sample(label: String, mut samples: List[Int]) raises:
+    """Take one RSS sample, failing on the spot if the loop is running away.
+
+    Args:
+        label: Name of the loop, for the message.
+        samples: The loop's samples so far; the new reading is appended.
+
+    Raises:
+        Error: If RSS has grown more than `ABORT_PAGES` past the first sample.
+            The loop must not keep iterating after that.
+    """
+    samples.append(rss_pages())
+    var grown = samples[len(samples) - 1] - samples[0]
+    if grown > ABORT_PAGES:
+        raise Error(
+            label
+            + " RSS pages: "
+            + _describe(samples)
+            + " — grew "
+            + String(grown)
+            + " pages past the first sample, over the "
+            + String(ABORT_PAGES)
+            + " allowed; aborting the loop (leaking)"
+        )
+
+
+def _payload(size: Int) -> String:
+    """Build the oversized value a loop sends, quotes or raises.
+
+    Args:
+        size: Length in bytes. Rounded up to the next power of two.
+
+    Returns:
+        `size` repetitions of `x`.
+    """
+    var out = String("x")
+    while out.byte_length() < size:
+        out += out.copy()
+    return out^
+
+
 def _assert_stable(
     label: String, samples: List[Int], expected_samples: Int
 ) raises:
@@ -330,15 +423,18 @@ def test_connect_query_close_does_not_leak() raises:
     if _skip_on_macos():
         return
     var conninfo = _conninfo()
+    # The row is PAYLOAD_BYTES wide so the PGresult a missing PQclear would
+    # strand is too big for the compiler's freed heap to swallow.
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
     var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
     var samples = List[Int]()
     for i in range(MAIN_ITERATIONS):
         var conn = _connect(conninfo.copy())
-        var result = _execute(conn, "SELECT 1")
+        var result = _execute(conn, sql.copy())
         _ = result^
         _ = conn^
         if _is_sample_due(i, MAIN_WARMUP, every):
-            samples.append(rss_pages())
+            _sample("connect/query/close", samples)
     _assert_stable("connect/query/close", samples, MAIN_SAMPLES)
 
 
@@ -347,14 +443,22 @@ def test_failed_open_does_not_leak() raises:
         return
     # libpq takes the last value given for a repeated key, so appending
     # `password=...` overrides the real one.
-    var conninfo = _conninfo() + " password=" + WRONG_PASSWORD
+    var rejected_conninfo = _conninfo() + " password=" + WRONG_PASSWORD
+    # A trailing token with no `=`, OPEN_PAYLOAD_BYTES long: see there.
+    var unparsable_conninfo = _conninfo() + " " + _payload(OPEN_PAYLOAD_BYTES)
     var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
     var samples = List[Int]()
     for i in range(ERROR_ITERATIONS):
-        var error = _open_error(conninfo.copy())
-        _ = error^
+        # Both failures end at the same `PQfinish` in `Connection._adopt`: a
+        # `PGconn` that came back CONNECTION_BAD. Only the second one is big
+        # enough to see, but the authentication failure is the realistic
+        # shape, so the loop keeps covering it.
+        var rejected = _open_error(rejected_conninfo.copy())
+        _ = rejected^
+        var unparsed = _open_error(unparsable_conninfo.copy())
+        _ = unparsed^
         if _is_sample_due(i, ERROR_WARMUP, every):
-            samples.append(rss_pages())
+            _sample("failed-open", samples)
     _assert_stable("failed-open", samples, ERROR_SAMPLES)
 
 
@@ -362,13 +466,16 @@ def test_escape_literal_does_not_leak() raises:
     if _skip_on_macos():
         return
     var conn = _connect(_conninfo())
+    # Still an apostrophe to quote, but PAYLOAD_BYTES long: what PQescapeLiteral
+    # hands back is what a missing PQfreemem would strand.
+    var value = "O'Reilly " + _payload(PAYLOAD_BYTES)
     var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
     var samples = List[Int]()
     for i in range(ERROR_ITERATIONS):
-        var quoted = _escape_literal(conn, "O'Reilly")
+        var quoted = _escape_literal(conn, value.copy())
         _ = quoted^
         if _is_sample_due(i, ERROR_WARMUP, every):
-            samples.append(rss_pages())
+            _sample("escape_literal", samples)
     _assert_stable("escape_literal", samples, ERROR_SAMPLES)
     _ = conn^
 
@@ -377,13 +484,22 @@ def test_failed_execute_does_not_leak() raises:
     if _skip_on_macos():
         return
     var conn = _connect(_conninfo())
+    # A raised exception carrying a PAYLOAD_BYTES message: the failing
+    # PGresult, which `execute` clears on its non-success path, holds it all.
+    # (A plain `SELEC 1` syntax error is only a few hundred bytes -- too small
+    # to show up in RSS; `tests/test_connection.mojo` covers that path.)
+    var sql = (
+        "DO $$ BEGIN RAISE EXCEPTION '%', repeat('x', "
+        + String(PAYLOAD_BYTES)
+        + "); END $$"
+    )
     var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
     var samples = List[Int]()
     for i in range(ERROR_ITERATIONS):
-        var error = _execute_error(conn, "SELEC 1")
+        var error = _execute_error(conn, sql.copy())
         _ = error^
         if _is_sample_due(i, ERROR_WARMUP, every):
-            samples.append(rss_pages())
+            _sample("failed-execute", samples)
     _assert_stable("failed-execute", samples, ERROR_SAMPLES)
     _ = conn^
 

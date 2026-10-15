@@ -172,12 +172,16 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - `rss_pages() raises -> Int`（`/proc/self/statm` の 2 番目。RESEARCH probe-leak `rss_pages()` と同じ）
     - 判定関数 `is_leaking(samples: List[Int], tolerance_pages: Int) -> Bool` = 「全隣接差分が > 0（単調増加）」**または**「`samples[-1] - samples[0] > tolerance_pages`」。単体テスト: `[100,101,102,103]` → True、`[100,100,101,100]` → False、`[100,100,100,120]`（tolerance 16）→ True、`[100,100,100,100]` → False
       （単体テストは tolerance を引数で渡すので 16 のまま。本体ループが使う既定値は下記 `TOLERANCE_PAGES`）
-    - 本体（Linux のみ。macOS は `print("SKIP: RSS sampling is Linux-only")` して PASS）: `Connection.open(conninfo)` → `execute("SELECT 1")` → 破棄 を **10,000 回**。最初の 1,000 回はウォームアップ、以降 1,000 回ごとに `rss_pages()` を記録（9 サンプル）→ `is_leaking(samples, TOLERANCE_PAGES)` が False（P17。所要 ≈ 35 s/サーバー）。
-      異常系: 誤パスワード `open` 失敗 ×1,000（200 回ウォームアップ後 4 サンプル、同じ tolerance）→ False（P3）；`escape_literal("O'Reilly")` ×1,000（同様）→ False（P14）；`execute("SELEC 1")` 失敗 ×1,000 → False（失敗経路の `PQclear`）
+    - 本体（Linux のみ。macOS は `print("SKIP: RSS sampling is Linux-only")` して PASS）: `Connection.open(conninfo)` → `execute("SELECT repeat('x', 65536)")` → 破棄 を **10,000 回**（クエリは turn 12 / F1 で `SELECT 1` から変更）。最初の 1,000 回はウォームアップ、以降 1,000 回ごとに `rss_pages()` を記録（9 サンプル）→ `is_leaking(samples, TOLERANCE_PAGES)` が False（P17。所要 43〜47 s/サーバー）。
+      異常系（いずれも 200 回ウォームアップ後 4 サンプル、同じ tolerance。turn 12 / F1 で payload を追加）: 誤パスワード `open` 失敗 + 巨大な不正トークンの conninfo の `open` 失敗 ×1,000 → False（P3）；
+      `escape_literal("O'Reilly " + 64 KiB)` ×1,000 → False（P14）；`execute("DO $$ ... RAISE EXCEPTION '%', repeat('x', 65536) ... $$")` 失敗 ×1,000 → False（失敗経路の `PQclear`。`SELEC 1` は数百バイトで RSS に出ないため変更）
       **PLAN 訂正（turn 9 実測）**: 本体ループの `tolerance_pages` を **16 → 256 ページ**（1 MiB）。リークしていないループは ±2 ページで安定するが、
       **1 回だけ 83 ページ（≈332 KiB）の一段**が任意のループの任意の位置で入る（PG14 / PG17 / 4 ループすべてで同値。libpq 配下の遅延初期化と見られる）。
       16 では この一段で落ちるので 4 回に 1 回ほど偽陽性になった（`check` の 1 回目と 3 回連続実測の 3 回目で再現）。256 は同じ一段が 2 回来ても通る。
       定常リークは「全隣接差分 > 0」の側が拾う（100 B/回でも全区間で増える）ので、tolerance を緩めても検出力は落ちない。`is_leaking` の単体テストは tolerance を引数で渡すので 16 のまま
+      **PLAN 訂正（turn 12 / F1 実測）**: 上の「100 B/回でも全区間で増える」は**成立しない**（`mojo run` のコンパイラが解放した ≈100 MiB の常駐ヒープが小さなリークを吸収する。決めた事項 12 の turn 12 追記）。
+      各ループは 64 KiB/反復（failed-open は 256 KiB/反復）を確保・解放する形に変え、`ABORT_PAGES = 65536` ページの早期 fail を足した。
+      検出力は positive control（E1〜E4）で実証済み。所要は 37 s → **43〜47 s/サーバー**に伸びた
     - 4 ループは成功時も RSS サンプル列を `print` する（通っているが漂っている状態をリークの前兆として verify が読めるようにする）
     - `pixi run test` 両サーバー PASS。`run_tests.sh` のログに所要時間が分かる出力（開始・終了の `date` 等）があると verify が助かる（任意）
   - 対象: `tests/test_leak.mojo`
@@ -224,7 +228,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 | E15 | `docker ps` | 54317 / 54314 の公開が `127.0.0.1:543xx->5432/tcp` のみ（`0.0.0.0` / `[::]` に出ない） |
 | E16 | `pixi run check` | 6/6 PASS、`warning:` 0 件、docstring 診断 0 件、fmt 差分なし |
 
-- [ ] F1: リークテストの検出力（verify round 1 の最重要指摘。`PQclear` を全部消しても 9 サンプルが完全に平坦で PASS した = 偽陰性）
+- [x] F1: リークテストの検出力（verify round 1 の最重要指摘。`PQclear` を全部消しても 9 サンプルが完全に平坦で PASS した = 偽陰性）
   - 背景（verify turn 11 実測）: `mojo run` はコンパイラを同一プロセスで動かすので、コンパイル後に解放された ≈100 MB 超のヒープが常駐のまま malloc のフリーリストに残る。
     `SELECT 1` の `PGresult`（数 KB）× 10,000 回のリークはその中に収まり、RSS は 1 ページも増えない（warm cache・baseline 37765 ページの条件でも同じ）。
     `tests/test_leak.mojo:45-48` の「100 バイト/回でも全区間で増える」は成立していない
@@ -234,6 +238,10 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 推奨手段（impl が選んでよい。判定は E1〜E6 だけ）: (a) 1 反復あたりの解放忘れが ≥ 64 KiB になるよう payload を大きくする —
     本体ループは `SELECT repeat('x', 65536)`、escape ループは 64 KiB の文字列、failed-execute ループは `DO $$ BEGIN RAISE EXCEPTION '%', repeat('x', 65536); END $$`
     （失敗 `PGresult` が 64 KiB のメッセージを抱える）、failed-open は `PGconn` 自体が ≈40 KiB なので据え置きで E2 が通るか先に確かめる。
+    **turn 12 実測**: (a) を採った。本体 / escape / failed-execute は上の案どおりで E1 / E3 / E4 が FAIL。**failed-open は据え置きでは E2 が通らなかった**（40 KiB × 1,000 = 40 MiB が
+    コンパイラの解放済みプールに丸ごと収まる。9 サンプル完全に平坦で PASS）。password を 256 KiB にすると E2 は FAIL するが、libpq が SCRAM の 4,096 反復ごとに password を鍵に HMAC を張り直すため
+    **1 回の open が 424 ms**（ループ 7 分）になり不採用。採ったのは「`=` を含まない 256 KiB のトークンを conninfo の末尾に足した 2 本目の失敗 open」（libpq が `missing "=" after "xxx..."` として `PGconn` の errorMessage に echo する。ラウンドトリップ 0 で 3.2 s のまま）。
+    誤パスワードの open も同じループに残してあるので認証失敗の経路の網羅は落ちていない
     (b) RSS の代わりに glibc `mallinfo2()`（`uordblks + hblkhd`）を FFI で読む（解放済みプールの影響を受けない。struct 戻りの扱いが要プローブ）。
     (c) `mojo build` したバイナリで走らせる（コンパイラのヒープが無くなる。`run_tests.sh` の変更が要る）。(a) が最小
   - 対象: `tests/test_leak.mojo`（必要なら `tests/run_tests.sh`）、`.gsd-lite/PLAN.md` の決めた事項 12 / T7
@@ -370,7 +378,13 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 10. **`open(Dict)` は `expand_dbname=0`**（Dict の値は字義どおり。URI 展開が要るなら `open(String)` を使う — docstring に書く）
 11. **テストの接続先**: 各テストファイルが `getenv("PQ_TEST_CONNINFO")` を読み、空なら `host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test`。到達不能は失敗（D4）。
     誤パスワードは conninfo 末尾に ` password=WRONG_pw_123` を連結（libpq は同じキーの後勝ち。key=value 形式のみ対応と `run_tests.sh` に明記）。Dict 版は conninfo を空白 → `=` で分解して作る
-12. **リーク判定**（D6 / P17）: ウォームアップ 1,000 回、以降 1,000 回ごとに RSS ページ数を記録（9 点）、`is_leaking` = 全隣接差分 > 0 **or** 最終 − 初回 > **256 ページ**（turn 9 実測で 16 から訂正。根拠は T7 の完了基準）。異常系ループは 1,000 回（200 回ウォームアップ、4 点）
+12. **リーク判定**（D6 / P17）: ウォームアップ 1,000 回、以降 1,000 回ごとに RSS ページ数を記録（9 点）、`is_leaking` = 全隣接差分 > 0 **or** 最終 − 初回 > **256 ページ**（turn 9 実測で 16 から訂正。根拠は T7 の完了基準）。異常系ループは 1,000 回（200 回ウォームアップ、4 点）。
+    **turn 12 追記（F1。これが無いと判定が偽陰性になる）**: `mojo run` はコンパイラを同一プロセスで動かし、`main()` の前に解放した ≈100 MiB が glibc のフリーリストに常駐するので、
+    **1 反復あたりの解放忘れが小さいループは RSS が 1 ページも動かない**。各ループは意図的に大きな確保をさせる:
+    本体・escape・failed-execute は **64 KiB/反復**（`PAYLOAD_BYTES`。`SELECT repeat('x', 65536)` / 64 KiB の被 quote 文字列 / 64 KiB の例外メッセージ）、
+    failed-open は 1,000 回しか回らないので **256 KiB/反復**（`OPEN_PAYLOAD_BYTES`。`=` を含まない巨大トークンを conninfo に足し、libpq が `PGconn` の errorMessage にそのまま echo する分）。
+    さらに**サンプル取得時に `rss_pages() - samples[0] > 65536` ページ（256 MiB）なら即 fail**（`ABORT_PAGES`。リーク時に 640 MiB 確保しに行かないため）。
+    実測の役割分担: 本体と failed-open は「全隣接差分 > 0」、escape と failed-execute は「最終 − 初回 > 256」が立つ
 13. **`String` → `const char*`**: 引数は `var` で受け取り（所有コピー）、`as_c_string_span()` を 1 回だけ呼び、`CStr(unsafe_from_address=Int(span.ptr()))` で渡す。呼び出しが終わるまで元 `String` を生存させる（`_ = s^` を呼び出しの後に置く。probe-loader `connect_params`）。
     `char*` → `String` は `String(unsafe_from_utf8_ptr=p)`（`OptCStr` は `p.value()`）で**即コピー**
 14. **ロード候補の失敗文言**: `libpq not found. tried: <path>: <OwnedDLHandle のエラー文>; <path2>: ...`。バージョン不足は `<path>: libpq too old: <v> (need >= 140000)` を同じ一覧に入れる
