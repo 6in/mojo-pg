@@ -200,7 +200,18 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `prepared.mojo` + `Connection.prepare` / `_stmt_counter` / `_next_stmt_name` + `__init__.mojo` の 1 行（対象: `src/pq/prepared.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`）
     - B: `tests/test_prepared.mojo` を (b) から独立に書く（対象: `tests/test_prepared.mojo`。契約: `from pq.prepared import PreparedStatement`、`PreparedStatement[origin]` と型パラメータをフルに書く、メソッド名と kind は決めた事項 9）
 
-- [ ] T5: `transaction.mojo`（`Transaction[origin]`）+ `Connection.transaction` / `set_rollback_failure_handler` + `tests/test_transaction.mojo` / `tests/test_savepoint.mojo`
+- [x] T5: `transaction.mojo`（`Transaction[origin]`）+ `Connection.transaction` / `set_rollback_failure_handler` + `tests/test_transaction.mojo` / `tests/test_savepoint.mojo`
+  - **PLAN 訂正（turn 7 実測）**: 決めた事項 10 の `Transaction.prepare` を「`self._conn[]` へ委譲」では書けない。
+    `self._conn[].prepare(...)` の戻りは `PreparedStatement[origin_of(origin)]` という**入れ子 origin**になり、
+    署名に書いた `PreparedStatement[Self.origin]` / `PreparedStatement[origin_of(self._conn[])]` はどちらも
+    `[origin]` に畳まれるため、struct の origin パラメータは不変（invariant）で変換できない。
+    「未プローブ」に書いた代替（`rebind`）も不可（`expression does not designate a value with an origin`、
+    `__disable_del` は 1.1.0 に無い）。そこで `Connection.prepare` の本体を
+    **`Connection._prepare_parts(self, var sql, param_types, mut types) raises PgError -> String`**
+    （不変 `self`。`PQprepare` → `PQdescribePrepared` → describe 失敗時 DEALLOCATE → 名前を返す）に切り出し、
+    `Connection.prepare` と `Transaction.prepare` が**それぞれ自分の借用で** `PreparedStatement` を構築する形にした。
+    FFI 呼び出しの順序・後片付け・エラーは無変更で、`tests/test_prepared.mojo` 13/13 が両サーバーで通ることで確認
+    （決めた事項 9 / 10 の API 契約・公開シグネチャは変わらないので要件・決定には反しない）
   - 完了基準:
     - (a) `src/pq/transaction.mojo` と `Connection` 側の追加を **決めた事項 11 / 12** どおり（`transaction(ref self)`、`set_rollback_failure_handler(mut self, handler: def(PgError) thin)`、`var _rollback_failure_handler: def(PgError) thin` を `__init__` で既定にする）。
       `src/pq/__init__.mojo` に `from .transaction import Transaction`。`Transaction` の docstring に **P1 の規約**（「`Transaction` は最後に使われた文の直後に破棄され、その時点で ROLLBACK が走る。`commit()` / `rollback()` / `_ = tx^` を tx の最後の行に置く。

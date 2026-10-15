@@ -40,11 +40,13 @@ from pq._ffi.types import (
     PGRES_TUPLES_OK,
     PGconnPtr,
     PGresultPtr,
+    PQTRANS_IDLE,
 )
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
 from pq.prepared import PreparedStatement
 from pq.result import Result
+from pq.transaction import Transaction, _default_rollback_failure_handler
 
 
 def _error_field(
@@ -90,6 +92,14 @@ struct Connection(Movable):
     connection immutably; see `_next_stmt_name`.
     """
 
+    var _rollback_failure_handler: def(PgError) thin
+    """Handler every new `Transaction` copies for a failed implicit `ROLLBACK`.
+
+    Replaceable with `set_rollback_failure_handler`; a `Transaction` takes its
+    own copy when `transaction()` runs, so a later replacement never changes
+    an existing one.
+    """
+
     def __init__(
         out self,
         conn: PGconnPtr,
@@ -106,6 +116,7 @@ struct Connection(Movable):
         # `_stmt_counter` starts at 0, so the first `prepare` issues
         # `pq_stmt_1`. Numbering is per connection.
         self._stmt_counter = [0]
+        self._rollback_failure_handler = _default_rollback_failure_handler
 
     def __deinit__(deinit self):
         """Close the connection with `PQfinish` unless it is already NULL."""
@@ -438,6 +449,46 @@ struct Connection(Movable):
                 `severity`, `detail`, `hint`, `position` and `context` when
                 libpq supplies them.
         """
+        var types = List[UInt32]()
+        var name = self._prepare_parts(sql^, param_types, types)
+        return PreparedStatement[origin_of(self)](
+            Pointer(to=self), name^, types^
+        )
+
+    def _prepare_parts(
+        self,
+        var sql: String,
+        param_types: List[UInt32],
+        mut types: List[UInt32],
+    ) raises PgError -> String:
+        """Run the two round trips `prepare` needs and return its parts.
+
+        This is the whole of `prepare` except the final construction. It is
+        split out because the origin a `PreparedStatement` is parameterised on
+        has to be written by whoever holds the borrow: `Transaction.prepare`
+        has to hand out a statement on the transaction's own borrow of the
+        connection, and on Mojo 1.1.0 a `PreparedStatement` returned from
+        `prepare` called through `Pointer.__getitem__` comes back with a
+        nested origin that no signature can spell, so it cannot be converted.
+        Both callers therefore build the value themselves from these parts.
+
+        `self` is borrowed immutably -- the generated name comes from
+        `_next_stmt_name`'s heap cell, not from a mutable field -- so it is
+        callable through the immutable borrow a `Transaction` holds.
+
+        Args:
+            sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
+            param_types: Optional type OID hints, `param_types[0]` for `$1`.
+                An entry of 0 asks the server to infer that parameter.
+            types: Cleared, then filled with the type OID `PQdescribePrepared`
+                reported for each parameter, in `$1`..`$n` order.
+
+        Returns:
+            The generated name of the statement the server now holds.
+
+        Raises:
+            PgError: Exactly what `prepare` documents, for either round trip.
+        """
         _reject_nul(sql, "sql")
         var name = self._next_stmt_name()
         # One dummy element past the hints, so `unsafe_ptr()` is a valid
@@ -482,13 +533,12 @@ struct Connection(Movable):
                 self._pq[].PQclear(dropped)
             raise e^
         var count = Int(self._pq[].PQnparams(desc._res))
-        var types = List[UInt32](capacity=count)
+        types.clear()
+        types.reserve(count)
         for i in range(count):
             types.append(self._pq[].PQparamtype(desc._res, c_int(i)))
         # `desc` is a `Result`, so its PQclear happens on destruction here.
-        return PreparedStatement[origin_of(self)](
-            Pointer(to=self), name^, types^
-        )
+        return name^
 
     def _take_result(self, res: PGresultPtr) raises PgError -> Result:
         """Adopt a finished `PGresult` or raise the error it reports.
@@ -689,3 +739,81 @@ struct Connection(Movable):
             the connection is bad.
         """
         return Int(self._pq[].PQtransactionStatus(self._conn))
+
+    def transaction(ref self) raises PgError -> Transaction[origin_of(self)]:
+        """Send `BEGIN` and return the transaction block it opened.
+
+        The connection must be idle: a second `transaction()` while one is
+        already open is rejected client-side with `PgErrorKind.USAGE` and
+        nothing is sent, so the server never sees the `WARNING: there is
+        already a transaction in progress` that a bare second `BEGIN` would
+        produce. Savepoints, not nesting, are how a block subdivides -- see
+        `Transaction.savepoint`.
+
+        A connection that has already failed is reported as
+        `PgErrorKind.CONNECTION` rather than `USAGE`, and that test runs
+        first: `PQtransactionStatus` answers `PQTRANS_UNKNOWN` on a dead
+        connection, which is not idle either, and losing the server is not an
+        API misuse.
+
+        The returned value borrows the connection immutably, so
+        `Connection.execute` stays callable -- and runs inside the block --
+        while it is alive, but the transaction cannot outlive the connection:
+        that is a compile error. Destroying it without `commit()` or
+        `rollback()` sends `ROLLBACK`, and because Mojo destroys it right
+        after its last use, the `pq.transaction` module docstring is worth
+        reading before mixing `tx.execute` and `conn.execute`.
+
+        Returns:
+            A `Transaction` bound to this connection's origin, holding a copy
+            of the current rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when `PQstatus` is already
+                `CONNECTION_BAD`, carrying libpq's own `PQerrorMessage` text;
+                `PgErrorKind.USAGE` when the connection is not idle
+                (`transaction() requires an idle connection (transaction
+                status N)`, `N` being the `PQTRANS_*` value); otherwise
+                whatever `execute("BEGIN")` raises.
+        """
+        if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        var status = self._pq[].PQtransactionStatus(self._conn)
+        if status != PQTRANS_IDLE:
+            raise PgError(
+                PgErrorKind.USAGE,
+                String(
+                    "transaction() requires an idle connection ",
+                    "(transaction status ",
+                    Int(status),
+                    ")",
+                ),
+            )
+        _ = self.execute("BEGIN")
+        return Transaction[origin_of(self)](
+            Pointer(to=self), self._rollback_failure_handler
+        )
+
+    def set_rollback_failure_handler(mut self, handler: def(PgError) thin):
+        """Install the handler for a `Transaction`'s failed implicit rollback.
+
+        A `Transaction` destructor cannot raise, so when the `ROLLBACK` it
+        sends fails it calls this handler instead.
+
+        The handler is **copied when `transaction()`** is called, so replacing
+        it later does not affect existing `Transaction` values -- install it
+        before opening the block it should cover.
+
+        The default handler writes one line to stderr. A replacement must not
+        raise, which is what the `thin` function type enforces.
+
+        Args:
+            handler: The function to call with the error a failed implicit
+                `ROLLBACK` produced.
+        """
+        self._rollback_failure_handler = handler

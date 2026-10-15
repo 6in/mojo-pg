@@ -5,9 +5,9 @@ Layout follows HANDOFF.md §4. Phase 1 adds `_ffi`, `connection`, `result`.
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `PgError`, `PgErrorKind`, `Param` for
-`execute(sql, params)`, `PreparedStatement`, the `CONNECTION_OK` /
-`CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction status
-constants.
+`execute(sql, params)`, `PreparedStatement`, `Transaction`, the
+`CONNECTION_OK` / `CONNECTION_BAD` status constants and the five `PQTRANS_*`
+transaction status constants.
 
 ## Type mapping
 
@@ -65,3 +65,4 @@ from .errors import PgError, PgErrorKind
 from .params import Param
 from .prepared import PreparedStatement
 from .result import Result, Row
+from .transaction import Transaction
