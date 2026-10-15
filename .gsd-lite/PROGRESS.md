@@ -197,3 +197,97 @@ final_check: FAIL
 | libpq を呼ぶ新しい経路を足す | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行 / `PQexec(` | `PQfreemem` → `connection.mojo:385, 427`（escape_literal / escape_identifier）の **2 行** ✓。`PQexec(` は `connection.mojo:254` の **1 行**（T7 時点で 4 行になる予定。T3〜T5 で +3） |
 
 - 未該当（後続タスクの担当）: 公開 struct の再エクスポート（T3〜T5）/ `examples/` 追加（T7）/ `_reject_nul` の `execute(sql, params)` 追加（T3）/ leak 12 本（T6）
+
+## turn 5 — impl — T3 params（`Param` / `_ParamBuffers` / `execute(sql, params)` / test_params 31 本）
+
+- やったこと: サブエージェント 3 本（A: `src/pq/params.mojo` / B: `Connection.execute(sql, params)` +
+  `__init__.mojo` の再エクスポート / C: `tests/test_params.mojo` を仕様リストから独立に 31 本）を対象ファイル
+  非重複で並行実装。親で統合 → 空 `bytea` の非 NULL 補強 1 箇所 → `fmt` 1 回 → `package` → docstring 診断 →
+  `test`（両サーバー）→ `check`。完了基準 (a)〜(d) をすべて満たしてコミット（0a4d0fd）
+- 想定外: **(1) 空 `bytea` パラメータが黙って SQL NULL になり得る経路**があった。libpq は `values[i]` が
+  NULL なら `lengths[i]` が 0 でも SQL NULL と解釈するので、空 `List[UInt8]` の `unsafe_ptr()` が NULL を
+  返す stdlib なら `[]` が NULL に化ける（今の stdlib では非 NULL が返るので**テストは緑のまま通ってしまう**
+  = 発覚しない種類のバグ）。決めた事項 5 の末尾ダミーと同じ趣旨でバイナリ用バッファを `capacity=len+1`
+  にして塞いだ（PLAN 補強に記載。送るバイト列と `lengths` は変えていない）。サブエージェント A が
+  「契約外の提案」として報告してきたもので、契約の文面には無いが**決めた事項 5 の非 NULL 保証の意図の範囲内**
+  と判断して親が適用した。
+  (2) `String.as_bytes()` は `Span[UInt8, origin]` を返すので `List[UInt8]` を取るヘルパには渡せない
+  （1 バイトずつコピーする `_text_bytes` が必要）。(3) `def main() raises PgError:` は通らない
+  （`kgen.call` の pass manager エラー）。probe も既存テストと同じ `def main() raises:` にする。
+  (4) `s += s` は aliasing エラー（`var more = s.copy(); s += more` で倍々にする）。
+  (5) `StaticString` は `Param` に暗黙変換されない（契約は `String` / `StringLiteral` のみ）ので
+  `comptime` のテキスト定数は `Param(String(X))` と書く必要がある
+- やり直し: 0 回
+- 次への注意: (1) **`Param` の `@implicit` 19 本で曖昧さは出なかった**（PLAN「未プローブ」の最大の懸念が解消。
+  `Param.of[T]()` へのフォールバックは不要だった）。T4 / T5 で `List[Param]` を受ける新しい経路を足すときも
+  同じ 19 本をそのまま使える。
+  (2) `_ParamBuffers` は `count()` / `types_ptr()` / `values_ptr()` / `lengths_ptr()` / `formats_ptr()` で
+  確定。`PreparedStatement.execute`（T4）は `types_ptr()` を使わない（`PQexecPrepared` に types 引数が無い）。
+  **`_ = buffers^` を libpq 呼び出しの後に置くことを忘れない**（`connection.mojo:330-348` が雛形）。
+  (3) `Param` の構築は **raises を要求しない**（`encode_*` が非 raising に推論される）。`_ParamBuffers(...)` だけが
+  `raises PgError`。T4 / T5 のシグネチャ設計に関係する。
+  (4) テストの所要が伸びている（test_params は PG17 117 s / PG14 142 s）。**ほぼ全部が `Connection.open` の
+  ~3.6〜4.0 s/回**で、DB を触るテスト 1 本ごとに固定で乗る（Phase 1 から共通で、この回に増えた性質ではない）。
+  T4 / T5 でテストを 18 ケース以上足すと `pixi run test` がさらに +4〜6 分になる見込み。
+  **1 テスト 1 接続をやめて接続を共有する案は REQ に無いので勝手にやらない**が、T7 で所要を書くときに
+  verify への申し送り候補として挙げる。
+  (5) C が挙げた「仕様との食い違い」は**ゼロ**。PLAN (c) の期待値（OID 25 推論 / `08P01` / `42601` /
+  `22003` / `Int(5)` 成功 / `25P02` / NUL の非対称 / -0.0 のビット保存）が PG14・PG17 とも全部そのまま通った
+
+### T3 完了基準の実測
+
+- (a) `src/pq/params.mojo`: `Param` の `@implicit` デコレータ **ちょうど 19 本**（非 Optional 10 +
+  `Optional[T]` 9。`grep -c '@implicit' src/pq/params.mojo` → 19）。`Param.null()` / `Param.null(oid)`、
+  公開アクセサは `oid()` / `is_null()` / `is_binary()` の 3 本だけ（値を返すアクセサ無し）。
+  OID 定数は `from pq.decode_text import OID_BOOL, OID_BYTEA, OID_INT8, OID_INT2, OID_INT4, OID_FLOAT4, OID_FLOAT8`。
+  `_ParamBuffers` は `lengths` / `formats` が `List[c_int]`、`values` は `bufs` を全部作り終えてから取得、
+  types / values / lengths / formats の 4 本すべてに末尾ダミー 1 要素。
+  String パラメータの NUL は `USAGE` / `embedded NUL byte in parameter $N`（N は 1 始まり、値は非表示）✓
+  - A の probe 実測: リスト literal `[1, "a", 1.5, True, Param.null()]` → OID **20 / 0 / 701 / 16 / 0**；
+    `Optional[T]` の None 側 9 本 → OID `16, 21, 23, 20, 20, 700, 701, 0, 17` が全部 `null=True`；
+    空 `List[Param]()` → `count() = 0` で 4 本のポインタすべて非 NULL（末尾ダミーの効果）
+- (b) `src/pq/connection.mojo`: `execute(self, var sql: String, params: List[Param]) raises PgError -> Result` を
+  `connection.mojo:330` 以降に追加。本体は `_reject_nul` → `_ParamBuffers(params)` → `PQexecParams`
+  （`resultFormat` は定数 `c_int(0)`）→ `_ = buffers^` → `_ = sql^` → `return self._take_result(res)`。
+  **`git diff -U0 src/pq/connection.mojo | grep '^-'` が差分ヘッダ 1 行だけ = 既存 `execute(sql)` /
+  `_take_result` / `escape_*` に削除行ゼロ**（挙動変更なし）。`tests/test_connection.mojo` は無変更で 28/28 PASS ✓
+  docstring に単一文制約（`42601`）/ `$1`〜`$n` / 送信形式の表 9 行 / String の OID 0 推論 /
+  `Int` の assignment cast と `22003` / 個数不一致 `08P01` / `result_format` テキスト固定を記載 ✓
+- (c) `tests/test_params.mojo` **31 本**（`grep -c '^def test_' tests/test_params.mojo` → 31）。
+  PLAN (c)-1〜12 の対応: 12 → 4 本（DB 不要）/ 1 → 1 / 2 → 1 / 3 → 8 / 4 → 6 / 5 → 3 / 6 → 1 / 7 → 1 /
+  8 → 2 / 9 → 2 / 10 → 1 / 11 → 1。**両サーバーで 31/31 PASS**（PG17 117.7 s / PG14 142.3 s）✓
+  - 仕様値どおりに実測一致した要所: 未指定 NULL と未指定テキストの OID 25 推論、`SELECT $1 + 1` に `"7"` → `8`、
+    個数不一致 `08P01`（直後の `execute("SELECT 1")` が通り `status() == CONNECTION_OK`）、
+    空 params でも `SELECT 1; SELECT 2` が `42601`・`SELECT 1;` は成功、`Int(3000000000)` → `22003`、
+    `Int(5)` は assignment cast で**成功**、aborted tx 内で `25P02`、
+    NUL の非対称（パラメータ値 → `USAGE` / `embedded NUL byte in parameter $N` / `sqlstate` 空 / 直後の
+    `execute` が通る、`sql` → `TYPE_MISMATCH` / `embedded NUL byte in sql`）、
+    `-0.0` の符号保存（`== 0.0` では区別できないので float32 は `0x80000000`、float64 は
+    `0x8000000000000000` のビットで判定）、64 KiB の text と bytea を同じ文で（2 個目のバイナリ長がずれない）
+- (d) 検証コマンド:
+  - `/home/parallels/.pixi/bin/pixi run test` → **両サーバー全ファイル PASS（0 failed）**。内訳（各サーバー同数）:
+    test_connection 28 / test_decode_text 49 / test_encode_binary 14 / test_errors 7 / test_ffi 7 /
+    test_leak 8 / test_loader_fail 1 / **test_params 31** / test_result 15 / test_smoke 4。
+    leak の RSS 系列は両サーバーとも平坦（PG17 `failed-open [4549 ×4]` / `failed-execute [4574 ×4]`、
+    PG14 `[4463 ×4]` / `[4571 ×4]`）。所要は leak が支配的（PG17 48.7 s / PG14 45.4 s）
+  - `/home/parallels/.pixi/bin/pixi run check` → **6/6 PASS**（`final_check: PASS`）。**作業木が未コミットのまま**成功。
+    所要 **66 s**（01:16:30 → 01:17:36）。3/6 段 `missing doc strings outside _ffi: 0`、
+    6/6 段 `matched lines in build/final_check.log: 0`（`warning:` / `WARNING:` 両方 0 件 = サーバー WARNING も無し）
+  - `/home/parallels/.pixi/bin/pixi run package`（`mojo precompile src/pq`）→ 出力なし = **警告ゼロ** ✓
+  - docstring 診断: `mojo precompile --diagnose-missing-doc-strings src/pq | grep -v '/_ffi/' | grep -vE "'(__init__|__deinit__|__copyinit__|__moveinit__)'" | grep -c 'doc string'` → **0** ✓
+  - `/home/parallels/.pixi/bin/pixi run fmt` → `reformatted tests/test_params.mojo` / `1 file reformatted, 23 files left unchanged`
+    （親が統合後に 1 回だけ実行。整形は `check` の 1/6 段より前に済ませたので作業木のまま 1/6 段が通る）
+
+#### 追従先チェックリストの照合（T3 該当行）
+
+| 行 | 確かめ方 | 結果 |
+|---|---|---|
+| 公開 struct を足す（`Param`） | `grep -nE 'Param\|PreparedStatement\|Transaction' src/pq/__init__.mojo` | `__init__.mojo:7`（モジュール docstring の再エクスポート列挙に `Param` を 1 行）と `:64`（`from .params import Param`）の 2 件 ✓（`PreparedStatement` / `Transaction` は T4 / T5） |
+| 公開 struct を足す（docstring 診断） | `mojo precompile --diagnose-missing-doc-strings ...` の 'doc string' 件数 | **0** ✓ |
+| 埋め込み NUL の経路を足す | `grep -rn '_reject_nul' src/pq` に `execute(sql, params)` が追加されている | `connection.mojo:330` が新しい `execute(sql, params)` の `_reject_nul(sql, "sql")`（既存は `:158` conninfo / `:191-192` params key・value / `:256` `execute(sql)` / `:452` `:494` escape 系）✓ |
+| テストファイルを足す | `pixi run test` のログに新ファイル名が 2 回出る | `== 127.0.0.1:54317 tests/test_params.mojo` と `== 127.0.0.1:54314 tests/test_params.mojo` の 2 回 ✓ |
+| libpq を呼ぶ新しい経路を足す | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行 | `connection.mojo:470, 512`（escape_literal / escape_identifier）の **2 行**のまま ✓。`PQexec(` も `connection.mojo:254` の **1 行**のまま（T3 が足したのは `PQexecParams` なので増えない。T7 時点で 4 行の見込みは T4 / T5 の担当） |
+| libpq を呼ぶ新しい経路を足す（`get_function` 禁止） | `grep -rc get_function src/pq` 全 0 | 0 件（マッチするファイルなし）✓ |
+
+- 未該当（後続タスクの担当）: `PreparedStatement` / `Transaction` の再エクスポート（T4 / T5）/
+  `examples/` 追加（T7）/ leak 12 本（T6）/ `PgErrorKind` 追加（T2 で完了）
