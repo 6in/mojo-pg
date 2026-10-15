@@ -22,7 +22,7 @@ and finish in `pq.decode_text.decode_text`.
 from std.ffi import c_int
 
 from pq.decode_text import decode_text
-from pq.errors import PgError, PgErrorKind
+from pq.errors import PgError, PgErrorKind, _reject_nul
 
 from ._ffi.functions import LibpqFFI
 from ._ffi.types import CStr, PGresultPtr
@@ -196,8 +196,11 @@ struct Result(Iterable, Movable, Sized):
             Zero-based index of the matching column.
 
         Raises:
-            PgError: `TYPE_MISMATCH` when no column matches.
+            PgError: `TYPE_MISMATCH` when no column matches, or when `name`
+                contains a NUL byte, which `PQfnumber` could only see
+                truncated.
         """
+        _reject_nul(name, "name")
         # as_c_string_span() is `mut self` and may reallocate, so it needs an
         # owned String; `name` arrives read-only. The copy stays alive until
         # after PQfnumber has read through the pointer.
@@ -417,8 +420,9 @@ struct Row[origin: ImmOrigin](Copyable):
 
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL;
-                `TYPE_MISMATCH` when no column matches `col`, or when the
-                column OID or the cell text does not match `T`.
+                `TYPE_MISMATCH` when no column matches `col`, when `col`
+                contains a NUL byte, or when the column OID or the cell text
+                does not match `T`.
         """
         return self.get[T](self._res[].column_index(col))
 
@@ -477,8 +481,9 @@ struct Row[origin: ImmOrigin](Copyable):
             decoded value.
 
         Raises:
-            PgError: `TYPE_MISMATCH` when no column matches `col`, or when
-                the column OID or the cell text does not match `T`.
+            PgError: `TYPE_MISMATCH` when no column matches `col`, when `col`
+                contains a NUL byte, or when the column OID or the cell text
+                does not match `T`.
         """
         return self.get_optional[T](self._res[].column_index(col))
 

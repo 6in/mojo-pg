@@ -30,7 +30,11 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
     """A non-optional value was requested from a SQL NULL."""
 
     comptime TYPE_MISMATCH = Self(4)
-    """The requested shape does not match the result (type, index or name)."""
+    """The requested shape does not match the result (type, index or name).
+
+    Also covers an argument libpq cannot be handed at all, namely text with an
+    embedded NUL byte.
+    """
 
     def __eq__(self, other: Self) -> Bool:
         """Compare two kinds for equality.
@@ -147,3 +151,28 @@ struct PgError(Copyable, Writable):
         if self.sqlstate != "":
             writer.write(", sqlstate=", self.sqlstate)
         writer.write(", message=", self.message, ")")
+
+
+def _reject_nul(s: String, what: StaticString) raises PgError:
+    """Reject caller text that libpq could only receive truncated.
+
+    libpq takes C strings, and `String.as_c_string_span()` stops at the first
+    NUL byte, so a value with an embedded NUL would be silently cut there
+    instead of refused. Every `pq` entry point that hands caller text to libpq
+    runs this first, which turns that silent truncation into an error.
+
+    Args:
+        s: The argument to inspect.
+        what: Name of the argument, used in the message. The value itself is
+            never included, so a password cannot leak through the error.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `s` contains a NUL byte.
+    """
+    var bytes = s.as_bytes()
+    for i in range(len(bytes)):
+        if bytes[i] == 0:
+            raise PgError(
+                PgErrorKind.TYPE_MISMATCH,
+                String("embedded NUL byte in ", what),
+            )

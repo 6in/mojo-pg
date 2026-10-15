@@ -16,6 +16,7 @@ from std.ffi import c_int, c_size_t
 from pq._ffi.functions import LibpqFFI
 from pq._ffi.loader import libpq_ptr
 from pq._ffi.types import (
+    CONNECTION_BAD,
     CONNECTION_OK,
     CStr,
     CStrArray,
@@ -34,7 +35,7 @@ from pq._ffi.types import (
     PGconnPtr,
     PGresultPtr,
 )
-from pq.errors import PgError, PgErrorKind
+from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.result import Result
 
 
@@ -139,11 +140,13 @@ struct Connection(Movable):
             An open `Connection`.
 
         Raises:
-            PgError: `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
+            PgError: `PgErrorKind.TYPE_MISMATCH` if `conninfo` contains a NUL
+                byte, `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
                 `PgErrorKind.CONNECTION` if connecting fails. `conninfo` is
                 never included in the message, so an embedded password cannot
                 leak through the error.
         """
+        _reject_nul(conninfo, "conninfo")
         var pq = libpq_ptr()
         var conn = pq[].PQconnectdb(
             CStr(unsafe_from_address=Int(conninfo.as_c_string_span().ptr()))
@@ -168,11 +171,15 @@ struct Connection(Movable):
             An open `Connection`.
 
         Raises:
-            PgError: `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
-                `PgErrorKind.CONNECTION` if connecting fails. `params` is never
-                included in the message, so a password value cannot leak
+            PgError: `PgErrorKind.TYPE_MISMATCH` if any key or value contains a
+                NUL byte, `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded,
+                or `PgErrorKind.CONNECTION` if connecting fails. `params` is
+                never included in the message, so a password value cannot leak
                 through the error.
         """
+        for ref item in params.items():
+            _reject_nul(item.key, "params key")
+            _reject_nul(item.value, "params value")
         var pq = libpq_ptr()
         # as_c_string_span() is `mut self` and may reallocate to append the NUL
         # terminator, so the keys and values must be owned copies that outlive
@@ -216,12 +223,14 @@ struct Connection(Movable):
             The `Result` of the last statement, owning the `PGresult*`.
 
         Raises:
-            PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
-                all, or `PgErrorKind.SERVER` when the server reports a
-                diagnostic. Server errors carry `sqlstate`, `severity`,
-                `detail`, `hint`, `position` and `context` when libpq supplies
-                them.
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte, `PgErrorKind.CONNECTION` when libpq returns no result at
+                all or the connection was lost while running `sql`, or
+                `PgErrorKind.SERVER` when the server reports a diagnostic.
+                Server errors carry `sqlstate`, `severity`, `detail`, `hint`,
+                `position` and `context` when libpq supplies them.
         """
+        _reject_nul(sql, "sql")
         var res = self._pq[].PQexec(
             self._conn,
             CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
@@ -261,8 +270,18 @@ struct Connection(Movable):
         var position = _error_field(self._pq, res, PG_DIAG_STATEMENT_POSITION)
         var context = _error_field(self._pq, res, PG_DIAG_CONTEXT)
         self._pq[].PQclear(res)
+        # A diagnostic that carries no SQLSTATE did not come from the server:
+        # libpq generated it client-side. When the connection is also gone,
+        # that is a lost connection rather than a rejected statement, so it is
+        # reported as CONNECTION -- `PgErrorKind.CONNECTION` is what tells the
+        # caller the connection is no longer usable. Both halves of the test
+        # matter: a syntax error has an SQLSTATE, and `COPY ... TO STDOUT`
+        # has none but leaves the connection perfectly usable.
+        var kind = PgErrorKind.SERVER
+        if sqlstate == "" and self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            kind = PgErrorKind.CONNECTION
         raise PgError(
-            PgErrorKind.SERVER,
+            kind,
             message,
             sqlstate=sqlstate,
             severity=severity,
@@ -287,16 +306,19 @@ struct Connection(Movable):
         yields ` E'a\\b'`.
 
         Args:
-            s: The value to quote. Any byte sequence is accepted.
+            s: The value to quote. Any byte sequence except one containing a
+                NUL byte is accepted.
 
         Returns:
             An owned copy of libpq's quoted text; the libpq buffer is released
             before returning.
 
         Raises:
-            PgError: `PgErrorKind.SERVER` when `PQescapeLiteral` returns NULL,
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `s` contains a NUL byte,
+                or `PgErrorKind.SERVER` when `PQescapeLiteral` returns NULL,
                 carrying libpq's own `PQerrorMessage` text.
         """
+        _reject_nul(s, "s")
         var byte_length = s.byte_length()
         var quoted = self._pq[].PQescapeLiteral(
             self._conn,
@@ -326,16 +348,19 @@ struct Connection(Movable):
         bytes and quoting follows the connection's client encoding.
 
         Args:
-            s: The identifier to quote. Any byte sequence is accepted.
+            s: The identifier to quote. Any byte sequence except one containing
+                a NUL byte is accepted.
 
         Returns:
             An owned copy of libpq's quoted identifier; the libpq buffer is
             released before returning.
 
         Raises:
-            PgError: `PgErrorKind.SERVER` when `PQescapeIdentifier` returns
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `s` contains a NUL byte,
+                or `PgErrorKind.SERVER` when `PQescapeIdentifier` returns
                 NULL, carrying libpq's own `PQerrorMessage` text.
         """
+        _reject_nul(s, "s")
         var byte_length = s.byte_length()
         var quoted = self._pq[].PQescapeIdentifier(
             self._conn,

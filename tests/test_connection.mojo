@@ -32,6 +32,15 @@ comptime DEFAULT_CONNINFO = (
 comptime WRONG_PASSWORD: StaticString = "WRONG_pw_123"
 """A password that must never reach a `PgError.message`."""
 
+comptime NUL_MARKER: StaticString = "AFTER_NUL_MARKER"
+"""Text placed *after* an embedded NUL byte in a rejected argument.
+
+libpq takes C strings, so everything from the NUL onwards is invisible to it.
+These tests use the marker twice over: it proves the truncated tail never
+reaches a `PgError.message`, and -- because it is appended where a password
+value would go -- that the rejection does not echo caller credentials either.
+"""
+
 comptime APP_NAME_LENGTH = 63
 """Length of the `application_name` round-tripped by `open(Dict)`.
 
@@ -95,6 +104,38 @@ def _long_application_name() -> String:
     for _ in range(APP_NAME_LENGTH):
         name += "a"
     return name^
+
+
+def _with_nul(prefix: String) -> String:
+    """Return `prefix`, a NUL byte, then `NUL_MARKER`.
+
+    Args:
+        prefix: The part libpq would still see after truncation.
+
+    Returns:
+        A `String` whose `byte_length` counts the NUL, so the embedded byte
+        really is part of the value rather than a terminator.
+    """
+    return prefix + chr(0) + NUL_MARKER
+
+
+def _assert_nul_error(error: PgError, what: String) raises:
+    """Check that `error` is the NUL rejection raised for argument `what`.
+
+    Args:
+        error: The error raised by the entry point under test.
+        what: The argument name the message must name.
+
+    Raises:
+        Error: If the kind, message or diagnostics do not match, or if the
+            message echoes the text that followed the NUL.
+    """
+    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH)
+    assert_equal(error.message, "embedded NUL byte in " + what)
+    assert_false(error.message.find(NUL_MARKER) >= 0)
+    # Nothing reached the server, so there is no diagnostic to carry.
+    assert_equal(error.sqlstate, "")
+    assert_equal(error.severity, "")
 
 
 def _connect(var conninfo: String) raises -> Connection:
@@ -251,6 +292,47 @@ def _escape_identifier(conn: Connection, var s: String) raises -> String:
         raise Error(String(e))
 
 
+def _escape_literal_error(conn: Connection, var s: String) raises -> PgError:
+    """Return the `PgError` raised by `conn.escape_literal(s)`.
+
+    Args:
+        conn: An open connection.
+        s: A value that must be rejected.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If `escape_literal` returned a quoted value instead of raising.
+    """
+    try:
+        _ = conn.escape_literal(s^)
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Connection.escape_literal")
+
+
+def _escape_identifier_error(conn: Connection, var s: String) raises -> PgError:
+    """Return the `PgError` raised by `conn.escape_identifier(s)`.
+
+    Args:
+        conn: An open connection.
+        s: An identifier that must be rejected.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If `escape_identifier` returned a quoted name instead of
+            raising.
+    """
+    try:
+        _ = conn.escape_identifier(s^)
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Connection.escape_identifier")
+
+
 def _column_name(result: Result, i: Int) raises -> String:
     """Return the name of column `i`.
 
@@ -327,6 +409,66 @@ def _column_index_kind(result: Result, name: String) raises -> PgErrorKind:
     except e:
         return e.kind
     raise Error(String("expected a PgError from column_index(", name, ")"))
+
+
+def _column_index_error(result: Result, name: String) raises -> PgError:
+    """Return the `PgError` raised by `column_index(name)`.
+
+    Args:
+        result: The result to inspect.
+        name: A column name that must be rejected.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If `column_index` returned an index instead of raising.
+    """
+    try:
+        _ = result.column_index(name)
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from column_index")
+
+
+def _row_get_error(result: Result, name: String) raises -> PgError:
+    """Return the `PgError` raised by `result[0].get[Int32](name)`.
+
+    Args:
+        result: A result with at least one row.
+        name: A column name that must be rejected.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If `Row.get` returned a value instead of raising.
+    """
+    try:
+        _ = result[0].get[Int32](name)
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Row.get(name)")
+
+
+def _row_get_optional_error(result: Result, name: String) raises -> PgError:
+    """Return the `PgError` raised by `result[0].get_optional[Int32](name)`.
+
+    Args:
+        result: A result with at least one row.
+        name: A column name that must be rejected.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If `Row.get_optional` returned a value instead of raising.
+    """
+    try:
+        _ = result[0].get_optional[Int32](name)
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Row.get_optional(name)")
 
 
 def _column_type_oid(result: Result, i: Int) raises -> UInt32:
@@ -499,16 +641,16 @@ def test_terminated_backend_then_connection_error() raises:
     # Measured on PG14 and PG17: libpq never delivers the server's FATAL
     # 57P01 here. The socket closes first, so `PQexec` yields a client-side
     # PGRES_FATAL_ERROR carrying no SQLSTATE and the message "server closed
-    # the connection unexpectedly". 決めた事項 6 maps every FATAL_ERROR to
-    # SERVER, so that is the kind. The PLAN's original "SERVER implies
-    # sqlstate 57P01" was an unverified guess, corrected to this measurement.
-    # Whether a *lost* connection should instead be reclassified as
-    # CONNECTION touches 決めた事項 6, so it is raised for verify, not
-    # changed here.
+    # the connection unexpectedly".
+    #
+    # An empty SQLSTATE on a connection libpq has marked CONNECTION_BAD means
+    # the connection is gone, not that the statement was rejected, so
+    # `execute` reports CONNECTION -- matching what `PgErrorKind.CONNECTION`
+    # promises ("no longer usable"). The error text is still libpq's own.
     var first = _execute_error(
         conn, "SELECT pg_terminate_backend(pg_backend_pid())"
     )
-    assert_true(first.kind == PgErrorKind.SERVER)
+    assert_true(first.kind == PgErrorKind.CONNECTION)
     assert_equal(first.sqlstate, "")
     assert_true(
         first.message.find("server closed the connection unexpectedly") >= 0
@@ -519,6 +661,101 @@ def test_terminated_backend_then_connection_error() raises:
     assert_true(second.kind == PgErrorKind.CONNECTION)
     assert_true(second.message != "")
 
+    _ = conn^
+
+
+def test_copy_out_stays_a_server_error() raises:
+    var conn = _connect(_conninfo())
+
+    # COPY is out of scope for `execute`: PQexec returns PGRES_COPY_OUT (3),
+    # which carries no diagnostic at all, so the status text is the message
+    # and the SQLSTATE is empty. The connection is still fine, which is the
+    # other half of the rule the terminated-backend test exercises -- an empty
+    # SQLSTATE alone must not turn a SERVER error into a CONNECTION one.
+    var error = _execute_error(conn, "COPY (SELECT 1) TO STDOUT")
+    assert_true(error.kind == PgErrorKind.SERVER)
+    assert_equal(error.sqlstate, "")
+    assert_equal(error.message, "unexpected result status 3")
+    assert_equal(conn.status(), Int(CONNECTION_OK))
+
+    _ = conn^
+
+
+# --- embedded NUL bytes ------------------------------------------------------
+#
+# Every entry point that hands caller text to libpq refuses an embedded NUL
+# before calling it. Without that check libpq would see the value cut at the
+# NUL and act on the truncated prefix: a conninfo would connect somewhere
+# else, a statement would run in part, a column lookup would match the wrong
+# column. Each test therefore asserts the *message* too, since that is what
+# proves the truncated tail was never used or echoed.
+
+
+def test_open_conninfo_rejects_embedded_nul() raises:
+    # The NUL lands inside a password value, so this also covers the "no
+    # credentials in the message" rule for the conninfo form.
+    var error = _open_error(_with_nul(_conninfo() + " password="))
+    _assert_nul_error(error, "conninfo")
+
+
+def test_open_params_rejects_embedded_nul_in_value() raises:
+    var params = _params()
+    params["password"] = _with_nul(String(WRONG_PASSWORD))
+    var error = _open_params_error(params)
+    _assert_nul_error(error, "params value")
+    assert_false(error.message.find(WRONG_PASSWORD) >= 0)
+
+
+def test_open_params_rejects_embedded_nul_in_key() raises:
+    var params = _params()
+    params[_with_nul("application_name")] = "x"
+    var error = _open_params_error(params)
+    _assert_nul_error(error, "params key")
+
+
+def test_execute_rejects_embedded_nul() raises:
+    var conn = _connect(_conninfo())
+
+    # Truncated, this would run `SELECT 1` and silently drop the DROP.
+    var error = _execute_error(conn, _with_nul("SELECT 1; DROP TABLE "))
+    _assert_nul_error(error, "sql")
+
+    # Nothing was sent, so the connection is untouched and still usable.
+    assert_equal(conn.status(), Int(CONNECTION_OK))
+    var ok = _execute(conn, "SELECT 1")
+    assert_equal(ok.row_count(), 1)
+    _ = ok^
+    _ = conn^
+
+
+def test_escape_rejects_embedded_nul() raises:
+    var conn = _connect(_conninfo())
+
+    _assert_nul_error(_escape_literal_error(conn, _with_nul("a")), "s")
+    _assert_nul_error(_escape_identifier_error(conn, _with_nul("a")), "s")
+
+    # Quoting is a client-side call, so the connection cannot have changed;
+    # check anyway, because a rejected argument must leave no trace.
+    assert_equal(conn.status(), Int(CONNECTION_OK))
+    assert_equal(_escape_literal(conn, "a"), "'a'")
+    _ = conn^
+
+
+def test_column_lookup_rejects_embedded_nul() raises:
+    var conn = _connect(_conninfo())
+    var result = _execute(conn, "SELECT 1 AS a")
+
+    # Truncated to "a", every one of these would have found column 0.
+    var name = _with_nul("a")
+    _assert_nul_error(_column_index_error(result, name), "name")
+    _assert_nul_error(_row_get_error(result, name), "name")
+    _assert_nul_error(_row_get_optional_error(result, name), "name")
+
+    # The result is read-only here, so the rejection cannot disturb it.
+    assert_equal(_column_index(result, "a"), 0)
+    assert_equal(result.row_count(), 1)
+
+    _ = result^
     _ = conn^
 
 
