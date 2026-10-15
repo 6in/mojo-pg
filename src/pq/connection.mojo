@@ -228,6 +228,10 @@ struct Connection(Movable):
         and libpq brings the connection back to a usable state on the next
         `execute`.
 
+        The result is adopted by `_take_result`, which `execute(sql, params)`,
+        `PreparedStatement.execute` and each `Transaction` command also go
+        through, so they all classify failures identically.
+
         Args:
             sql: One or more SQL statements.
 
@@ -252,6 +256,33 @@ struct Connection(Movable):
             CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
         )
         _ = sql^
+        return self._take_result(res)
+
+    def _take_result(self, res: PGresultPtr) raises PgError -> Result:
+        """Adopt a finished `PGresult` or raise the error it reports.
+
+        A successful result is handed to `Result`, which takes over the
+        `PQclear`. Every failing path clears `res` itself before raising, apart
+        from a NULL `res`, where libpq allocated nothing to clear.
+
+        Args:
+            res: The result libpq returned for the command that just ran, as-is
+                including NULL.
+
+        Returns:
+            The `Result` of the command, owning the `PGresult*`.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
+                all, or when the connection was lost while running the command
+                and libpq reported it without an SQLSTATE, or
+                `PgErrorKind.SERVER` when the server reports a diagnostic. (A
+                disconnect the server announced as a FATAL *with* an SQLSTATE
+                is therefore still `SERVER` for that statement, and the next
+                command is the one that raises `CONNECTION`.) Server errors
+                carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
+                `context` when libpq supplies them.
+        """
         if res.is_null():
             # No PGresult was allocated, so there is nothing to PQclear.
             raise PgError(

@@ -42,5 +42,22 @@ def test_optional_fields_default_to_empty() raises:
     assert_equal(e.context, "")
 
 
+def test_usage_kind_discriminant() raises:
+    assert_equal(PgErrorKind.USAGE.value, 5)
+
+
+def test_usage_kind_writes_its_name() raises:
+    assert_equal(String(PgErrorKind.USAGE), "Usage")
+
+
+def test_usage_error_string_contains_kind() raises:
+    var e = PgError(PgErrorKind.USAGE, "m")
+    assert_true("kind=Usage" in String(e))
+
+
+def test_usage_differs_from_type_mismatch() raises:
+    assert_true(PgErrorKind.USAGE != PgErrorKind.TYPE_MISMATCH)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

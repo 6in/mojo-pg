@@ -696,5 +696,32 @@ def test_zero_row_result_iterates_zero_times() raises:
     _ = conn^
 
 
+# --- the command tag ---------------------------------------------------------
+
+
+def test_command_tag_reports_the_server_tag() raises:
+    var conn = _connect(_conninfo())
+
+    var selected = _execute(conn, "SELECT 1")
+    assert_equal(selected.command_tag(), "SELECT 1")
+    _ = selected^
+
+    # TEMP keeps the table inside this session, so a parallel test process or
+    # a second server version never collides on the name.
+    var created = _execute(conn, "CREATE TEMP TABLE pq_p2_tag(x int)")
+    assert_equal(created.command_tag(), "CREATE TABLE")
+    _ = created^
+
+    var inserted = _execute(conn, "INSERT INTO pq_p2_tag VALUES (1),(2)")
+    assert_equal(inserted.command_tag(), "INSERT 0 2")
+    _ = inserted^
+
+    var updated = _execute(conn, "UPDATE pq_p2_tag SET x = 0 WHERE false")
+    assert_equal(updated.command_tag(), "UPDATE 0")
+    _ = updated^
+
+    _ = conn^
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

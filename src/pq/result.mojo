@@ -258,6 +258,25 @@ struct Result(Iterable, Movable, Sized):
         except e:
             return 0
 
+    def command_tag(self) -> String:
+        """Return the command tag of the statement that produced this result.
+
+        `PQcmdStatus` is the tag the server reported for the command, such as
+        `SELECT 1` for a one-row `SELECT`, `UPDATE 0` for an `UPDATE` that
+        matched nothing, or `CREATE TABLE` for that DDL statement. It never
+        returns NULL -- the same guarantee `affected_rows` relies on for
+        `PQcmdTuples` -- but it can be the empty string: a `PREPARE` or a
+        describe result carries no tag.
+
+        Later, `Transaction.commit` reads this to notice that a `COMMIT` the
+        server turned into a `ROLLBACK` did not actually commit.
+
+        Returns:
+            An owned copy of the command tag, empty when the result carries
+            none.
+        """
+        return String(unsafe_from_utf8_ptr=self._pq[].PQcmdStatus(self._res))
+
     def _check_cell(self, row: Int, col: Int) raises PgError:
         """Reject a cell coordinate outside the result, before libpq sees it.
 

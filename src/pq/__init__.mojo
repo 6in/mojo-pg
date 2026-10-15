@@ -33,7 +33,7 @@ change when a type is added.
 
 ## `PgErrorKind`
 
-Every `pq` API raises `PgError`, and its `kind` is one of exactly five
+Every `pq` API raises `PgError`, and its `kind` is one of exactly six
 values. The name in parentheses is what `PgErrorKind.write_to` prints:
 
 - `LIBPQ_LOAD` (`LibpqLoad`) -- libpq itself could not be loaded.
@@ -45,6 +45,9 @@ values. The name in parentheses is what `PgErrorKind.write_to` prints:
   SQL NULL.
 - `TYPE_MISMATCH` (`TypeMismatch`) -- the requested shape does not match the
   result (type, index or name).
+- `USAGE` (`Usage`) -- the caller misused the `pq` API. Detected
+  client-side; nothing was sent to the server, so `sqlstate` and the other
+  diagnostics are empty.
 """
 
 from ._ffi.types import (
