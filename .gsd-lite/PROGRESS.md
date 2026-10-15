@@ -280,3 +280,35 @@
   F1 の positive control は `cp -r src/pq <scratch>/pq` → 該当の free を消す → `mojo run -I <scratch> tests/test_leak.mojo` で、`src` 本体は変更しない。リーク状態での実行はメモリを食うので E6 の早期 fail を先に入れてから E1〜E4 を回すこと。
   F2 の NUL 拒否は kind を `TYPE_MISMATCH` に固定（判断を impl に迫らない）。F3f は compose 変更後 `pixi run db-up` で作り直し `docker ps` で E15 を確認。
   verify round 2 は「round 1 の格子の再確認 + F1〜F3 の回帰」だけを行う（新しいクラスの探索はしない）。`pixi run check` は 1 回 90 s、F1 で payload を大きくすると `test_leak` が伸びる見込み
+
+## turn 12 — impl — F1 リークテストの検出力（偽陰性の修正）
+- やったこと: 4 ループが 1 反復あたり「コンパイラの解放済みプールに収まらない量」を確保・解放する形に変え、サンプル取得時の早期 fail（`ABORT_PAGES = 65536` ページ = 256 MiB）を入れた。
+  positive control E1〜E4 を `src/pq` のコピー（`-I <scratch>`）で実測して**全部 FAIL することを確認**（`src` は 1 行も変更していない）。無改変で `pixi run test` 両サーバー **3 回連続 8/8 PASS**、`pixi run check` **6/6 PASS**（210 PASS / 0 FAIL / 警告 0 / docstring 診断 0 / fmt 差分なし、97 s）
+- 完了基準（表 E1〜E6）の実測:
+  - **E1**（`Result.__deinit__` の `PQclear` 削除）= FAIL ✓。`connect/query/close RSS pages: [116554, 132564, 148655, 164663, 180670, 197310]` → 6 サンプル目で早期 fail（9 回のうち 6 回で打ち切り）。他 3 ループは PASS
+  - **E2**（`Connection._adopt` の `PQfinish` 削除）= FAIL ✓。`failed-open RSS pages: [113795, 128685, 145082, 161476]`（全隣接差分 > 0 で判定）。他 3 ループは PASS
+  - **E3**（`escape_literal` の `PQfreemem` 削除）= FAIL ✓。`escape_literal RSS pages: [89691, 92578, 95779, 98981]`（最終 − 初回 = 9,290 > 256）。他 3 ループは PASS
+  - **E4**（`execute` 非成功経路の `PQclear` 削除）= FAIL ✓。`failed-execute RSS pages: [96186, 102593, 108999, 115405]`（最終 − 初回 = 19,219 > 256）。他 3 ループは PASS
+  - **E5** = ✓。`pixi run test` 3 回 × 2 サーバー = 6 回すべて `test_leak.mojo` 8/8 PASS（exit 0 ×3）。turn 9 以来の「83 ページの一段」は 6 回中 3 回に出たが tolerance 256 が吸収（`[90189, 90191, 90191, 90274, ...]` など）
+  - **E6** = ✓（E1 と、下記の 256 KiB password 版 E2 の 2 回で発火を実測）。**E3 / E4 では発火しない**: この 2 ループのリーク総量は 64 MiB（1,000 × 64 KiB）で 256 MiB に届かないので打ち切る対象が無く、1,000 回を回し切って tolerance 側で FAIL する。機構は `_sample` に 1 本だけ置いてあり 4 ループ共通
+  - positive control の再現手段は `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-012-positive-control.sh E1|E2|E3|E4` に置いた（verify round 2 の回帰用。`src` は触らない）
+- 想定外: (1) **PLAN の推奨手段のうち failed-open だけ外れた**。`PGconn` ≈40 KiB × 1,000 = 40 MiB は解放済みプール（≈100 MiB）に丸ごと収まり、`PQfinish` を消しても 9 サンプル完全に平坦で PASS（`[90556, 90557, 90557, 90557]`）。
+  payload を password 側に入れる案（256 KiB）は E2 を FAIL させられたが、**libpq が SCRAM の 4,096 反復ごとに password を鍵に HMAC を張り直す**ため 1 回の open が 3.2 ms → **424 ms**、ループが 3.2 s → **424 s** に膨れたので捨てた。
+  採ったのは「`=` を含まない 256 KiB のトークンを conninfo の末尾に足した 2 本目の失敗 open」（libpq が `missing "=" after "xxx..."` として `PGconn` の errorMessage に echo する = ラウンドトリップ 0、3.2 s のまま）。誤パスワードの open も同じループに残したので認証失敗経路の網羅は落ちていない
+  (2) 判定の主役が入れ替わった。turn 9 までの「定常リークは全隣接差分 > 0 が拾う（100 B/回でも増える）」は**成立しない**（プールが吸収する）。実測では本体と failed-open が単調増加側、escape と failed-execute が tolerance 側で立つ。docstring の該当段落を実測に書き換えた
+  (3) `len(String)` は Mojo 1.1.0 でエラー（UTF-8 のため曖昧）。`byte_length()` に直した
+  (4) `pixi run check` の 1/6 段は `mojo format` 後の **`git diff`** を見るので、**未コミットの変更があるだけで FAIL する**（フォーマッタ自体は「20 files left unchanged」）。コミット前は FAIL、コミット後に 6/6 PASS。turn 12 で 2 回回した理由
+  (5) `test_leak.mojo` の所要が 37 s → **43〜47 s/サーバー**、`check` 全体が 84 s → **97 s** に伸びた（payload 分）
+- やり直し: 2 回（(a) `len(String)` のコンパイルエラー 1 件 = 想定外 (3) / (b) failed-open の payload 設計 2 案の破棄 = 想定外 (1)。どちらも `src/pq` には触れていない）
+- PLAN 訂正: 3 件（要件・決定には触れない。実物と実測を正とした）。
+  (1) 決めた事項 12 に turn 12 追記（payload 64 KiB / failed-open 256 KiB / `ABORT_PAGES` 65536 ページ / 判定の役割分担）
+  (2) T7 完了基準の「`SELECT 1`」「`escape_literal("O'Reilly")`」「`SELEC 1`」「所要 ≈ 35 s」を実装どおりの payload 付きクエリと 43〜47 s に、turn 9 の「100 B/回でも全区間で増える」に取り消し線相当の PLAN 訂正を追記
+  (3) F1 の推奨手段に turn 12 実測（failed-open の 3 案の結果）を追記
+- 既存テストの期待値の変更: `tests/test_leak.mojo` の 4 ループが**使う入力**を変えた（下記）。**assert の期待値（`is_leaking` が False）と `is_leaking` の単体テスト 4 ケースは変更していない**。
+  (1) 本体ループのクエリ `SELECT 1` → `SELECT repeat('x', 65536)`（理由: 数 KB の `PGresult` では RSS が動かず E1 が検出できない）
+  (2) failed-open ループに「巨大な不正トークンの conninfo」の open を 1 本追加（誤パスワードの open は残置。理由: 想定外 (1)）
+  (3) escape ループの値 `"O'Reilly"` → `"O'Reilly " + 64 KiB`（アポストロフィは残置。理由: `PQfreemem` の対象を大きくする）
+  (4) failed-execute ループの SQL `SELEC 1` → `DO $$ ... RAISE EXCEPTION '%', repeat('x', 65536) ... $$`（理由: 構文エラーの `PGresult` は数百バイトで RSS に出ない。`SELEC 1` = sqlstate 42601 の経路自体は `tests/test_connection.mojo` が担保しており、F2 の E8 でも使う）
+- 次への注意: 次は **F2**（`execute` の接続断を `CONNECTION` に分類 + 埋め込み NUL の事前拒否）。期待結果は PLAN の表 **E7〜E11** だけを見る。
+  F2 で `src/pq/connection.mojo` を編集すると `turn-012-positive-control.sh` の行番号（`result.mojo:99` / `connection.mojo:124` / `:317` / `:263`）がずれるので、F2 以降に positive control を回すときは `grep -n 'PQclear\|PQfinish\|PQfreemem' src/pq/*.mojo` で取り直すこと（スクリプト冒頭にも注記あり）。
+  `pixi run check` は 1 回 **97 s** で、1/6 段が未コミットの差分で落ちるので「実装 → コミット → `check`」の順で回すのが速い。`pixi` / `mojo` は PATH に無いのでフルパス `/home/parallels/.pixi/bin/pixi` を使う
