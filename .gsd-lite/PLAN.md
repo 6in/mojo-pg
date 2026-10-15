@@ -26,17 +26,17 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 | 変更の種類 | 直す場所 | 確かめ方 |
 |---|---|---|
-| libpq 関数のバインディングを足す / 減らす | `src/pq/_ffi/functions.mojo` のフィールド + `__init__` の `_dl_sym` 行（ヘッダ行番号コメント付き）、`tests/test_ffi.mojo` のシンボル名リスト、本 PLAN「決めた事項」の **50 本** | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` と `grep -c '"PQ' tests/test_ffi.mojo` が同数、`rg -n '50 本' .gsd-lite/PLAN.md` の値を更新 |
+| libpq 関数のバインディングを足す / 減らす | `src/pq/_ffi/functions.mojo` のフィールド + `__init__` の `_dl_sym` 行（ヘッダ行番号コメント付き）、`tests/test_ffi.mojo` のシンボル名リスト、本 PLAN「決めた事項」の **50 本** | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` と `grep -cE '^\s+(String\()?"PQ[A-Za-z]+"\),?$\|^\s+"PQ[A-Za-z]+",$' tests/test_ffi.mojo` が同数（素朴な `grep -c '"PQ'` は `PQ_MOJO_LIBPQ` / `PQ_TEST_CONNINFO` / エラー文の `PQconnectdb failed` も数えて 53 になる — T1 で実測）、`tests/test_ffi.mojo` 内の `assert_equal(len(names), 50)` が機械判定、`rg -n '50 本' .gsd-lite/PLAN.md` の値を更新 |
 | `Row.get[T]` の対応型を足す | `src/pq/decode_text.mojo` の OID 定数 + `comptime if` 分岐、`Row.get` の docstring の型表、`tests/test_decode_text.mojo` の境界値、`src/pq/__init__.mojo` モジュール docstring の型一覧 | `rg -n 'Int16' src/pq/decode_text.mojo src/pq/result.mojo src/pq/__init__.mojo tests/test_decode_text.mojo` で 4 ファイル全部に出る（新型でも同様） |
 | `PgErrorKind` を足す | `src/pq/errors.mojo` の定数 + `PgErrorKind.write_to` の名前表 + `PgError` docstring の一覧。REQUIREMENTS §4.4 の kind 集合は固定なので**足さない**（足すなら BLOCKED） | `rg -c 'TYPE_MISMATCH' src/pq/errors.mojo` ≥ 2（定数と write_to） |
 | テストファイルを足す | 無し（`run_tests.sh` は glob）。DB 不要のテストも両サーバー分回る（高速なので許容） | `pixi run test` のログに新ファイル名が 2 回出る |
 | `examples/` を足す | `pixi.toml` の `[tasks]` に `example-<name>` を追加、`tests/final_check.sh` の examples 実行行 | `rg -n 'examples/' pixi.toml tests/final_check.sh` |
-| 公開 struct / メソッドを足す | docstring 必須（T8 の診断で機械検出） | `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -c 'doc string'` = 0 |
+| 公開 struct / メソッドを足す | docstring 必須（T8 の診断で機械検出） | `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -vE "'(__init__\|__deinit__\|__copyinit__\|__moveinit__)'" \| grep -c 'doc string'` = 0（合成 dunder の除外理由は T8 完了基準） |
 | libpq を呼ぶ新しい経路を足す | `char*` は即 `String` にコピー、`PQfreemem` は 1 箇所、`get_function` は使わない | `grep -c get_function src/pq` = 0、`rg -n 'PQfreemem' src/pq/connection.mojo` が escape 2 メソッドの各 1 回のみ |
 
 ## Tasks
 
-- [ ] T1: `errors.mojo` + `_ffi`（types / functions 50 本）+ テスト基盤（run_tests 2 サーバー・final_check・pixi タスク）
+- [x] T1: `errors.mojo` + `_ffi`（types / functions 50 本）+ テスト基盤（run_tests 2 サーバー・final_check・pixi タスク）
   - 完了基準:
     - `src/pq/errors.mojo`: `PgErrorKind`（Int newtype、`Equatable`、`Writable` で名前を出力）の 5 定数と `PgError`（`Copyable, Writable`、
       フィールド `kind / message / sqlstate / severity / detail / hint / position / context`、`__init__(out self, kind, message, sqlstate="", severity="", detail="", hint="", position="", context="")`）。
@@ -167,7 +167,11 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 - [ ] T8: 品質仕上げ: docstring 診断ゼロ / `mojo format` 差分ゼロ / 警告ゼロ / `pixi run check` 両サーバー緑 / 追従先チェックリスト照合
   - 完了基準:
-    - `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 | grep -v '/_ffi/' | grep -c 'doc string'` = 0（`pq` 直下の公開 struct / メソッド / 関数すべて。`_ffi` はモジュール docstring のみでよい）
+    - `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 | grep -v '/_ffi/' | grep -vE "'(__init__|__deinit__|__copyinit__|__moveinit__)'" | grep -c 'doc string'` = 0（`pq` 直下の公開 struct / メソッド / 関数すべて。`_ffi` はモジュール docstring のみでよい）
+      **合成 dunder を除外する理由**（T1 で実測。元の PLAN は除外なしで「= 0」だったが達成不可能だった）: `--diagnose-missing-doc-strings` は
+      コンパイラが合成する `__init__` / `__deinit__` / `__copyinit__` / `__moveinit__` を **struct 宣言行**に対して報告する。docstring を付ける場所が無く、
+      実際に `PgError` は明示 `__init__`（docstring 付き）を持つのに合成のコピー / ムーブ分で 2 件報告される。判定は `tests/final_check.sh` 3/6 段に同じ除外で実装済み。
+      既知の盲点: 手書きで docstring の無い `__init__` もこの除外に引っかかる（struct docstring で代替する規約とする）
     - `pixi run fmt` 実行後 `git diff --quiet -- src tests examples hello.mojo` が exit 0
     - `rg -n '^\s*fn ' src tests examples hello.mojo` が 0 件（REQ §5.1「`fn` を使わない。`def` + 明示 `raises`」）
     - `pixi run check` が exit 0（両サーバー、`build/final_check.log` に `warning:` 0 件）。ログの要約（各段の結果と所要時間）を PROGRESS に書く
