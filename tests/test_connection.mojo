@@ -563,14 +563,12 @@ def test_open_params_round_trips_application_name() raises:
     params["application_name"] = app_name
     var conn = _connect_params(params)
     var result = _execute(conn, "SELECT current_setting('application_name')")
-    # Reading the column *value* back needs `Row.get`, which arrives in T5;
-    # until then only the shape of the result is checked here.
     assert_equal(result.row_count(), 1)
     assert_equal(result.column_count(), 1)
     _ = result^
 
-    # The value can still be checked server-side with a predicate, which needs
-    # nothing but `row_count`. `app_name` is exactly NAMEDATALEN-1 bytes, so
+    # The value is checked server-side with a predicate, which needs nothing
+    # but `row_count`. `app_name` is exactly NAMEDATALEN-1 bytes, so
     # the server stores it untruncated and equality holds on PG14 and PG17.
     var predicate = (
         String("SELECT 1 WHERE current_setting('application_name') = '")
@@ -594,6 +592,30 @@ def test_syntax_error_fills_diagnostics() raises:
     assert_equal(error.severity, "ERROR")
     assert_equal(error.position, "1")
     assert_true(error.message.find("syntax error") >= 0)
+    _ = conn^
+
+
+def test_raise_exception_fills_detail_hint_and_context() raises:
+    var conn = _connect(_conninfo())
+
+    # A syntax error carries no DETAIL, HINT or CONTEXT, so the only way to
+    # check those three fields is to make the server emit them. `RAISE
+    # EXCEPTION` inside an anonymous block does: PL/pgSQL reports the block as
+    # `inline_code_block` in PG_DIAG_CONTEXT.
+    var error = _execute_error(
+        conn,
+        (
+            "DO $$ BEGIN RAISE EXCEPTION 'boom'"
+            " USING DETAIL = 'd', HINT = 'h'; END $$"
+        ),
+    )
+    assert_true(error.kind == PgErrorKind.SERVER)
+    assert_equal(error.sqlstate, "P0001")
+    assert_equal(error.message, "boom")
+    assert_equal(error.detail, "d")
+    assert_equal(error.hint, "h")
+    assert_true(error.context.find("inline_code_block") >= 0)
+
     _ = conn^
 
 

@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: pq
       POSTGRES_DB: pq_test
     ports:
-      - "54317:5432"
+      - "127.0.0.1:54317:5432"
     volumes:
       - ./fixtures:/docker-entrypoint-initdb.d:ro
     healthcheck:
@@ -22,7 +22,7 @@ services:
       POSTGRES_PASSWORD: pq
       POSTGRES_DB: pq_test
     ports:
-      - "54314:5432"
+      - "127.0.0.1:54314:5432"
     volumes:
       - ./fixtures:/docker-entrypoint-initdb.d:ro
     healthcheck:

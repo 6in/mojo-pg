@@ -102,7 +102,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 完了基準:
     - `src/pq/connection.mojo` `struct Connection(Movable)`: `_conn: PGconnPtr`, `_pq: Pointer[LibpqFFI, MutUntrackedOrigin]`。
       `@staticmethod open(var conninfo: String) raises PgError -> Connection`（`PQconnectdb`）、`@staticmethod open(params: Dict[String, String]) raises PgError -> Connection`（`PQconnectdbParams`, `expand_dbname=0`。P6: 値は `var` の所有コピーで `as_c_string_span()` し、呼び出し後まで生存）。
-      どちらも `PGconnPtr.is_null()` → `PgError(CONNECTION, "PQconnectdb returned NULL (out of memory)")`、`PQstatus != CONNECTION_OK` → `PQerrorMessage` を `String` にコピー → `PQfinish` → `PgError(CONNECTION, msg)`（P3 / P21。conninfo / params をメッセージに入れない）。
+      どちらも `PGconnPtr.is_null()` → `PgError(CONNECTION, "libpq returned NULL (out of memory)")`（turn 14 / F3c で `"PQconnectdb returned NULL ..."` から変更。`open(Dict)` は `PQconnectdbParams` なので関数名を書かない）、`PQstatus != CONNECTION_OK` → `PQerrorMessage` を `String` にコピー → `PQfinish` → `PgError(CONNECTION, msg)`（P3 / P21。conninfo / params をメッセージに入れない）。
       `execute(self, var sql: String) raises PgError -> Result`（「決めた事項」6 の状態→エラー表。P4 / P5）、`__deinit__(deinit self)` で `_conn` 非 NULL なら `PQfinish`
     - `src/pq/result.mojo` `struct Result(Movable, Sized)`（Iterable は T5）: `_res: PGresultPtr`, `_pq`, `_nrows`, `_ncols` をキャッシュ。`__init__(out self, res: PGresultPtr, pq: Pointer[...])`、`__deinit__` で `PQclear`、
       `row_count()`, `column_count()`, `__len__()`（= row_count）、`column_name(i) raises PgError -> String`、`column_index(name) raises PgError -> Int`（`PQfnumber`、-1 なら `PgError(TYPE_MISMATCH, 'column "<name>" does not exist')`。docstring に小文字化規則 P7）、
@@ -259,7 +259,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: F1（同じ `pixi run check` を回すので順に）
   - 並列サブ作業: なし
 
-- [ ] F3: 文書・テスト・テスト環境の軽微な訂正（1 ターンにまとめる）
+- [x] F3: 文書・テスト・テスト環境の軽微な訂正（1 ターンにまとめる）
   - 完了基準: 表の **E12〜E16** を満たし、次の文書訂正を行う:
     (a) `src/pq/connection.mojo:8-11` / `:143-145` / `:172-174`: 「pq は conninfo / params を一切足さない。libpq は認証失敗ではパスワードを出さないが、**conninfo の構文エラー**（`missing "=" after "<token>"`、`invalid percent-encoded token`）ではその断片を echo するので、プログラムから渡す資格情報は `open(Dict)` を使う」に書き換える（security review の実測: `password=sec ret` → `missing "=" after "ret"`）。
     (b) `connection.mojo:279-281`: `standard_conforming_strings` に従うという記述を削る（`PQescapeLiteral` は参照しない。バックスラッシュがあれば常に ` E'...'`）。

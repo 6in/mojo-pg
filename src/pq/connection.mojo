@@ -5,10 +5,14 @@ opened with. It is `Movable` but deliberately not `Copyable`: a libpq
 connection is not thread-safe and must be handed to `PQfinish` exactly once,
 so `var b = a` is a compile error and ownership transfers with `a^` instead.
 
-Connecting never echoes the caller's credentials. Neither the conninfo string
-nor the parameter dictionary appears in any raised message; only libpq's own
-`PQerrorMessage` text is reported, which names host, port and user but not the
-password.
+`pq` never adds the caller's conninfo or parameter dictionary to a raised
+message: the text is always libpq's own `PQerrorMessage`. libpq does not echo
+the password when authentication fails, but it *does* echo the offending
+fragment of a malformed conninfo string -- `missing "=" after "<token>"` or
+`invalid percent-encoded token` -- so a password mistyped as `password=sec ret`
+reaches the error as `missing "=" after "ret"`. Pass credentials your program
+holds through `open(Dict)`, where each value is taken literally and never
+parsed.
 """
 
 from std.ffi import c_int, c_size_t
@@ -118,7 +122,7 @@ struct Connection(Movable):
         if conn.is_null():
             raise PgError(
                 PgErrorKind.CONNECTION,
-                "PQconnectdb returned NULL (out of memory)",
+                "libpq returned NULL (out of memory)",
             )
         if pq[].PQstatus(conn) != CONNECTION_OK:
             var message = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
@@ -142,9 +146,11 @@ struct Connection(Movable):
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` if `conninfo` contains a NUL
                 byte, `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
-                `PgErrorKind.CONNECTION` if connecting fails. `conninfo` is
-                never included in the message, so an embedded password cannot
-                leak through the error.
+                `PgErrorKind.CONNECTION` if connecting fails. `pq` never adds
+                `conninfo` to the message, but libpq echoes the offending
+                fragment of a *malformed* conninfo string, so a password that
+                contains a space or a stray `%` can reach the error text. Use
+                `open(Dict)` for credentials the program supplies.
         """
         _reject_nul(conninfo, "conninfo")
         var pq = libpq_ptr()
@@ -173,9 +179,10 @@ struct Connection(Movable):
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` if any key or value contains a
                 NUL byte, `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded,
-                or `PgErrorKind.CONNECTION` if connecting fails. `params` is
-                never included in the message, so a password value cannot leak
-                through the error.
+                or `PgErrorKind.CONNECTION` if connecting fails. Each value is
+                taken literally rather than parsed, so -- unlike
+                `open(String)` -- no value can be echoed back as a conninfo
+                syntax error, and a password cannot leak through the message.
         """
         for ref item in params.items():
             _reject_nul(item.key, "params key")
@@ -215,6 +222,11 @@ struct Connection(Movable):
         libpq, the returned `Result` is the result of the *last* statement; if
         an earlier statement fails, that statement's error is raised and no
         result is returned.
+
+        `COPY ... TO STDOUT` and `COPY ... FROM STDIN` are not supported: they
+        raise `PgErrorKind.SERVER` with `unexpected result status 3` or `4`,
+        and libpq brings the connection back to a usable state on the next
+        `execute`.
 
         Args:
             sql: One or more SQL statements.
@@ -296,14 +308,13 @@ struct Connection(Movable):
 
         The returned text already carries its surrounding quotes, so it is
         substituted into SQL directly rather than wrapped again. Quoting is
-        connection-aware: it follows the server's `standard_conforming_strings`
-        setting and the client encoding, and `s` is measured in *bytes*, so a
-        multi-byte value is escaped whole.
+        connection-aware: it follows the connection's client encoding, and `s`
+        is measured in *bytes*, so a multi-byte value is escaped whole.
 
         So `escape_literal("O'Reilly")` yields `'O''Reilly'`, while a value
-        that needs a backslash escape comes back in libpq's E-string form,
-        which carries a deliberate leading space: `escape_literal("a\\b")`
-        yields ` E'a\\b'`.
+        containing a backslash always comes back in libpq's E-string form --
+        `standard_conforming_strings` is not consulted -- which carries a
+        deliberate leading space: `escape_literal("a\\b")` yields ` E'a\\b'`.
 
         Args:
             s: The value to quote. Any byte sequence except one containing a

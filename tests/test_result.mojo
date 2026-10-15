@@ -231,6 +231,83 @@ def _get_kind[
     raise Error(String("expected a PgError from get(", col, ")"))
 
 
+def _get_by_name_kind[
+    origin: ImmOrigin, //, T: Copyable & Deinitable
+](row: Row[origin], name: String) raises -> PgErrorKind:
+    """Return the kind of the `PgError` raised by `row.get[T](name)`.
+
+    Parameters:
+        origin: Origin of the `Result` the row views; inferred from `row`.
+        T: The Mojo type requested from `Row.get`.
+
+    Args:
+        row: The row to read.
+        name: A column name that must be rejected.
+
+    Returns:
+        The `kind` field of the raised `PgError`.
+
+    Raises:
+        Error: If `Row.get` returned a value instead of raising.
+    """
+    try:
+        _ = row.get[T](name)
+    except e:
+        return e.kind
+    raise Error(String("expected a PgError from get(", name, ")"))
+
+
+def _get_optional_by_name_kind[
+    origin: ImmOrigin, //, T: Copyable & Deinitable
+](row: Row[origin], name: String) raises -> PgErrorKind:
+    """Return the kind of the `PgError` raised by `get_optional[T](name)`.
+
+    Parameters:
+        origin: Origin of the `Result` the row views; inferred from `row`.
+        T: The Mojo type requested from `Row.get_optional`.
+
+    Args:
+        row: The row to read.
+        name: A column name that must be rejected.
+
+    Returns:
+        The `kind` field of the raised `PgError`.
+
+    Raises:
+        Error: If `Row.get_optional` returned a value instead of raising.
+    """
+    try:
+        _ = row.get_optional[T](name)
+    except e:
+        return e.kind
+    raise Error(String("expected a PgError from get_optional(", name, ")"))
+
+
+def _get_optional_by_name[
+    origin: ImmOrigin, //, T: Copyable & Deinitable
+](row: Row[origin], name: String) raises -> Optional[T]:
+    """Read the column called `name` of `row` as an optional `T`.
+
+    Parameters:
+        origin: Origin of the `Result` the row views; inferred from `row`.
+        T: The Mojo type requested from `Row.get_optional`.
+
+    Args:
+        row: The row to read.
+        name: The column name to look up.
+
+    Returns:
+        The decoded value, or `None` for a SQL NULL.
+
+    Raises:
+        Error: If `Row.get_optional` raised a `PgError`.
+    """
+    try:
+        return row.get_optional[T](name)
+    except e:
+        raise Error(String(e))
+
+
 def _get_optional[
     origin: ImmOrigin, //, T: Copyable & Deinitable
 ](row: Row[origin], col: Int) raises -> Optional[T]:
@@ -432,6 +509,33 @@ def test_column_index_folds_unquoted_names() raises:
 
     var row = _row(result, 0)
     assert_equal(_get_by_name[Int32](row, "foo"), Int32(1))
+
+    _ = row^
+    _ = result^
+    _ = conn^
+
+
+def test_name_lookup_in_get_and_get_optional() raises:
+    var conn = _connect(_conninfo())
+    var result = _execute(conn, "SELECT 's'::text AS s, NULL::text AS n")
+    var row = _row(result, 0)
+
+    # Both name overloads go through `column_index`, so an unknown name is a
+    # TYPE_MISMATCH rather than an out-of-range index error.
+    assert_true(
+        _get_by_name_kind[Int32](row, "nope") == PgErrorKind.TYPE_MISMATCH
+    )
+    assert_true(
+        _get_optional_by_name_kind[Int32](row, "nope")
+        == PgErrorKind.TYPE_MISMATCH
+    )
+
+    # A name that does resolve reads the same value the index overload does,
+    # including the NULL case.
+    var present = _get_optional_by_name[String](row, "s")
+    assert_true(Bool(present))
+    assert_equal(present.value(), "s")
+    assert_false(Bool(_get_optional_by_name[String](row, "n")))
 
     _ = row^
     _ = result^
