@@ -90,7 +90,13 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `run_tests.sh` の `mojo build` 分岐 + `PQ_TEST_LEAK_SERVERS` / `final_check.sh` の 1/6・5/6・6/6 段（対象: `tests/run_tests.sh`, `tests/final_check.sh`）
     - 親: (f) の実測と `TOLERANCE_PAGES` の決定、(g) の陽性対照、(d) の fmt 陽性対照、(h)
 
-- [ ] T2: 基盤 — `_ffi` 3 本（53 本）+ `PgErrorKind.USAGE` + `Result.command_tag()` + `Connection._take_result` 抽出 + `encode_binary.mojo`
+- [x] T2: 基盤 — `_ffi` 3 本（53 本）+ `PgErrorKind.USAGE` + `Result.command_tag()` + `Connection._take_result` 抽出 + `encode_binary.mojo`
+  - **PLAN 訂正（turn 4 実測）**: (e) の `encode_int16` / `encode_int32` は「シフト `(v >> (8*(n-1-i))) & 0xFF`」を
+    **符号付き型に直接適用できない**。`SIMD.__rshift__` の rhs は `Self` 固定で `v >> Int` が通らず、
+    符号付き右シフトは符号拡張するため上位バイトが `0xFF` で埋まる。`bitcast[DType.uint16/uint32, 1](v)` で
+    ゼロ拡張してから `UInt64` に広げ、共通ヘルパ `_be_bytes(bits: UInt64, size: Int)` でシフトする形にした
+    （シフトで組む点・ホストのエンディアンに依存しない点は PLAN どおり。`memcpy` / ポインタ再解釈は使っていない）。
+    (f) の期待値 16 件はすべて PLAN の数値どおり実測一致
   - 完了基準:
     - (a) `src/pq/_ffi/functions.mojo` の「result inspection」節に **決めた事項 2 の表**どおり 3 フィールド + `__init__` の `_dl_sym` 3 行（`# libpq-fe.h:600 / 607 / 608`）。
       `tests/test_ffi.mojo`: `_symbol_names()` に `"PQcmdStatus"`, `"PQnparams"`, `"PQparamtype"` を足し `assert_equal(len(names), 53)`、関数名を `test_all_symbols_present` に改名。追従先チェックリスト 1 行目の 3 コマンドが 53 / 53 / 0

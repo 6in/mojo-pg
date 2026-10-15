@@ -141,3 +141,59 @@ final_check: FAIL
 - `pixi run check`: **6/6 PASS**（作業木未コミットのまま = 1/6 段の新方式の効果）。所要 **73 s**（1/6 〜 6/6 の timestamp 差。Phase 1 末は 96 s）。
   5/6 段が 70 s でほぼ全部。54314 側に `-- 127.0.0.1:54314 tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=1)` が出た ✓
   6/6 段 `matched lines in build/final_check.log: 0`（`warning:` と `WARNING:` の両方を計数して 0 件）✓
+
+## turn 4 — impl — T2 基盤（_ffi 53 本 / USAGE / command_tag / _take_result / encode_binary）
+- やったこと: サブエージェント 4 本（A: `_ffi` 3 本 + `test_ffi` / B: `PgErrorKind.USAGE` + docstring five→six + `test_errors` /
+  C: `encode_binary.mojo` + `test_encode_binary` / D: `Result.command_tag()` + `test_result` 追記 + `Connection._take_result` 抽出）を
+  対象ファイル非重複で並行実装。親で統合 → `fmt` 1 回 → `package` → docstring 診断 → `check`。完了基準 (a)〜(g) をすべて満たしてコミット（a658b55）
+- 想定外: **符号付き整数のシフトが PLAN どおりには書けなかった**。`SIMD.__rshift__` の rhs は `Self` 固定で `v >> Int` が通らず、
+  さらに符号付き右シフトは符号拡張するので `encode_int16(-1)` の上位バイトが `0xFF` で埋まる。`bitcast` でゼロ拡張してから
+  `UInt64` に広げる形に変えた（PLAN 訂正に記載。シフトで組む / エンディアン非依存という PLAN の意図は維持）。
+  もう 1 点、`List[UInt8]` のローカルを `return out` で返すと `ImplicitlyCopyable` 非準拠エラーになり `return out^` が必要だった
+- やり直し: 0 回
+- 次への注意: (1) `Connection._take_result` が入ったので T3 の `execute(sql, params)` は結果採用を自分で書かず
+  `return self._take_result(res)` を呼ぶだけでよい。(2) `encode_binary` は `from pq.encode_binary import ...` のみ
+  （`__init__.mojo` への再エクスポートは PLAN どおり未実施。T3 以降で `Param` 側が内部利用する）。
+  (3) **`write_to` の `elif` 連鎖は `else` が無い**ので、将来 `PgErrorKind` を足して `write_to` への追記を忘れると
+  `String(kind)` が**空文字になって黙って通る**（テストが無い）。T3〜T5 で USAGE を投げるテストは `kind=Usage` の
+  文字列一致で見ているので今回は捕まるが、定数追加時は `write_to` も必ず確認すること。
+  (4) サブエージェントは今回 4 本とも契約どおりで、前ターンのような未実測の断定は出なかった（契約の抜き書きと
+  「契約外は報告だけ」の固定文言が効いている）
+
+### T2 完了基準の実測
+
+- (a) `_ffi` 3 本: `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` → **53**、
+  `grep -cE '^        (String\()?"PQ[A-Za-z]+"\)?,$' tests/test_ffi.mojo` → **53**、`grep -c fifty tests/test_ffi.mojo` → **0**（exit 1）✓
+  ヘッダ行を再確認: `grep -n 'PQcmdStatus\|PQnparams\|PQparamtype' .pixi/envs/default/include/libpq-fe.h` → 600 / 607 / 608（PLAN の表と一致）✓
+- (b) `USAGE`: `grep -rnE 'exactly five|the five failure|five failure' src/pq` → **0 件**（exit 1）、
+  `grep -c 'USAGE' src/pq/errors.mojo` → **3**、`grep -n 'five' src/pq/__init__.mojo` → `__init__.mojo:8` の `PQTRANS_*` の 1 件だけ残る（別物。触っていない）✓
+- (c) `Result.command_tag()`: `test_command_tag_reports_the_server_tag` が両サーバーで PASS。
+  実測タグ: `SELECT 1` → `"SELECT 1"` / `CREATE TEMP TABLE pq_p2_tag(x int)` → `"CREATE TABLE"` /
+  `INSERT INTO pq_p2_tag VALUES (1),(2)` → `"INSERT 0 2"` / `UPDATE pq_p2_tag SET x = 0 WHERE false` → `"UPDATE 0"`（PLAN の期待値どおり）✓
+- (d) `_take_result` 抽出: `git diff src/pq/connection.mojo` が**挿入のみ**（移した `:255-308` の範囲に `-` 行が無い）= 1 文字も挙動を変えていない。
+  `execute(sql)` の本体は `_reject_nul` → `PQexec` → `_ = sql^` → `return self._take_result(res)` の 4 ステップ。
+  **`tests/test_connection.mojo` は無変更で 28/28 PASS**（両サーバー）✓
+- (e)(f) `encode_binary`: 6 関数ちょうど（`Int` 用は作らない）。`tests/test_encode_binary.mojo` **14/14 PASS**（DB 不要、両サーバーの枠で実行）。
+  PLAN (f) の期待値 16 件すべて実測一致（int16 ±端 / int32 -1・MAX / int64 MIN・-1・42 / bool / float32 1.5・NaN・±inf / float64 -0.0・NaN・1.5 / 各長 1・2・4・8・4・8）✓
+- (g) 検証コマンド:
+  - `pixi run check` → **6/6 PASS**（`final_check: PASS`）。**作業木が未コミットのまま**成功（T1 の 1/6 段の効果）。所要 **59 s**（00:56:29 → 00:57:28）。
+    3/6 段 `missing doc strings outside _ffi: 0`、6/6 段 `matched lines in build/final_check.log: 0`（`warning:` / `WARNING:` 両方 0 件）、
+    54314 側に `tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=1)` ✓
+  - 全テストが両サーバーで PASS（0 failed）。`check` の 5/6 段が全 8 ファイル × 2 サーバー（leak は PG17 のみ）を網羅し、
+    leak の PG14 側は別途回した `pixi run test` で **8/8 PASS**（`connect/query/close [4080, 4082 ×6, 4165, 4165]` = +85 の一段が出たが
+    `TOLERANCE_PAGES = 256` 内。T1 (f) で 256 を維持した判断どおり）。内訳: test_connection 28 / test_decode_text 49 /
+    test_encode_binary 14 / test_errors 7 / test_ffi 7 / test_leak 8 / test_loader_fail 1 / test_result 15 / test_smoke 4
+  - `pixi run package`（`mojo precompile src/pq`）→ 出力なし = **警告ゼロ** ✓
+  - docstring 診断: `mojo precompile --diagnose-missing-doc-strings src/pq | grep -v '/_ffi/' | grep -vE "'(__init__|__deinit__|__copyinit__|__moveinit__)'" | grep -c 'doc string'` → **0** ✓
+- `pixi run fmt` → `22 files left unchanged`（新規 2 ファイルを含む 21 `.mojo` + `hello.mojo` = 22。サブエージェントの手整形で差分ゼロ）✓
+
+#### 追従先チェックリストの照合（T2 該当行）
+
+| 行 | 確かめ方 | 結果 |
+|---|---|---|
+| libpq 関数のバインディングを足す | 上記 (a) の 3 コマンド | 53 / 53 / 0 ✓ |
+| `PgErrorKind` を足す | 上記 (b) の 3 コマンド | 0 件 / 3 / PQTRANS の 1 件だけ ✓ |
+| テストファイルを足す | `pixi run test` のログに新ファイル名が 2 回出る | `== 127.0.0.1:54317 tests/test_encode_binary.mojo` と `== 127.0.0.1:54314 tests/test_encode_binary.mojo` の 2 回 ✓ |
+| libpq を呼ぶ新しい経路を足す | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行 / `PQexec(` | `PQfreemem` → `connection.mojo:385, 427`（escape_literal / escape_identifier）の **2 行** ✓。`PQexec(` は `connection.mojo:254` の **1 行**（T7 時点で 4 行になる予定。T3〜T5 で +3） |
+
+- 未該当（後続タスクの担当）: 公開 struct の再エクスポート（T3〜T5）/ `examples/` 追加（T7）/ `_reject_nul` の `execute(sql, params)` 追加（T3）/ leak 12 本（T6）
