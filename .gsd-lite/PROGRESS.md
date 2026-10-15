@@ -884,3 +884,9 @@ T7 では完了基準の範囲外の変更をしていない（turn 8 の `run_t
   (2) 次マイルストーンの discuss は `main` に戻ってから始める（今 `main` 上。ブランチ `gsd-lite/phase2-params-prepared-tx` は残してある）。
   (3) 検出力の再確認用バイナリは `scratch/turn-008-*`、今回の格子プローブは `scratch/turn-010-grid/probe.mojo`（gitignore 済み）。
   (4) `check` の所要は今回 84 s（目安 80〜115 s の下側）、`pixi run test` は約 6 分
+
+## turn 11 — reflect — phase2-params-prepared-tx
+- やったこと: 振り返りを .gsd-lite/reflect/20261016-0246-phase2-params-prepared-tx.md に作成（提案 12 件）。turns.jsonl 10 行 / PROGRESS turn 1〜10 / VERIFICATION / PLAN メモ / 前回 reflect / コミット列 18 件を照合。差し戻し 0・リトライ 0・権限拒否 0・BLOCKED 0、計画 7 タスク = impl 7 ターン、USD 110.57 / 181 分
+- 想定外: 記録の不足 2 件（turns.jsonl の `ended_at` が全行 `null`、`usage` にサブエージェント分が無いとみられ出力トークンあたりコストが 13 倍の幅）。lean-ctx MCP 未接続（素のツール）
+- やり直し: 0 回
+- 次への注意: 次マイルストーンの T1 に VERIFICATION §6 の 1〜6・9 を 1 コミットで入れる / discuss で REQ §5.1a の陳腐化 2 行を直す / 申し送りは「確認済み」と「未確認:」を分け所要には単位（TestSuite の Summary は ms）
