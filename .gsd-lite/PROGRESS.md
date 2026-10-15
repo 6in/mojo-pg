@@ -355,3 +355,15 @@
 - 次への注意: **PLAN の未完了タスクはゼロ**。次は `/gsd-lite-verify`（verify round 2）。verify round 2 は「round 1 の格子の再確認 + F1〜F3 の回帰」だけで、新しいクラスの探索はしない（turn 11 の申し送り）。
   F1 の positive control を回すなら `.gsd-lite/logs/phase1-sync-text-basic/scratch/turn-012-positive-control.sh E1|E2|E3|E4` を使うが、**F2 / F3 で `src/pq/connection.mojo` の行番号が動いている**ので `grep -n 'PQclear\|PQfinish\|PQfreemem' src/pq/*.mojo` で取り直すこと。
   `pixi run check` は 1 回 **101 s**、`pixi run test` は 1 回 **約 100 s**（`test_leak` が 43〜45 s/サーバー）。1/6 段は未コミットの差分で必ず FAIL するので「実装 → コミット → `check`」の順で回す。`pixi` / `mojo` は PATH に無いのでフルパス `/home/parallels/.pixi/bin/pixi` を使う
+
+## turn 15 — verify — round 2: 合格（指摘 0 件）。main へ `--no-ff` ローカルマージ（リモート無し）
+- やったこと: `pixi run db-up` → `pixi run check`（6/6 PASS、228 PASS / 0 FAIL 両サーバー、警告 0、docstring 診断 0、fmt 差分なし、96 s）。追従先チェックリスト 7 行を再実行して全一致。
+  F1 の陽性対照 E1〜E4 を行番号を取り直した `scratch/turn-015-positive-control.sh` で再実測（4 本とも自分のループだけ FAIL、E1 は E6 の早期 fail で打ち切り）。
+  E7〜E16 を新テスト・`docker ps`・実装行で確認。round 1 の堅牢性プローブ 2 本を無改変で再実行（NUL 7 ケースが TypeMismatch に変わった以外は round 1 と同一、トレースバック 0）。
+  F1〜F3 の差分は読み取り専用サブエージェント 1 本にも独立レビューさせ、バグ / リーク / 弱いテストは 0 件（docstring の精度 3 件は残留リスクに記録）。VERIFICATION.md に round 2 を追記してコミット → `git checkout main` → `git merge --no-ff`（衝突なし、30 ファイル）
+- 想定外: なし（impl の申し送りどおり positive control の行番号は `result.mojo:99` / `connection.mojo:129` / `:350` / `:284` に動いていた。turn 12 のスクリプトは使わず turn 15 版を書いた）
+- やり直し: 0 回
+- 次への注意: 次は `/gsd-lite-reflect`（`reflect: true`）。振り返りの材料として: (1) round 1 の最重要指摘「リークテストの偽陰性」は impl の turn 9 申し送りに既にあった = **申し送りの「未実証」を impl が同じターンで陽性対照まで回していれば差し戻し 1 回が消えた**。
+  (2) `_ = x^` が寿命を終わらせない（turn 7）と `mojo run` の常駐ヒープ（turn 11 / 12）の 2 つが Mojo 1.1.0 固有の落とし穴で、次のマイルストーンの RESEARCH に先回りで載せる価値がある。
+  (3) `pixi run check` の 1/6 段が未コミット差分で落ちる仕様は 3 ターン連続で「想定外」に書かれた（turn 8 / 12 / 13）= PLAN の検証コマンド節に最初から「コミット後に回す」と書くべきだった。
+  (4) 残留リスクの docstring 3 件（`execute` の CONNECTION の説明 / `Row.get(name)` の引数名 / `test_leak` の `PAYLOAD_BYTES` 説明）は次のマイルストーンの冒頭で 1 コミットで直せる
