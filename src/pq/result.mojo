@@ -421,8 +421,10 @@ struct Row[origin: ImmOrigin](Copyable):
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL;
                 `TYPE_MISMATCH` when no column matches `col`, when `col`
-                contains a NUL byte, or when the column OID or the cell text
-                does not match `T`.
+                contains a NUL byte -- the message names `name`, the argument
+                of `Result.column_index`, which this resolves through
+                (`embedded NUL byte in name`) -- or when the column OID or the
+                cell text does not match `T`.
         """
         return self.get[T](self._res[].column_index(col))
 
@@ -482,8 +484,10 @@ struct Row[origin: ImmOrigin](Copyable):
 
         Raises:
             PgError: `TYPE_MISMATCH` when no column matches `col`, when `col`
-                contains a NUL byte, or when the column OID or the cell text
-                does not match `T`.
+                contains a NUL byte -- the message names `name`, the argument
+                of `Result.column_index`, which this resolves through
+                (`embedded NUL byte in name`) -- or when the column OID or the
+                cell text does not match `T`.
         """
         return self.get_optional[T](self._res[].column_index(col))
 

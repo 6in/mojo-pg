@@ -42,11 +42,39 @@ run_logged() {
 }
 
 # ---------------------------------------------------------------- 1. fmt
+# Formats a throwaway *copy* and diffs it against the real tree, so the verdict
+# depends only on the files themselves -- not on what git has staged. (The old
+# `mojo format` + `git diff` form reformatted the working tree in place and
+# flagged every unrelated uncommitted edit, which forced `check` to be run on a
+# clean tree only.) `mojo format` has no --check flag in Mojo 1.1.0.
+#
+# The formatter is handed an explicit list of *files*, never the copied
+# directories: `mojo format` skips anything .gitignore excludes when it walks a
+# directory, and the copy lives under the ignored `build/`. Passing the
+# directories made the stage a silent no-op -- the formatter reported "No Mojo
+# files are present", so the diff always matched and the stage could never fail
+# (measured on Mojo 1.1.0; explicitly named files are formatted regardless).
 stage "1/6 fmt (no diff)"
-run_logged mojo format src/ tests/ examples/ hello.mojo || fail "1/6 fmt (formatter error)"
-if ! git diff --quiet -- src tests examples hello.mojo; then
-    say "formatter changed these files:"
-    run_logged git diff --stat -- src tests examples hello.mojo
+rm -rf build/fmtcheck
+mkdir -p build/fmtcheck
+run_logged cp -r src tests examples hello.mojo build/fmtcheck/ \
+    || fail "1/6 fmt (copy error)"
+fmt_files=()
+while IFS= read -r -d '' f; do
+    fmt_files+=("$f")
+done < <(find build/fmtcheck -name '*.mojo' -type f -print0)
+if [ "${#fmt_files[@]}" -eq 0 ]; then
+    fail "1/6 fmt (no .mojo files found in the copy)"
+else
+    run_logged mojo format --quiet "${fmt_files[@]}" \
+        || fail "1/6 fmt (formatter error)"
+fi
+fmt_diff=0
+for t in src tests examples hello.mojo; do
+    run_logged diff -r -q "$t" "build/fmtcheck/$t" || fmt_diff=1
+done
+if [ "$fmt_diff" -ne 0 ]; then
+    say "formatter would change the files listed above"
     fail "1/6 fmt (diff not empty)"
 fi
 
@@ -87,15 +115,26 @@ stage "4/6 examples/basic.mojo"
 run_logged mojo run -I src examples/basic.mojo || fail "4/6 examples"
 
 # -------------------------------------------------------------- 5. tests
-stage "5/6 tests (both servers)"
-run_logged bash tests/run_tests.sh || fail "5/6 tests"
+stage "5/6 tests (both servers, test_leak on the first server only)"
+run_logged env PQ_TEST_LEAK_SERVERS=1 bash tests/run_tests.sh || fail "5/6 tests"
 
 # ------------------------------------------------------ 6. zero warnings
 # Must be last: it measures everything the stages above appended to $LOG.
 # (the heading must not itself contain the literal pattern being counted)
-stage "6/6 zero compiler warnings in log"
-warnings=$(grep -c 'warning:' "$LOG" || true)
-printf 'warning: lines in %s: %s\n' "$LOG" "$warnings"
+#
+# Both the lower-case compiler form and the upper-case server form are counted:
+# libpq's default notice processor prints server-side WARNING: / NOTICE: lines
+# to stderr, and run_logged folds stderr into $LOG. Requiring zero of those is
+# the mechanical proof that the transaction code never sends a redundant BEGIN
+# or COMMIT (the server answers those with "there is already a transaction in
+# progress" / "there is no transaction in progress").
+#
+# Nothing below may emit the counted literals through say(); they would land in
+# $LOG and count themselves. printf without tee stays out of $LOG, so the
+# report lines are safe -- they are worded without the literals anyway.
+stage "6/6 zero compiler and server warnings in log"
+warnings=$(grep -cE 'warning:|WARNING:' "$LOG" || true)
+printf 'matched lines in %s: %s\n' "$LOG" "$warnings"
 if [ "$warnings" -ne 0 ]; then
     failed_stages+=("6/6 warnings ($warnings)")
     status=1

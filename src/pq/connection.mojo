@@ -237,10 +237,14 @@ struct Connection(Movable):
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
                 byte, `PgErrorKind.CONNECTION` when libpq returns no result at
-                all or the connection was lost while running `sql`, or
-                `PgErrorKind.SERVER` when the server reports a diagnostic.
-                Server errors carry `sqlstate`, `severity`, `detail`, `hint`,
-                `position` and `context` when libpq supplies them.
+                all, or when the connection was lost while running `sql` and
+                libpq reported it without an SQLSTATE, or
+                `PgErrorKind.SERVER` when the server reports a diagnostic. (A
+                disconnect the server announced as a FATAL *with* an SQLSTATE
+                is therefore still `SERVER` for that statement, and the next
+                `execute` is the one that raises `CONNECTION`.) Server errors
+                carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
+                `context` when libpq supplies them.
         """
         _reject_nul(sql, "sql")
         var res = self._pq[].PQexec(

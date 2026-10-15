@@ -7,13 +7,21 @@ process's RSS instead of asking libpq for a count: that catches a leak no
 matter which of the three frees was forgotten.
 
 Every loop allocates and frees at least `PAYLOAD_BYTES` of libpq-owned memory
-per iteration. That sizing is the whole test, not a detail: `mojo run` hosts
-the compiler in this same process, and the ~100 MiB of compile-time heap it
-frees before `main()` runs stays resident on glibc's free lists. A few-KiB
-`PGresult` per iteration is recycled inside that pool and never moves RSS by a
-single page -- which is why a `SELECT 1` loop passed with every `PQclear`
-deleted (verify round 1, measured: 9 flat samples). The payloads below are
-sized so the pool cannot absorb the leak.
+per iteration. That sizing is the whole test, not a detail: a few-KiB
+`PGresult` per iteration is recycled inside glibc's free lists and never moves
+RSS by a single page -- which is why a `SELECT 1` loop passed with every
+`PQclear` deleted (verify round 1, measured: 9 flat samples). The payloads
+below are sized so no free list can absorb the leak.
+
+`tests/run_tests.sh` runs this file as a binary produced by `mojo build`, so
+no compiler heap is resident while the loops run. The payload sizes were first
+chosen against `mojo run`, which hosts the compiler in this same process and
+leaves the ~100 MiB of compile-time heap it frees before `main()` runs on
+glibc's free lists; they are kept that large as headroom. Running this file
+under `mojo run` therefore still detects a leak, but that freed heap can
+absorb the first sampling interval or two, which leaves the verdict resting
+on `is_leaking`'s total-growth signal alone. The built binary keeps both
+signals.
 
 RSS is sampled from `/proc/self/statm`, which only exists on Linux. On macOS
 the loops are skipped rather than reimplemented: `is_leaking` is still covered
@@ -22,9 +30,10 @@ by its own unit tests there.
 The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
 `postgres://` URI: these tests append ` password=...` to it).
 
-This file is slow by design (the main loop alone is ~35 s per server). The
-`is_leaking` unit tests need no database and are declared first so a broken
-verdict fails before any loop runs.
+This file is slow by design: the main loop alone is ~35 s per server once the
+binary is built, on top of the one-off `mojo build`. The `is_leaking` unit
+tests need no database and are declared first so a broken verdict fails
+before any loop runs.
 """
 
 from std.os import getenv
@@ -48,11 +57,12 @@ The loop appends `OPEN_PAYLOAD_BYTES` of filler to it; see there for why.
 comptime PAYLOAD_BYTES = 65536
 """Bytes of libpq-owned memory every iteration of every loop must churn.
 
-64 KiB is the floor that makes a forgotten free visible above the compiler's
-freed heap (see the module docstring). Raising it is not free either: a
-leaking loop grows by `PAYLOAD_BYTES` x the sampling interval between samples,
-and that has to stay small enough that the first sample is taken before
-`ABORT_PAGES` is reached.
+64 KiB is the floor that keeps a forgotten free visible even under `mojo run`,
+whose compiler heap the built binary no longer carries (see the module
+docstring). Raising it is not free either: `ABORT_PAGES` is a threshold on the
+growth measured from the *first* sample, so `PAYLOAD_BYTES` x the sampling
+interval has to stay well under `ABORT_PAGES` for a leaking loop to be cut
+short within a few samples -- a few hundred MiB rather than the machine.
 
 The failed-open loop uses `OPEN_PAYLOAD_BYTES` instead: it runs 1,000
 iterations rather than 10,000, so it needs more per iteration.
@@ -87,17 +97,22 @@ machine.
 comptime TOLERANCE_PAGES = 256
 """How much total RSS growth (in pages) a non-leaking loop may show.
 
-Measured on PG14 and PG17: a non-leaking loop is stable to within 2 pages,
-except for a *single* one-off step of exactly 83 pages (~332 KiB) that lands
-at an arbitrary iteration of an arbitrary loop — a lazy first-use allocation
-somewhere under libpq, not per-iteration growth. 256 pages (1 MiB) clears two
-such steps.
+Measured on PG14 and PG17, with this file run as the binary `mojo build`
+produces (the only way `tests/run_tests.sh` runs it): a non-leaking loop is
+stable to within 2 pages, except for a *single* one-off step of exactly 83
+pages (~332 KiB) that lands at an arbitrary iteration of an arbitrary loop — a
+lazy first-use allocation somewhere under libpq, not per-iteration growth. 256
+pages (1 MiB) clears two such steps.
+
+The step is why the tolerance is not tightened to 16 pages: over 16 built-binary
+series (4 loops x 2 servers x 2 runs) 14 came in at 0-2 pages of total growth
+and 2 showed the 83-page step, once at the 4th sample and once at the 9th.
 
 Total growth, not monotonicity, is the signal that actually fires here: a real
 leak moves thousands of pages per sampling interval, far past this tolerance.
-The monotonic-growth check in `is_leaking` is the backup — the compiler's
-freed heap can flatten the first interval or two before the pool runs out, and
-a flat step there would otherwise clear the loop.
+The monotonic-growth check in `is_leaking` is the backup — an allocator that
+serves several iterations out of a region it already holds can flatten an
+interval, and a flat step there would otherwise clear the loop.
 """
 
 comptime MAIN_ITERATIONS = 10000
