@@ -367,3 +367,9 @@
   (2) `_ = x^` が寿命を終わらせない（turn 7）と `mojo run` の常駐ヒープ（turn 11 / 12）の 2 つが Mojo 1.1.0 固有の落とし穴で、次のマイルストーンの RESEARCH に先回りで載せる価値がある。
   (3) `pixi run check` の 1/6 段が未コミット差分で落ちる仕様は 3 ターン連続で「想定外」に書かれた（turn 8 / 12 / 13）= PLAN の検証コマンド節に最初から「コミット後に回す」と書くべきだった。
   (4) 残留リスクの docstring 3 件（`execute` の CONNECTION の説明 / `Row.get(name)` の引数名 / `test_leak` の `PAYLOAD_BYTES` 説明）は次のマイルストーンの冒頭で 1 コミットで直せる
+
+## turn 16 — reflect — phase1-sync-text-basic
+- やったこと: 振り返りを .gsd-lite/reflect/20261015-2308-phase1-sync-text-basic.md に作成（提案 11 件）。turns.jsonl 15 行（リトライ 0 / 無進捗 0 / 権限拒否 0、計 212 分 / USD 111.56）、PROGRESS 15 ターン、コミット 27 件、VERIFICATION 2 ラウンドを集計
+- 想定外: 記録の不足 2 点（turns.jsonl の `ended_at` が全行 null。PROGRESS turn 8 / 9 の `rg` ✓ は素のシェルでは再現不能な形で、turn 10 で `grep` に置換済み）。前回の振り返りは無し（初回）
+- やり直し: 0 回
+- 次への注意: 検出力を主張するテストは陽性対照を完了基準に入れる / `check` 1/6 段の git diff 判定を直す / Mojo 1.1.0 の落とし穴（`_ = x^`・`mojo run` 常駐ヒープ 等）を次の RESEARCH に引き継ぐ
