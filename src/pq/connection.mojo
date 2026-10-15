@@ -1,0 +1,272 @@
+"""Synchronous PostgreSQL connection built on `PQconnectdb` and `PQexec`.
+
+`Connection` owns one `PGconn*` and the process-wide `LibpqFFI` table it was
+opened with. It is `Movable` but deliberately not `Copyable`: a libpq
+connection is not thread-safe and must be handed to `PQfinish` exactly once,
+so `var b = a` is a compile error and ownership transfers with `a^` instead.
+
+Connecting never echoes the caller's credentials. Neither the conninfo string
+nor the parameter dictionary appears in any raised message; only libpq's own
+`PQerrorMessage` text is reported, which names host, port and user but not the
+password.
+"""
+
+from std.ffi import c_int
+
+from pq._ffi.functions import LibpqFFI
+from pq._ffi.loader import libpq_ptr
+from pq._ffi.types import (
+    CONNECTION_OK,
+    CStr,
+    CStrArray,
+    PG_DIAG_CONTEXT,
+    PG_DIAG_MESSAGE_DETAIL,
+    PG_DIAG_MESSAGE_HINT,
+    PG_DIAG_MESSAGE_PRIMARY,
+    PG_DIAG_SEVERITY,
+    PG_DIAG_SEVERITY_NONLOCALIZED,
+    PG_DIAG_SQLSTATE,
+    PG_DIAG_STATEMENT_POSITION,
+    PGRES_COMMAND_OK,
+    PGRES_EMPTY_QUERY,
+    PGRES_TUPLES_OK,
+    PGconnPtr,
+    PGresultPtr,
+)
+from pq.errors import PgError, PgErrorKind
+from pq.result import Result
+
+
+def _error_field(
+    pq: Pointer[LibpqFFI, MutUntrackedOrigin],
+    res: PGresultPtr,
+    code: c_int,
+) -> String:
+    """Copy one `PQresultErrorField` into an owned `String`.
+
+    Args:
+        pq: The libpq function table to call through.
+        res: The result carrying the diagnostic.
+        code: A `PG_DIAG_*` field code.
+
+    Returns:
+        The field text, or an empty string when libpq reports NULL.
+    """
+    var p = pq[].PQresultErrorField(res, code)
+    if p:
+        return String(unsafe_from_utf8_ptr=p.value())
+    return String()
+
+
+struct Connection(Movable):
+    """An open synchronous connection to a PostgreSQL server.
+
+    Construct one with `Connection.open`. The connection is closed by
+    `PQfinish` when the value is destroyed, so it must not be copied; move it
+    with `^` to transfer ownership.
+    """
+
+    var _conn: PGconnPtr
+    """The owned `PGconn*`, closed exactly once on destruction."""
+
+    var _pq: Pointer[LibpqFFI, MutUntrackedOrigin]
+    """Borrowed process-wide libpq table, retained so `__deinit__` cannot raise.
+    """
+
+    def __init__(
+        out self,
+        conn: PGconnPtr,
+        pq: Pointer[LibpqFFI, MutUntrackedOrigin],
+    ):
+        """Take ownership of an already-connected `PGconn*`.
+
+        Args:
+            conn: A `PGconn*` whose status is `CONNECTION_OK`.
+            pq: The libpq table `conn` was opened with.
+        """
+        self._conn = conn
+        self._pq = pq
+
+    def __deinit__(deinit self):
+        """Close the connection with `PQfinish` unless it is already NULL."""
+        if not self._conn.is_null():
+            self._pq[].PQfinish(self._conn)
+
+    @staticmethod
+    def _adopt(
+        pq: Pointer[LibpqFFI, MutUntrackedOrigin], conn: PGconnPtr
+    ) raises PgError -> Connection:
+        """Validate a freshly returned `PGconn*` and wrap it.
+
+        A non-NULL connection whose status is not `CONNECTION_OK` is closed
+        before raising, so no handle leaks on a failed connect.
+
+        Args:
+            pq: The libpq table `conn` was opened with.
+            conn: The `PGconn*` returned by libpq.
+
+        Returns:
+            A `Connection` owning `conn`.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when libpq returned NULL or the
+                connection attempt failed. The message is libpq's own text and
+                never includes the caller's connection parameters.
+        """
+        if conn.is_null():
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                "PQconnectdb returned NULL (out of memory)",
+            )
+        if pq[].PQstatus(conn) != CONNECTION_OK:
+            var message = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
+            pq[].PQfinish(conn)
+            raise PgError(PgErrorKind.CONNECTION, message)
+        return Connection(conn, pq)
+
+    @staticmethod
+    def open(var conninfo: String) raises PgError -> Connection:
+        """Connect using a libpq conninfo string or URI.
+
+        Accepts either keyword form (`"host=127.0.0.1 dbname=pq_test"`) or a
+        `postgresql://` URI, exactly as `PQconnectdb` does.
+
+        Args:
+            conninfo: The conninfo string or connection URI.
+
+        Returns:
+            An open `Connection`.
+
+        Raises:
+            PgError: `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
+                `PgErrorKind.CONNECTION` if connecting fails. `conninfo` is
+                never included in the message, so an embedded password cannot
+                leak through the error.
+        """
+        var pq = libpq_ptr()
+        var conn = pq[].PQconnectdb(
+            CStr(unsafe_from_address=Int(conninfo.as_c_string_span().ptr()))
+        )
+        _ = conninfo^
+        return Connection._adopt(pq, conn)
+
+    @staticmethod
+    def open(params: Dict[String, String]) raises PgError -> Connection:
+        """Connect using discrete keyword/value parameters.
+
+        Calls `PQconnectdbParams` with `expand_dbname` set to 0, so every value
+        is taken literally. A `postgresql://` URI placed in `dbname` is treated
+        as a database *name* rather than expanded; pass the URI to
+        `open(String)` instead.
+
+        Args:
+            params: Connection keywords mapped to their values, for example
+                `"host"`, `"port"`, `"user"`, `"password"`, `"dbname"`.
+
+        Returns:
+            An open `Connection`.
+
+        Raises:
+            PgError: `PgErrorKind.LIBPQ_LOAD` if libpq cannot be loaded, or
+                `PgErrorKind.CONNECTION` if connecting fails. `params` is never
+                included in the message, so a password value cannot leak
+                through the error.
+        """
+        var pq = libpq_ptr()
+        # as_c_string_span() is `mut self` and may reallocate to append the NUL
+        # terminator, so the keys and values must be owned copies that outlive
+        # the call rather than borrowed views into `params`.
+        var keys = List[String]()
+        var values = List[String]()
+        for ref item in params.items():
+            keys.append(item.key.copy())
+            values.append(item.value.copy())
+        var key_ptrs = List[Int]()
+        var value_ptrs = List[Int]()
+        for ref k in keys:
+            key_ptrs.append(Int(k.as_c_string_span().ptr()))
+        for ref v in values:
+            value_ptrs.append(Int(v.as_c_string_span().ptr()))
+        key_ptrs.append(0)
+        value_ptrs.append(0)
+        var conn = pq[].PQconnectdbParams(
+            CStrArray(unsafe_from_address=Int(key_ptrs.unsafe_ptr())),
+            CStrArray(unsafe_from_address=Int(value_ptrs.unsafe_ptr())),
+            c_int(0),
+        )
+        _ = key_ptrs^
+        _ = value_ptrs^
+        _ = keys^
+        _ = values^
+        return Connection._adopt(pq, conn)
+
+    def execute(self, var sql: String) raises PgError -> Result:
+        """Run `sql` to completion with `PQexec` and return its result.
+
+        `sql` may contain several statements separated by semicolons. As in
+        libpq, the returned `Result` is the result of the *last* statement; if
+        an earlier statement fails, that statement's error is raised and no
+        result is returned.
+
+        Args:
+            sql: One or more SQL statements.
+
+        Returns:
+            The `Result` of the last statement, owning the `PGresult*`.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
+                all, or `PgErrorKind.SERVER` when the server reports a
+                diagnostic. Server errors carry `sqlstate`, `severity`,
+                `detail`, `hint`, `position` and `context` when libpq supplies
+                them.
+        """
+        var res = self._pq[].PQexec(
+            self._conn,
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+        )
+        _ = sql^
+        if res.is_null():
+            # No PGresult was allocated, so there is nothing to PQclear.
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        var status = self._pq[].PQresultStatus(res)
+        if status == PGRES_TUPLES_OK or status == PGRES_COMMAND_OK:
+            return Result(res, self._pq)
+        if status == PGRES_EMPTY_QUERY:
+            self._pq[].PQclear(res)
+            raise PgError(PgErrorKind.SERVER, "empty query")
+        # Every diagnostic is copied into owned Strings before PQclear frees
+        # the PGresult the field pointers point into.
+        var severity = _error_field(
+            self._pq, res, PG_DIAG_SEVERITY_NONLOCALIZED
+        )
+        if severity == "":
+            severity = _error_field(self._pq, res, PG_DIAG_SEVERITY)
+        var sqlstate = _error_field(self._pq, res, PG_DIAG_SQLSTATE)
+        var message = _error_field(self._pq, res, PG_DIAG_MESSAGE_PRIMARY)
+        if message == "":
+            message = String(
+                unsafe_from_utf8_ptr=self._pq[].PQresultErrorMessage(res)
+            )
+        if message == "":
+            message = String("unexpected result status ", Int(status))
+        var detail = _error_field(self._pq, res, PG_DIAG_MESSAGE_DETAIL)
+        var hint = _error_field(self._pq, res, PG_DIAG_MESSAGE_HINT)
+        var position = _error_field(self._pq, res, PG_DIAG_STATEMENT_POSITION)
+        var context = _error_field(self._pq, res, PG_DIAG_CONTEXT)
+        self._pq[].PQclear(res)
+        raise PgError(
+            PgErrorKind.SERVER,
+            message,
+            sqlstate=sqlstate,
+            severity=severity,
+            detail=detail,
+            hint=hint,
+            position=position,
+            context=context,
+        )
