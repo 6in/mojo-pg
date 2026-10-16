@@ -6,7 +6,8 @@ is their only home, and `pq.decode_binary`, `pq.encode_binary` and
 `decode_text[T]` that turns a libpq text-format cell into a Mojo value,
 and `parse_bytea_hex` for the `\\x`-prefixed hex output of `bytea`. Types
 whose text form needs a parser of its own (`Decimal`, `UUID`, `Date`,
-`Timestamp`, `TimestampTz`) provide a `parse` static method in
+`Timestamp`, `TimestampTz`, `Time`, `TimeTz`, `Interval`) provide a
+`parse` static method in
 `pq.types_numeric` / `pq.types_uuid` / `pq.types_datetime`, which the
 type switch calls. The requested type must match the column OID exactly:
 neither widening (`int2` into `Int32`) nor narrowing is performed, so a
@@ -19,7 +20,14 @@ quotes the offending input text.
 """
 
 from pq.errors import PgError, PgErrorKind
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -62,11 +70,20 @@ comptime OID_VARCHAR = UInt32(1043)
 comptime OID_DATE = UInt32(1082)
 """OID of `date`."""
 
+comptime OID_TIME = UInt32(1083)
+"""OID of `time` (without time zone)."""
+
 comptime OID_TIMESTAMP = UInt32(1114)
 """OID of `timestamp` (without time zone)."""
 
 comptime OID_TIMESTAMPTZ = UInt32(1184)
 """OID of `timestamptz` (`timestamp with time zone`)."""
+
+comptime OID_INTERVAL = UInt32(1186)
+"""OID of `interval`."""
+
+comptime OID_TIMETZ = UInt32(1266)
+"""OID of `timetz` (`time with time zone`)."""
 
 comptime OID_NUMERIC = UInt32(1700)
 """OID of `numeric` (`decimal`)."""
@@ -165,9 +182,16 @@ def decode_text[T: Copyable](text: String, oid: UInt32) raises PgError -> T:
     conversion is performed. `Bool` requires oid 16, `Int16` oid 21,
     `Int32` oid 23, `Int64` and `Int` oid 20, `Float32` oid 700,
     `Float64` oid 701, `List[UInt8]` oid 17, `Decimal` oid 1700
-    (`numeric`), `UUID` oid 2950, `Date` oid 1082, `Timestamp` oid 1114
-    and `TimestampTz` oid 1184. `String` accepts any OID and never fails.
+    (`numeric`), `UUID` oid 2950, `Date` oid 1082, `Timestamp` oid 1114,
+    `TimestampTz` oid 1184, `Time` oid 1083, `TimeTz` oid 1266 and
+    `Interval` oid 1186. `String` accepts any OID and never fails.
     Any other `T` is a compile-time error.
+
+    The three date and timestamp parsers accept only the `ISO, YMD`
+    `DateStyle` and `Interval.parse` only the `postgres` `IntervalStyle`,
+    which `Connection.open` pins on every connection; a session that
+    changes either GUC afterwards makes the text form of those columns a
+    `TYPE_MISMATCH` here, and the binary format stays unaffected.
 
     Parameters:
         T: The Mojo type to decode into.
@@ -287,6 +311,21 @@ def decode_text[T: Copyable](text: String, oid: UInt32) raises PgError -> T:
         if oid != OID_TIMESTAMPTZ:
             raise _oid_error(oid, "timestamptz", text)
         var value = TimestampTz.parse(text)
+        return rebind[T](value).copy()
+    elif T == Time:
+        if oid != OID_TIME:
+            raise _oid_error(oid, "time", text)
+        var value = Time.parse(text)
+        return rebind[T](value).copy()
+    elif T == TimeTz:
+        if oid != OID_TIMETZ:
+            raise _oid_error(oid, "timetz", text)
+        var value = TimeTz.parse(text)
+        return rebind[T](value).copy()
+    elif T == Interval:
+        if oid != OID_INTERVAL:
+            raise _oid_error(oid, "interval", text)
+        var value = Interval.parse(text)
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"

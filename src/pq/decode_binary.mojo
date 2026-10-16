@@ -1,9 +1,10 @@
 """Binary-format decoding of PostgreSQL wire bytes into Mojo types.
 
-Holds eleven decoders -- the fixed-width `decode_bool`, `decode_int16`,
+Holds fourteen decoders -- the fixed-width `decode_bool`, `decode_int16`,
 `decode_int32`, `decode_int64`, `decode_float32`, `decode_float64`,
-`decode_uuid`, `decode_date`, `decode_timestamp` and
-`decode_timestamptz`, plus the variable-length `decode_numeric` -- and the
+`decode_uuid`, `decode_date`, `decode_timestamp`, `decode_timestamptz`,
+`decode_time`, `decode_timetz` and `decode_interval`, plus the
+variable-length `decode_numeric` -- and the
 `comptime if` type switch `decode_binary[T]` that turns one libpq
 binary-format cell into a Mojo value. Each decoder is the inverse of the
 `encode_<pgtype>` function of the same suffix in `pq.encode_binary`, reading
@@ -27,9 +28,12 @@ number:
 - Values outside the type's wire domain are rejected: a `bool` byte must be
   0 or 1, a `jsonb` cell must open with version byte 1, and a `numeric`
   header must carry one of the five defined signs, a `dscale` of at most
-  16383 and digit groups in `0..9999`. `date`, `timestamp` and
-  `timestamptz` have no such check: every cell of the right width is a
-  value those types can hold, the `infinity` sentinels included.
+  16383 and digit groups in `0..9999`. A `time` must fall in
+  `0..86400000000`, the upper bound included since `24:00:00` is a valid
+  `time`, and a `timetz` zone must be narrower than 16 hours. `date`,
+  `timestamp`, `timestamptz` and `interval` have no such check: every cell
+  of the right width is a value those types can hold, the `infinity`
+  sentinels included.
 
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
@@ -51,18 +55,28 @@ from pq.decode_text import (
     OID_INT2,
     OID_INT4,
     OID_INT8,
+    OID_INTERVAL,
     OID_JSON,
     OID_JSONB,
     OID_NAME,
     OID_NUMERIC,
     OID_TEXT,
+    OID_TIME,
     OID_TIMESTAMP,
     OID_TIMESTAMPTZ,
+    OID_TIMETZ,
     OID_UUID,
     OID_VARCHAR,
 )
 from pq.errors import PgError, PgErrorKind
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -81,6 +95,12 @@ comptime _NUMERIC_DSCALE_MAX = UInt16(0x3FFF)
 comptime _NUMERIC_DIGIT_MAX = Int16(9999)
 
 comptime _UUID_BYTES = 16
+
+comptime _MAX_TIME_MICROS = Int64(86400000000)
+"""Microseconds of `24:00:00`, the largest `time` PostgreSQL accepts."""
+
+comptime _MAX_OFFSET_SECONDS = Int32(57600)
+"""The first `timetz` zone too wide to accept: 16 hours, in seconds."""
 
 
 def _hex4(v: UInt16) -> String:
@@ -488,6 +508,104 @@ def decode_timestamptz[
     return TimestampTz(bitcast[DType.int64, 1](_be_bits(bytes)))
 
 
+def decode_time[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> Time:
+    """Decode the eight byte PostgreSQL `time` binary format.
+
+    The wire value is the microsecond offset into the day, which is what
+    `Time` holds. Unlike the timestamp types, `time` has no sentinels and a
+    bounded domain, so the value is range checked: `0..86400000000`, the
+    upper bound included because `24:00:00` is a `time` PostgreSQL both
+    stores and prints.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the server's microsecond offset.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            eight bytes, or when the offset is outside a day.
+    """
+    _check_length(bytes, "time", 8)
+    var micros = bitcast[DType.int64, 1](_be_bits(bytes))
+    if micros < 0 or micros > _MAX_TIME_MICROS:
+        raise _binary_value_error("time", String(micros, " is out of range"))
+    return Time(micros)
+
+
+def decode_timetz[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> TimeTz:
+    """Decode the twelve byte PostgreSQL `timetz` binary format.
+
+    The cell is an eight byte microsecond offset into the day followed by a
+    four byte zone offset in seconds, counted **positive west** of UTC the
+    way PostgreSQL counts it, so `+09` arrives as -32400. The zone is range
+    checked against the 16 hours PostgreSQL allows; the time of day is not,
+    since the server pairs a `24:00:00` with a zone and both are valid.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the microsecond offset and the zone.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            twelve bytes, or when the zone is 16 hours or wider.
+    """
+    _check_length(bytes, "timetz", 12)
+    var micros = bitcast[DType.int64, 1](_be_bits(bytes[0:8]))
+    var zone = bitcast[DType.int32, 1](UInt32(_be_bits(bytes[8:12])))
+    if zone <= -_MAX_OFFSET_SECONDS or zone >= _MAX_OFFSET_SECONDS:
+        raise _binary_value_error(
+            "timetz", String("zone ", zone, " is out of range")
+        )
+    return TimeTz(micros, zone)
+
+
+def decode_interval[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> Interval:
+    """Decode the sixteen byte PostgreSQL `interval` binary format.
+
+    The cell is an eight byte microsecond count, then a four byte day count,
+    then a four byte month count -- that order, not the order the text form
+    prints them in. All three are kept as they arrive: months are never
+    folded into days nor days into microseconds, since a month is not a
+    fixed number of days. PostgreSQL 17's `infinity` sentinels, all three
+    fields at their extreme, are ordinary values here, so no range check
+    applies.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the server's three counts.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            sixteen bytes.
+    """
+    _check_length(bytes, "interval", 16)
+    var micros = bitcast[DType.int64, 1](_be_bits(bytes[0:8]))
+    var days = bitcast[DType.int32, 1](UInt32(_be_bits(bytes[8:12])))
+    var months = bitcast[DType.int32, 1](UInt32(_be_bits(bytes[12:16])))
+    return Interval(micros, days, months)
+
+
 def decode_binary[
     origin: ImmOrigin, //, T: Copyable
 ](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> T:
@@ -497,8 +615,9 @@ def decode_binary[
     conversion is performed. `Bool` requires oid 16, `Int16` oid 21,
     `Int32` oid 23, `Int64` and `Int` oid 20, `Float32` oid 700,
     `Float64` oid 701, `List[UInt8]` oid 17, `Decimal` oid 1700
-    (`numeric`), `UUID` oid 2950, `Date` oid 1082, `Timestamp` oid 1114
-    and `TimestampTz` oid 1184. `String` requires one of
+    (`numeric`), `UUID` oid 2950, `Date` oid 1082, `Timestamp` oid 1114,
+    `TimestampTz` oid 1184, `Time` oid 1083, `TimeTz` oid 1266 and
+    `Interval` oid 1186. `String` requires one of
     the six string-shaped OIDs -- 25 (`text`), 1043 (`varchar`), 1042
     (`bpchar`), 19 (`name`), 114 (`json`) and 3802 (`jsonb`) -- and is
     therefore not the catch-all it is on the text path. Any other `T` is a
@@ -613,6 +732,21 @@ def decode_binary[
         if oid != OID_TIMESTAMPTZ:
             raise _binary_oid_error(oid, "TimestampTz")
         var value = decode_timestamptz(bytes)
+        return rebind[T](value).copy()
+    elif T == Time:
+        if oid != OID_TIME:
+            raise _binary_oid_error(oid, "Time")
+        var value = decode_time(bytes)
+        return rebind[T](value).copy()
+    elif T == TimeTz:
+        if oid != OID_TIMETZ:
+            raise _binary_oid_error(oid, "TimeTz")
+        var value = decode_timetz(bytes)
+        return rebind[T](value).copy()
+    elif T == Interval:
+        if oid != OID_INTERVAL:
+            raise _binary_oid_error(oid, "Interval")
+        var value = decode_interval(bytes)
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"

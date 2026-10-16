@@ -2,9 +2,12 @@
 
 from pq.decode_binary import (
     decode_date,
+    decode_interval,
     decode_numeric,
+    decode_time,
     decode_timestamp,
     decode_timestamptz,
+    decode_timetz,
 )
 from pq.decode_text import parse_bytea_hex
 from pq.encode_binary import (
@@ -15,12 +18,22 @@ from pq.encode_binary import (
     encode_int16,
     encode_int32,
     encode_int64,
+    encode_interval,
     encode_numeric,
+    encode_time,
     encode_timestamp,
     encode_timestamptz,
+    encode_timetz,
     encode_uuid,
 )
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 from std.testing import TestSuite, assert_equal, assert_true
@@ -142,6 +155,9 @@ def test_encoded_widths_are_fixed() raises:
     assert_equal(len(encode_date(Date(0))), 4)
     assert_equal(len(encode_timestamp(Timestamp(0))), 8)
     assert_equal(len(encode_timestamptz(TimestampTz(0))), 8)
+    assert_equal(len(encode_time(Time(0))), 8)
+    assert_equal(len(encode_timetz(TimeTz(0, 0))), 12)
+    assert_equal(len(encode_interval(Interval(0, 0, 0))), 16)
 
 
 def _hex(digits: String) raises -> List[UInt8]:
@@ -370,6 +386,96 @@ def test_datetime_round_trips_through_the_decoders() raises:
             back_tz == TimestampTz(micros[i]),
             String("timestamptz round trip ", micros[i]),
         )
+
+
+def test_time_matches_the_measured_wire_bytes() raises:
+    _assert_bytes(
+        encode_time(Time(45296500000)),
+        _hex("0000000a8be1bd20"),
+        "time 12:34:56.5",
+    )
+    _assert_bytes(
+        encode_time(Time(86400000000)),
+        _hex("000000141dd76000"),
+        "time 24:00:00",
+    )
+
+
+def test_timetz_appends_the_zone_after_the_time() raises:
+    _assert_bytes(
+        encode_timetz(TimeTz(45296000000, -32400)),
+        _hex("0000000a8bda1c00" + "ffff8170"),
+        "timetz 12:34:56+09",
+    )
+    _assert_bytes(
+        encode_timetz(TimeTz(43200000000, 12600)),
+        _hex("0000000a0eebb000" + "00003138"),
+        "timetz 12:00:00-03:30",
+    )
+
+
+def test_interval_puts_micros_days_months_in_that_order() raises:
+    _assert_bytes(
+        encode_interval(Interval(0, 1, 0)),
+        _hex("0000000000000000" + "00000001" + "00000000"),
+        "interval 1 day",
+    )
+    _assert_bytes(
+        encode_interval(Interval(0, 0, 1)),
+        _hex("0000000000000000" + "00000000" + "00000001"),
+        "interval 1 mon",
+    )
+    _assert_bytes(
+        encode_interval(Interval(14706789000, 3, 14)),
+        _hex("000000036c97ca88" + "00000003" + "0000000e"),
+        "interval 1 year 2 mons 3 days 04:05:06.789",
+    )
+    _assert_bytes(
+        encode_interval(Interval.infinity()),
+        _hex("7fffffffffffffff" + "7fffffff" + "7fffffff"),
+        "interval infinity",
+    )
+
+
+def test_time_types_round_trip_through_the_decoders() raises:
+    var times: List[Int64] = [0, 1, 45296500000, 86399999999, 86400000000]
+    for i in range(len(times)):
+        var value = Time(times[i])
+        var back: Time
+        try:
+            back = decode_time(Span[UInt8](encode_time(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("time round trip ", times[i]))
+
+    var zones: List[Int32] = [0, -1, -32400, 12600, 57540, -57599]
+    for i in range(len(zones)):
+        var value = TimeTz(43200000000, zones[i])
+        var back: TimeTz
+        try:
+            back = decode_timetz(Span[UInt8](encode_timetz(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("timetz round trip ", zones[i]))
+
+    var intervals: List[Interval] = [
+        Interval(0, 0, 0),
+        Interval(0, 1, 0),
+        Interval(0, 0, 1),
+        Interval(14706789000, 3, 14),
+        Interval(7200000000, -1, 0),
+        Interval(-14706789000, -3, -14),
+        Interval.infinity(),
+        Interval.negative_infinity(),
+    ]
+    for i in range(len(intervals)):
+        var value = intervals[i].copy()
+        var back: Interval
+        try:
+            back = decode_interval(Span[UInt8](encode_interval(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("interval round trip ", i))
 
 
 def main() raises:

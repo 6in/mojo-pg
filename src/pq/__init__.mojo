@@ -10,7 +10,8 @@ back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
 `PreparedStatement`, `Transaction`, the `Decimal`, `UUID`, `Date`,
-`Timestamp` and `TimestampTz` value types for the PostgreSQL types that
+`Timestamp`, `TimestampTz`, `Time`, `TimeTz` and `Interval` value types
+for the PostgreSQL types that
 have no Mojo equivalent, the `CONNECTION_OK`
 / `CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
 status constants.
@@ -36,6 +37,9 @@ returns the text unchanged.
 | date | 1082 | `Date` | `YYYY-MM-DD`, ` BC` suffix, `±infinity` |
 | timestamp | 1114 | `Timestamp` | `YYYY-MM-DD HH:MM:SS[.f]`, same |
 | timestamptz | 1184 | `TimestampTz` | same plus the UTC offset |
+| time | 1083 | `Time` | `HH:MM:SS[.f]`, `24:00:00` included |
+| timetz | 1266 | `TimeTz` | same plus `±HH[:MM[:SS]]` |
+| interval | 1186 | `Interval` | `IntervalStyle` `postgres` only |
 | text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is |
 | json, jsonb | 114, 3802 | `String` | as-is; jsonb drops its version byte |
 | bytea | 17 | `List[UInt8]` | `\\x` hex form only |
@@ -98,6 +102,9 @@ wire format and the OID sent in `paramTypes`:
 | `Date` | binary, 4 byte BE | 1082 | days from 2000-01-01 |
 | `Timestamp` | binary, 8 byte BE | 1114 | µs from 2000-01-01 |
 | `TimestampTz` | binary, 8 byte BE | 1184 | same, read as UTC |
+| `Time` | binary, 8 byte BE | 1083 | µs into the day |
+| `TimeTz` | binary, 8 + 4 byte BE | 1266 | zone is positive west |
+| `Interval` | binary, 8 + 4 + 4 byte BE | 1186 | µs, days, months |
 | `String`, `StringLiteral` | text, NUL-terminated | 0 | server infers |
 | `List[UInt8]` | binary, with length | 17 | empty / NUL-containing ok |
 | NULL | NULL | 0, or the given OID | see below |
@@ -166,6 +173,13 @@ from .params import Param
 from .prepared import PreparedStatement
 from .result import Result, ResultFormat, Row
 from .transaction import Transaction
-from .types_datetime import Date, Timestamp, TimestampTz
+from .types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from .types_numeric import Decimal
 from .types_uuid import UUID

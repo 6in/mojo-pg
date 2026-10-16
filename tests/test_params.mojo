@@ -34,7 +34,14 @@ from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.params import Param
 from pq.result import Result, Row
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -552,6 +559,21 @@ def test_param_oids_of_the_extended_types() raises:
     assert_true(as_timestamptz.is_binary())
     assert_false(as_timestamptz.is_null())
 
+    var as_time = Param(Time(45296789000))
+    assert_equal(as_time.oid(), UInt32(1083))
+    assert_true(as_time.is_binary())
+    assert_false(as_time.is_null())
+
+    var as_timetz = Param(TimeTz(45296000000, -32400))
+    assert_equal(as_timetz.oid(), UInt32(1266))
+    assert_true(as_timetz.is_binary())
+    assert_false(as_timetz.is_null())
+
+    var as_interval = Param(Interval(10800000000, 2, 1))
+    assert_equal(as_interval.oid(), UInt32(1186))
+    assert_true(as_interval.is_binary())
+    assert_false(as_interval.is_null())
+
 
 def test_param_from_empty_optional_of_an_extended_type() raises:
     var no_numeric = Param(Optional[Decimal](None))
@@ -573,6 +595,18 @@ def test_param_from_empty_optional_of_an_extended_type() raises:
     var no_timestamptz = Param(Optional[TimestampTz](None))
     assert_equal(no_timestamptz.oid(), UInt32(1184))
     assert_true(no_timestamptz.is_null())
+
+    var no_time = Param(Optional[Time](None))
+    assert_equal(no_time.oid(), UInt32(1083))
+    assert_true(no_time.is_null())
+
+    var no_timetz = Param(Optional[TimeTz](None))
+    assert_equal(no_timetz.oid(), UInt32(1266))
+    assert_true(no_timetz.is_null())
+
+    var no_interval = Param(Optional[Interval](None))
+    assert_equal(no_interval.oid(), UInt32(1186))
+    assert_true(no_interval.is_null())
 
 
 def test_param_from_empty_optional_keeps_the_oid() raises:

@@ -10,7 +10,14 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from pq.decode_binary import decode_binary
 from pq.decode_text import parse_bytea_hex
 from pq.errors import PgErrorKind
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -651,6 +658,143 @@ def test_timestamptz_rejects_wrong_length_and_oid() raises:
     _assert_length_rejected[TimestampTz]("0002b0ec85204f", 1184, 8)
     _assert_length_rejected[TimestampTz]("0002b0ec85204f3501", 1184, 8)
     _assert_oid_rejected[TimestampTz]("0002b0ec85204f35", 1114)
+
+
+# --- time / timetz / interval -------------------------------------------------
+
+
+def _assert_time(digits: String, expected: String) raises:
+    """Assert a `time` cell decodes to the text PostgreSQL prints.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        expected: The `time_out` text of the same value.
+
+    Raises:
+        Error: If decoding failed or printed something else.
+    """
+    var value = _ok[Time](digits, 1083)
+    assert_equal(String(value), expected, String("time ", digits))
+
+
+def _assert_value_rejected[
+    T: Copyable & Deinitable
+](digits: String, oid: UInt32, reason: String) raises:
+    """Assert an out-of-domain cell is a `TYPE_MISMATCH` naming the reason.
+
+    Parameters:
+        T: The Mojo type requested from `decode_binary`.
+
+    Args:
+        digits: A cell of the right width holding a value `T` refuses.
+        oid: The OID matching `T`, so only the value can fail.
+        reason: A substring the message must carry.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or message.
+    """
+    assert_equal(_error_kind[T](digits, oid), PgErrorKind.TYPE_MISMATCH)
+    var message = _error_message[T](digits, oid)
+    assert_true(reason in message, message)
+
+
+def test_time_decodes_the_measured_values() raises:
+    _assert_time("0000000000000000", "00:00:00")
+    _assert_time("0000000a8be1bd20", "12:34:56.5")
+    _assert_time("0000000a8be62608", "12:34:56.789")
+    _assert_time("000000141dd75fff", "23:59:59.999999")
+    _assert_time("000000141dd76000", "24:00:00")
+
+
+def test_time_rejects_values_outside_the_day() raises:
+    _assert_value_rejected[Time]("000000141dd76001", 1083, "is out of range")
+    _assert_value_rejected[Time]("ffffffffffffffff", 1083, "is out of range")
+
+
+def test_time_rejects_wrong_length_and_oid() raises:
+    _assert_length_rejected[Time]("0000000a8be1bd", 1083, 8)
+    _assert_length_rejected[Time]("0000000a8be1bd2000", 1083, 8)
+    _assert_length_rejected[Time]("", 1083, 8)
+    _assert_oid_rejected[Time]("0000000a8be1bd20", 1266)
+
+
+def test_timetz_decodes_the_measured_zones() raises:
+    var tokyo = _ok[TimeTz]("0000000a8bda1c00" + "ffff8170", 1266)
+    assert_equal(tokyo.micros, Int64(45296000000))
+    assert_equal(tokyo.offset_secs, Int32(-32400))
+    var kathmandu = _ok[TimeTz]("0000000a0eebb000" + "ffffad28", 1266)
+    assert_equal(kathmandu.micros, Int64(43200000000))
+    assert_equal(kathmandu.offset_secs, Int32(-21208))
+    var newfoundland = _ok[TimeTz]("0000000a0eebb000" + "00003138", 1266)
+    assert_equal(newfoundland.offset_secs, Int32(12600))
+    var widest_west = _ok[TimeTz]("0000000a0eebb000" + "0000e0c4", 1266)
+    assert_equal(widest_west.offset_secs, Int32(57540))
+    var widest_east = _ok[TimeTz]("0000000a0eebb000" + "ffff1f01", 1266)
+    assert_equal(widest_east.offset_secs, Int32(-57599))
+    var one_second = _ok[TimeTz]("0000000000000000" + "ffffffff", 1266)
+    assert_equal(one_second.offset_secs, Int32(-1))
+
+
+def test_timetz_rejects_zones_of_sixteen_hours() raises:
+    _assert_value_rejected[TimeTz](
+        "0000000a0eebb000" + "0000e100", 1266, "zone 57600"
+    )
+    _assert_value_rejected[TimeTz](
+        "0000000a0eebb000" + "ffff1f00", 1266, "zone -57600"
+    )
+
+
+def test_timetz_rejects_wrong_length_and_oid() raises:
+    _assert_length_rejected[TimeTz]("0000000a8bda1c00ffff81", 1266, 12)
+    _assert_length_rejected[TimeTz]("0000000a8bda1c00ffff817000", 1266, 12)
+    _assert_length_rejected[TimeTz]("", 1266, 12)
+    _assert_oid_rejected[TimeTz]("0000000a8bda1c00ffff8170", 1083)
+
+
+def test_interval_decodes_fields_in_wire_order() raises:
+    var full = _ok[Interval]("000000036c97ca88" + "00000003" + "0000000e", 1186)
+    assert_equal(full.micros, Int64(14706789000))
+    assert_equal(full.days, Int32(3))
+    assert_equal(full.months, Int32(14))
+    var negative_day = _ok[Interval](
+        "00000001ad274800" + "ffffffff" + "00000000", 1186
+    )
+    assert_equal(negative_day.micros, Int64(7200000000))
+    assert_equal(negative_day.days, Int32(-1))
+    assert_equal(negative_day.months, Int32(0))
+    var one_day = _ok[Interval](
+        "0000000000000000" + "00000001" + "00000000", 1186
+    )
+    assert_equal(one_day.days, Int32(1))
+    assert_equal(one_day.months, Int32(0))
+    var one_month = _ok[Interval](
+        "0000000000000000" + "00000000" + "00000001", 1186
+    )
+    assert_equal(one_month.days, Int32(0))
+    assert_equal(one_month.months, Int32(1))
+
+
+def test_interval_sentinels_decode_as_infinite() raises:
+    var pos = _ok[Interval]("7fffffffffffffff" + "7fffffff" + "7fffffff", 1186)
+    assert_true(pos.is_infinite())
+    assert_false(pos.is_finite())
+    assert_equal(String(pos), "infinity")
+    var neg = _ok[Interval]("8000000000000000" + "80000000" + "80000000", 1186)
+    assert_true(neg.is_infinite())
+    assert_equal(String(neg), "-infinity")
+
+
+def test_interval_rejects_wrong_length_and_oid() raises:
+    _assert_length_rejected[Interval](
+        "000000036c97ca88" + "00000003" + "00000e", 1186, 16
+    )
+    _assert_length_rejected[Interval](
+        "000000036c97ca88" + "00000003" + "0000000e00", 1186, 16
+    )
+    _assert_length_rejected[Interval]("", 1186, 16)
+    _assert_oid_rejected[Interval](
+        "000000036c97ca88" + "00000003" + "0000000e", 1083
+    )
 
 
 def main() raises:

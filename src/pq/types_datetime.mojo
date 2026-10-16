@@ -1,4 +1,4 @@
-"""Date and timestamp value types for PostgreSQL's temporal columns.
+"""Date, time and interval value types for PostgreSQL's temporal columns.
 
 Holds `Date`, `Timestamp` and `TimestampTz`, each wrapping exactly the
 integer PostgreSQL keeps on the wire: a day count for `date` and a
@@ -7,6 +7,13 @@ PostgreSQL epoch 2000-01-01. The two sentinels a temporal column can carry,
 `infinity` and `-infinity`, are the extreme values of that integer, so every
 accessor that takes a value apart refuses them instead of reporting a
 nonsensical calendar date.
+
+Holds `Time`, `TimeTz` and `Interval` as well. The first two count
+microseconds from midnight instead, `TimeTz` pairing that count with a UTC
+offset the way the server does rather than folding it away, and neither has
+an `infinity` to refuse. `Interval` keeps its months, days and microseconds
+apart, since none of the three converts into another at a fixed rate, and
+spells its sentinels with all three fields at once.
 
 Years are astronomical, as PostgreSQL's own internals are: 1 BC is year 0
 and 2 BC is year -1, the ` BC` suffix appears only in text, and the calendar
@@ -1148,3 +1155,738 @@ struct TimestampTz(Copyable, Equatable, Movable, Writable):
         writer.write("+00")
         if ymd[0] <= 0:
             writer.write(" BC")
+
+
+def _write_fraction(micros: Int, mut writer: Some[Writer]):
+    """Write a sub-second part as `.f`, or nothing at all when it is zero."""
+    if micros == 0:
+        return
+    var digits = String()
+    var value = micros
+    var scale = 100000
+    while scale > 0:
+        digits += String(value // scale)
+        value = value % scale
+        scale //= 10
+    var bytes = digits.as_bytes()
+    var length = 6
+    while length > 1 and bytes[length - 1] == _CH_ZERO:
+        length -= 1
+    writer.write(".", digits[byte=0:length])
+
+
+def _format_interval_time(micros: Int64, mut writer: Some[Writer]):
+    """Write the magnitude of `micros` as `HH:MM:SS[.f]`, hour unbounded.
+
+    An interval's time part is not a time of day, so the hour field has no
+    upper bound and `_format_time_of_day` cannot stand in for this: it is
+    only padded to two digits and runs as far as 2562047788. The sign is the
+    caller's to write, and the magnitude is taken in `UInt64` so that
+    `Int64.MIN`, which a finite interval may really hold, does not wrap.
+    """
+    var magnitude: UInt64
+    if micros < 0:
+        magnitude = (-(micros + 1)).cast[DType.uint64]() + 1
+    else:
+        magnitude = micros.cast[DType.uint64]()
+    var hour = Int(magnitude // UInt64(_USECS_PER_HOUR))
+    var rest = magnitude % UInt64(_USECS_PER_HOUR)
+    var minute = Int(rest // UInt64(_USECS_PER_MINUTE))
+    rest = rest % UInt64(_USECS_PER_MINUTE)
+    var second = Int(rest // UInt64(_USECS_PER_SECOND))
+    var fraction = Int(rest % UInt64(_USECS_PER_SECOND))
+    var hours = String(hour)
+    if hours.byte_length() < 2:
+        writer.write("0")
+    writer.write(hours, ":", _pad2(minute), ":", _pad2(second))
+    _write_fraction(fraction, writer)
+
+
+def _write_interval_part(
+    value: Int,
+    unit: String,
+    mut is_zero: Bool,
+    mut is_before: Bool,
+    mut writer: Some[Writer],
+):
+    """Write one `year`, `mon` or `day` field of an interval, if it is set.
+
+    PostgreSQL's own `AddPostgresIntPart`: a zero field is not printed at
+    all, a field after another is preceded by one space, and a positive
+    field is preceded by a `+` when the field just printed was negative.
+    `is_before` tracks only the sign of that last field, not whether any
+    field so far was negative.
+    """
+    if value == 0:
+        return
+    if not is_zero:
+        writer.write(" ")
+    if is_before and value > 0:
+        writer.write("+")
+    writer.write(value, " ", unit)
+    if value != 1:
+        writer.write("s")
+    is_zero = False
+    is_before = value < 0
+
+
+@fieldwise_init
+struct Time(Copyable, Equatable, Movable, Writable):
+    """A PostgreSQL `time`, held as microseconds from midnight.
+
+    The value is a wall clock reading with no date and no time zone behind
+    it, so nothing here shifts it. The raw field is public and the fieldwise
+    constructor checks nothing, so a decoder can hand over whatever the
+    server sent; `from_hms` is the checked way in. A `time` has no
+    `infinity`, so every accessor answers for every value and none of them
+    raise.
+    """
+
+    var micros: Int64
+    """Microseconds from midnight, 0 to 86400000000 inclusive."""
+
+    @staticmethod
+    def from_hms(h: Int, mi: Int, s: Int, us: Int = 0) raises PgError -> Self:
+        """Build a `time` from a wall clock reading.
+
+        The hour may be 24, which PostgreSQL accepts as the end of the day,
+        but only when every smaller field is zero.
+
+        Args:
+            h: Hour, 0 to 23, or 24 for the end of the day.
+            mi: Minute, 0 to 59.
+            s: Second, 0 to 59.
+            us: Microsecond within the second, 0 to 999999.
+
+        Returns:
+            The `Time` for that reading.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when a field is out of its range,
+                or when the hour is 24 and another field is not zero.
+        """
+        if h < 0 or h > 24:
+            raise _usage_error("time", String("hour ", h))
+        if mi < 0 or mi > 59:
+            raise _usage_error("time", String("minute ", mi))
+        if s < 0 or s > 59:
+            raise _usage_error("time", String("second ", s))
+        if us < 0 or us > 999999:
+            raise _usage_error("time", String("microsecond ", us))
+        if h == 24 and (mi != 0 or s != 0 or us != 0):
+            raise _usage_error("time", "value out of range")
+        return Self(
+            Int64(
+                h * _USECS_PER_HOUR
+                + mi * _USECS_PER_MINUTE
+                + s * _USECS_PER_SECOND
+                + us
+            )
+        )
+
+    @staticmethod
+    def parse(text: String) raises PgError -> Self:
+        """Decode the text form of a `time`.
+
+        Accepts `HH:MM:SS` with an optional fractional second of one to six
+        digits, and nothing else: no sign, no surrounding space, no
+        single-digit field and no trailing offset. `24:00:00` is accepted
+        and anything past it is not.
+
+        Args:
+            text: The text the server printed.
+
+        Returns:
+            The decoded `Time`.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `text` is not that
+                form or names a reading past the end of the day.
+        """
+        var in_day = _parse_hms(text, 0)
+        if in_day < 0:
+            raise _decode_error("time", text)
+        var n = text.byte_length()
+        var b = text.as_bytes()
+        var fraction = 0
+        if n != 8:
+            if n < 9 or b[8] != _CH_DOT:
+                raise _decode_error("time", text)
+            fraction = _parse_fraction(String(text[byte=9:n]))
+            if fraction < 0:
+                raise _decode_error("time", text)
+        var micros = in_day + fraction
+        if micros > _USECS_PER_DAY:
+            raise _decode_error("time", text)
+        return Self(Int64(micros))
+
+    def hour(self) -> Int:
+        """Return the hour of day, 0 to 24.
+
+        Returns:
+            The hour.
+        """
+        return Int(self.micros) // _USECS_PER_HOUR
+
+    def minute(self) -> Int:
+        """Return the minute of hour, 0 to 59.
+
+        Returns:
+            The minute.
+        """
+        return (Int(self.micros) // _USECS_PER_MINUTE) % 60
+
+    def second(self) -> Int:
+        """Return the second of minute, 0 to 59.
+
+        Returns:
+            The second.
+        """
+        return (Int(self.micros) // _USECS_PER_SECOND) % 60
+
+    def microsecond(self) -> Int:
+        """Return the microsecond within the second, 0 to 999999.
+
+        Returns:
+            The microsecond.
+        """
+        return Int(self.micros) % _USECS_PER_SECOND
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compare two times for equality.
+
+        Args:
+            other: The time to compare against.
+
+        Returns:
+            True if both hold the same microsecond count.
+        """
+        return self.micros == other.micros
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compare two times for inequality.
+
+        Args:
+            other: The time to compare against.
+
+        Returns:
+            True if the microsecond counts differ.
+        """
+        return self.micros != other.micros
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Write the time the way PostgreSQL prints it.
+
+        Args:
+            writer: The writer receiving `HH:MM:SS` and a fractional second
+                when there is one.
+        """
+        _format_time_of_day(Int(self.micros), writer)
+
+
+@fieldwise_init
+struct TimeTz(Copyable, Equatable, Movable, Writable):
+    """A PostgreSQL `timetz`, held as a time of day and a UTC offset.
+
+    PostgreSQL keeps the two apart rather than folding the offset away, as
+    there is no date to say which instant the pair names, so this type keeps
+    them apart too. The offset carries PostgreSQL's own sign, which is the
+    POSIX one and the opposite of the text's: `+09` is stored as -32400. The
+    raw fields are public and the fieldwise constructor checks nothing;
+    `from_hms` is the checked way in. A `timetz` has no `infinity`, so none
+    of the accessors raise.
+    """
+
+    var micros: Int64
+    """Microseconds from midnight, 0 to 86400000000 inclusive."""
+
+    var offset_secs: Int32
+    """Seconds west of UTC, so `+09` is -32400 and `-03:30` is 12600."""
+
+    @staticmethod
+    def from_hms(
+        h: Int, mi: Int, s: Int, us: Int, offset_secs: Int
+    ) raises PgError -> Self:
+        """Build a `timetz` from a wall clock reading and a UTC offset.
+
+        The offset is given the way it is stored, west of UTC positive, so
+        the nine hour offset printed `+09` is passed as -32400.
+
+        Args:
+            h: Hour, 0 to 23, or 24 for the end of the day.
+            mi: Minute, 0 to 59.
+            s: Second, 0 to 59.
+            us: Microsecond within the second, 0 to 999999.
+            offset_secs: Seconds west of UTC, further from zero than
+                neither -57600 nor 57600.
+
+        Returns:
+            The `TimeTz` for that reading.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when a field is out of its range,
+                when the hour is 24 and another field is not zero, or when
+                the offset is 16 hours or wider.
+        """
+        if h < 0 or h > 24:
+            raise _usage_error("timetz", String("hour ", h))
+        if mi < 0 or mi > 59:
+            raise _usage_error("timetz", String("minute ", mi))
+        if s < 0 or s > 59:
+            raise _usage_error("timetz", String("second ", s))
+        if us < 0 or us > 999999:
+            raise _usage_error("timetz", String("microsecond ", us))
+        if h == 24 and (mi != 0 or s != 0 or us != 0):
+            raise _usage_error("timetz", "value out of range")
+        if (
+            offset_secs <= -_MAX_OFFSET_SECONDS
+            or offset_secs >= _MAX_OFFSET_SECONDS
+        ):
+            raise _usage_error("timetz", String("offset ", offset_secs))
+        return Self(
+            Int64(
+                h * _USECS_PER_HOUR
+                + mi * _USECS_PER_MINUTE
+                + s * _USECS_PER_SECOND
+                + us
+            ),
+            Int32(offset_secs),
+        )
+
+    @staticmethod
+    def parse(text: String) raises PgError -> Self:
+        """Decode the text form of a `timetz`.
+
+        Accepts `HH:MM:SS` with an optional fractional second of one to six
+        digits, then a mandatory `[+-]HH`, `[+-]HH:MM` or `[+-]HH:MM:SS`
+        offset. The offset's sign is flipped on the way in, since the text
+        counts east of UTC positive and the stored field counts west of UTC
+        positive, and an offset of 16 hours or wider is refused. Text
+        without an offset is refused rather than guessed at.
+
+        Args:
+            text: The text the server printed.
+
+        Returns:
+            The decoded `TimeTz`.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `text` is not that
+                form, names a reading past the end of the day, or carries an
+                offset too wide to accept.
+        """
+        var in_day = _parse_hms(text, 0)
+        if in_day < 0:
+            raise _decode_error("timetz", text)
+        var n = text.byte_length()
+        var b = text.as_bytes()
+        var p = 8
+        var fraction = 0
+        if p < n and b[p] == _CH_DOT:
+            var start = p + 1
+            var stop = start
+            while stop < n and _is_digit(b[stop]):
+                stop += 1
+            fraction = _parse_fraction(String(text[byte=start:stop]))
+            if fraction < 0:
+                raise _decode_error("timetz", text)
+            p = stop
+        var micros = in_day + fraction
+        if micros > _USECS_PER_DAY:
+            raise _decode_error("timetz", text)
+        if p >= n:
+            raise _decode_error("timetz", text)
+        var negative = b[p] == _CH_DASH
+        if not negative and b[p] != _CH_PLUS:
+            raise _decode_error("timetz", text)
+        p += 1
+        if p + 2 > n or not _is_digit(b[p]) or not _is_digit(b[p + 1]):
+            raise _decode_error("timetz", text)
+        var offset = (
+            Int(b[p] - _CH_ZERO) * 10 + Int(b[p + 1] - _CH_ZERO)
+        ) * 3600
+        p += 2
+        for unit in [60, 1]:
+            if p >= n or b[p] != _CH_COLON:
+                break
+            if p + 3 > n or not _is_digit(b[p + 1]) or not _is_digit(b[p + 2]):
+                raise _decode_error("timetz", text)
+            var field = Int(b[p + 1] - _CH_ZERO) * 10 + Int(b[p + 2] - _CH_ZERO)
+            if field > 59:
+                raise _decode_error("timetz", text)
+            offset += field * unit
+            p += 3
+        if p != n:
+            raise _decode_error("timetz", text)
+        if offset >= _MAX_OFFSET_SECONDS:
+            raise _decode_error("timetz", text)
+        return Self(Int64(micros), Int32(offset if negative else -offset))
+
+    def hour(self) -> Int:
+        """Return the hour of day, 0 to 24.
+
+        Returns:
+            The hour.
+        """
+        return Int(self.micros) // _USECS_PER_HOUR
+
+    def minute(self) -> Int:
+        """Return the minute of hour, 0 to 59.
+
+        Returns:
+            The minute.
+        """
+        return (Int(self.micros) // _USECS_PER_MINUTE) % 60
+
+    def second(self) -> Int:
+        """Return the second of minute, 0 to 59.
+
+        Returns:
+            The second.
+        """
+        return (Int(self.micros) // _USECS_PER_SECOND) % 60
+
+    def microsecond(self) -> Int:
+        """Return the microsecond within the second, 0 to 999999.
+
+        Returns:
+            The microsecond.
+        """
+        return Int(self.micros) % _USECS_PER_SECOND
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compare two zoned times for equality.
+
+        Args:
+            other: The zoned time to compare against.
+
+        Returns:
+            True if both the reading and the offset match.
+        """
+        return (
+            self.micros == other.micros
+            and self.offset_secs == other.offset_secs
+        )
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compare two zoned times for inequality.
+
+        Args:
+            other: The zoned time to compare against.
+
+        Returns:
+            True if the reading or the offset differs.
+        """
+        return (
+            self.micros != other.micros or self.offset_secs != other.offset_secs
+        )
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Write the zoned time the way PostgreSQL prints it.
+
+        The offset is printed by PostgreSQL's `EncodeTimezone` rules: the
+        sign is flipped back to the text's own convention, and the minute
+        and second fields appear only when they carry something.
+
+        Args:
+            writer: The writer receiving `HH:MM:SS`, a fractional second
+                when there is one, and `[+-]HH`, `[+-]HH:MM` or
+                `[+-]HH:MM:SS`.
+        """
+        _format_time_of_day(Int(self.micros), writer)
+        var tz = Int(self.offset_secs)
+        var magnitude = -tz if tz < 0 else tz
+        var sec = magnitude % 60
+        var minute = (magnitude // 60) % 60
+        var hour = magnitude // 3600
+        if tz <= 0:
+            writer.write("+")
+        else:
+            writer.write("-")
+        writer.write(_pad2(hour))
+        if sec != 0:
+            writer.write(":", _pad2(minute), ":", _pad2(sec))
+        elif minute != 0:
+            writer.write(":", _pad2(minute))
+
+
+@fieldwise_init
+struct Interval(Copyable, Equatable, Movable, Writable):
+    """A PostgreSQL `interval`, held as the three counts the server keeps.
+
+    The three fields are independent on purpose, exactly as they are on the
+    wire: a month is not a fixed number of days and a day is not a fixed
+    number of microseconds once a daylight saving boundary is crossed, so
+    nothing here folds one into another and `1 mon` never becomes `30 days`.
+    The raw fields are public and the fieldwise constructor checks nothing.
+
+    The sentinels `infinity` and `-infinity` are all three fields at their
+    extreme at once, so a single field at its extreme is an ordinary finite
+    interval and `is_infinite` says so.
+    """
+
+    var micros: Int64
+    """Microseconds of the time part, counted apart from days and months."""
+
+    var days: Int32
+    """Whole days, which are not always 24 hours."""
+
+    var months: Int32
+    """Whole months, which are never folded into days."""
+
+    @staticmethod
+    def infinity() -> Self:
+        """Return the interval that compares longer than every other.
+
+        Returns:
+            The `infinity` sentinel.
+        """
+        return Self(Int64.MAX, Int32.MAX, Int32.MAX)
+
+    @staticmethod
+    def negative_infinity() -> Self:
+        """Return the interval that compares shorter than every other.
+
+        Returns:
+            The `-infinity` sentinel.
+        """
+        return Self(Int64.MIN, Int32.MIN, Int32.MIN)
+
+    @staticmethod
+    def parse(text: String) raises PgError -> Self:
+        """Decode the text form of an `interval` in `postgres` style.
+
+        Accepts exactly what `write_to` prints: the sentinel spellings
+        `infinity` and `-infinity`, or a `year`, `mon` and `day` field in
+        that order with each at most once, followed by an optional time part
+        `[+-]H+:MM:SS` with an optional fractional second of one to six
+        digits. Fields are separated by exactly one space, a leading `+` is
+        refused on the first field only, and the whole string must be
+        consumed, so a trailing space is refused as well. Other input styles,
+        `1 week` and ISO 8601 among them, are not accepted.
+
+        Args:
+            text: The text the server printed.
+
+        Returns:
+            The decoded `Interval`.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `text` is not that
+                form or holds a count too large for its field.
+        """
+        if text == "infinity":
+            return Self.infinity()
+        if text == "-infinity":
+            return Self.negative_infinity()
+        var n = text.byte_length()
+        var b = text.as_bytes()
+        var p = 0
+        var first = True
+        var next_slot = 0
+        var months = 0
+        var days = 0
+        var micros = Int64(0)
+        while True:
+            if p >= n:
+                raise _decode_error("interval", text)
+            var negative = False
+            if b[p] == _CH_PLUS:
+                if first:
+                    raise _decode_error("interval", text)
+                p += 1
+            elif b[p] == _CH_DASH:
+                negative = True
+                p += 1
+            var digit_start = p
+            while p < n and _is_digit(b[p]):
+                p += 1
+            var digit_count = p - digit_start
+            if digit_count == 0 or digit_count > 10:
+                raise _decode_error("interval", text)
+            var value = 0
+            for i in range(digit_start, p):
+                value = value * 10 + Int(b[i] - _CH_ZERO)
+            if p < n and b[p] == _CH_COLON:
+                if value > 2562047788:
+                    raise _decode_error("interval", text)
+                if (
+                    p + 6 > n
+                    or not _is_digit(b[p + 1])
+                    or not _is_digit(b[p + 2])
+                    or b[p + 3] != _CH_COLON
+                    or not _is_digit(b[p + 4])
+                    or not _is_digit(b[p + 5])
+                ):
+                    raise _decode_error("interval", text)
+                var minute = Int(b[p + 1] - _CH_ZERO) * 10 + Int(
+                    b[p + 2] - _CH_ZERO
+                )
+                var second = Int(b[p + 4] - _CH_ZERO) * 10 + Int(
+                    b[p + 5] - _CH_ZERO
+                )
+                if minute > 59 or second > 59:
+                    raise _decode_error("interval", text)
+                p += 6
+                var fraction = 0
+                if p < n and b[p] == _CH_DOT:
+                    var start = p + 1
+                    var stop = start
+                    while stop < n and _is_digit(b[stop]):
+                        stop += 1
+                    fraction = _parse_fraction(String(text[byte=start:stop]))
+                    if fraction < 0:
+                        raise _decode_error("interval", text)
+                    p = stop
+                if p != n:
+                    raise _decode_error("interval", text)
+                var magnitude = (
+                    UInt64(value) * UInt64(_USECS_PER_HOUR)
+                    + UInt64(minute) * UInt64(_USECS_PER_MINUTE)
+                    + UInt64(second) * UInt64(_USECS_PER_SECOND)
+                    + UInt64(fraction)
+                )
+                var limit = Int64.MAX.cast[DType.uint64]()
+                if negative:
+                    if magnitude > limit + 1:
+                        raise _decode_error("interval", text)
+                    if magnitude == limit + 1:
+                        micros = Int64.MIN
+                    else:
+                        micros = -(magnitude.cast[DType.int64]())
+                else:
+                    if magnitude > limit:
+                        raise _decode_error("interval", text)
+                    micros = magnitude.cast[DType.int64]()
+                break
+            if p >= n or b[p] != _CH_SPACE:
+                raise _decode_error("interval", text)
+            var unit_start = p + 1
+            var unit_stop = unit_start
+            while unit_stop < n and b[unit_stop] != _CH_SPACE:
+                unit_stop += 1
+            var unit = String(text[byte=unit_start:unit_stop])
+            var slot = -1
+            if unit == "year" or unit == "years":
+                slot = 0
+            elif unit == "mon" or unit == "mons":
+                slot = 1
+            elif unit == "day" or unit == "days":
+                slot = 2
+            if slot < 0 or slot < next_slot:
+                raise _decode_error("interval", text)
+            next_slot = slot + 1
+            var signed = -value if negative else value
+            if slot == 0:
+                months += signed * 12
+            elif slot == 1:
+                months += signed
+            else:
+                days += signed
+            p = unit_stop
+            first = False
+            if p == n:
+                break
+            p += 1
+            if p >= n:
+                raise _decode_error("interval", text)
+        if months < Int(Int32.MIN) or months > Int(Int32.MAX):
+            raise _decode_error("interval", text)
+        if days < Int(Int32.MIN) or days > Int(Int32.MAX):
+            raise _decode_error("interval", text)
+        return Self(micros, Int32(days), Int32(months))
+
+    def is_infinite(self) -> Bool:
+        """Report whether this is `infinity` or `-infinity`.
+
+        Returns:
+            True only when all three fields sit at the same extreme.
+        """
+        if (
+            self.micros == Int64.MAX
+            and self.days == Int32.MAX
+            and self.months == Int32.MAX
+        ):
+            return True
+        return (
+            self.micros == Int64.MIN
+            and self.days == Int32.MIN
+            and self.months == Int32.MIN
+        )
+
+    def is_finite(self) -> Bool:
+        """Report whether this is a real span of time.
+
+        Returns:
+            True for anything but the two sentinels.
+        """
+        return not self.is_infinite()
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compare two intervals field by field.
+
+        Two intervals that name the same span through different fields, such
+        as `1 mon` and `30 days`, are not equal, which is what the server's
+        own binary representation says.
+
+        Args:
+            other: The interval to compare against.
+
+        Returns:
+            True if all three fields match.
+        """
+        return (
+            self.micros == other.micros
+            and self.days == other.days
+            and self.months == other.months
+        )
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compare two intervals field by field for inequality.
+
+        Args:
+            other: The interval to compare against.
+
+        Returns:
+            True if any of the three fields differs.
+        """
+        return (
+            self.micros != other.micros
+            or self.days != other.days
+            or self.months != other.months
+        )
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Write the interval in PostgreSQL's default `postgres` style.
+
+        This follows `EncodeInterval`: the months split into a year and a
+        month field by truncating toward zero, a field that is zero is left
+        out entirely, and the time part appears when it is non-zero or when
+        nothing else was printed, so a zero interval reads `00:00:00`. The
+        time part's hour field has no upper bound.
+
+        Args:
+            writer: The writer receiving the fields, or a sentinel spelling.
+        """
+        if self.is_infinite():
+            if self.months == Int32.MAX:
+                writer.write("infinity")
+            else:
+                writer.write("-infinity")
+            return
+        var months = Int(self.months)
+        var year = -((-months) // 12) if months < 0 else months // 12
+        var mon = months - year * 12
+        var is_zero = True
+        var is_before = False
+        _write_interval_part(year, "year", is_zero, is_before, writer)
+        _write_interval_part(mon, "mon", is_zero, is_before, writer)
+        _write_interval_part(Int(self.days), "day", is_zero, is_before, writer)
+        if is_zero or self.micros != 0:
+            if not is_zero:
+                writer.write(" ")
+            if self.micros < 0:
+                writer.write("-")
+            elif is_before:
+                writer.write("+")
+            _format_interval_time(self.micros, writer)

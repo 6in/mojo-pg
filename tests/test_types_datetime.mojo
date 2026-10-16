@@ -1,4 +1,4 @@
-"""Tests for `pq.types_datetime`: `Date`, `Timestamp`, `TimestampTz`.
+"""Tests for `pq.types_datetime`: dates, times, timestamps, intervals.
 
 No database is involved. Every expectation is a value measured on a live
 PostgreSQL 17 / 14 server and written here as a literal, so these tests pin
@@ -10,7 +10,14 @@ and the input spellings it refuses.
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from pq.errors import PgErrorKind
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    Timestamp,
+    TimestampTz,
+    TimeTz,
+)
 
 
 # --- Date helpers ------------------------------------------------------------
@@ -869,6 +876,556 @@ def test_timestamptz_parse_rejects_missing_offset() raises:
 
 def test_timestamptz_parse_rejects_offset_out_of_range() raises:
     _assert_tstz_parse_rejected("2024-01-02 03:04:05+16")
+
+
+# --- Time helpers ------------------------------------------------------------
+
+
+def _time_hms(h: Int, mi: Int, s: Int, us: Int) raises -> Time:
+    """Build a `Time` from its components, raising a plain `Error`.
+
+    Args:
+        h: Hour, 0 to 24.
+        mi: Minute, 0 to 59.
+        s: Second, 0 to 59.
+        us: Microsecond, 0 to 999999.
+
+    Returns:
+        The constructed `Time`.
+
+    Raises:
+        Error: If `Time.from_hms` raised a `PgError`.
+    """
+    try:
+        return Time.from_hms(h, mi, s, us)
+    except e:
+        raise Error(String(e))
+
+
+def _time_hms_default_us(h: Int, mi: Int, s: Int) raises -> Time:
+    """Build a `Time` leaving the microsecond argument defaulted.
+
+    Args:
+        h: Hour, 0 to 24.
+        mi: Minute, 0 to 59.
+        s: Second, 0 to 59.
+
+    Returns:
+        The constructed `Time`.
+
+    Raises:
+        Error: If `Time.from_hms` raised a `PgError`.
+    """
+    try:
+        return Time.from_hms(h, mi, s)
+    except e:
+        raise Error(String(e))
+
+
+def _time_parsed(text: String) raises -> Time:
+    """Decode `text` with `Time.parse`, raising a plain `Error`.
+
+    Args:
+        text: The text to decode.
+
+    Returns:
+        The decoded `Time`.
+
+    Raises:
+        Error: If `Time.parse` raised a `PgError`.
+    """
+    try:
+        return Time.parse(text)
+    except e:
+        raise Error(String(e))
+
+
+def _assert_time_text(micros: Int64, text: String) raises:
+    """Assert `Time(micros)` prints as `text` and `text` parses back.
+
+    Args:
+        micros: Raw microseconds since midnight, 0 to 86400000000.
+        text: The text PostgreSQL prints for that count.
+
+    Raises:
+        Error: If printing or parsing disagreed.
+    """
+    var value = Time(micros)
+    assert_equal(String(value), text)
+    var decoded = _time_parsed(text)
+    assert_equal(decoded.micros, micros)
+    assert_true(decoded == value)
+    assert_false(decoded != value)
+
+
+def _assert_time_rejected(h: Int, mi: Int, s: Int, us: Int) raises:
+    """Assert `Time.from_hms` refuses the components with `USAGE`.
+
+    Args:
+        h: Hour that must be refused.
+        mi: Minute that must be refused.
+        s: Second that must be refused.
+        us: Microsecond that must be refused.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or
+            message.
+    """
+    try:
+        _ = Time.from_hms(h, mi, s, us)
+    except e:
+        assert_equal(e.kind, PgErrorKind.USAGE)
+        assert_true("invalid time" in e.message)
+        return
+    raise Error("expected PgError from Time.from_hms")
+
+
+def _assert_time_parse_rejected(text: String) raises:
+    """Assert `Time.parse` refuses `text` with `TYPE_MISMATCH`.
+
+    Args:
+        text: Text outside the accepted time grammar.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or
+            message.
+    """
+    try:
+        _ = Time.parse(text)
+    except e:
+        assert_equal(e.kind, PgErrorKind.TYPE_MISMATCH)
+        assert_true("cannot decode" in e.message)
+        return
+    raise Error(String('expected PgError for "', text, '"'))
+
+
+# --- TimeTz helpers ----------------------------------------------------------
+
+
+def _timetz_parsed(text: String) raises -> TimeTz:
+    """Decode `text` with `TimeTz.parse`, raising a plain `Error`.
+
+    Args:
+        text: The text to decode, offset included.
+
+    Returns:
+        The decoded `TimeTz`.
+
+    Raises:
+        Error: If `TimeTz.parse` raised a `PgError`.
+    """
+    try:
+        return TimeTz.parse(text)
+    except e:
+        raise Error(String(e))
+
+
+def _assert_timetz_text(micros: Int64, offset_secs: Int32, text: String) raises:
+    """Assert `TimeTz` prints as `text` and `text` parses back to it.
+
+    Args:
+        micros: Raw microseconds since midnight in the printed zone.
+        offset_secs: Zone offset in seconds, positive west of UTC.
+        text: The text PostgreSQL prints for that pair.
+
+    Raises:
+        Error: If printing or parsing disagreed.
+    """
+    var value = TimeTz(micros, offset_secs)
+    assert_equal(String(value), text)
+    var decoded = _timetz_parsed(text)
+    assert_equal(decoded.micros, micros)
+    assert_equal(decoded.offset_secs, offset_secs)
+    assert_true(decoded == value)
+    assert_false(decoded != value)
+
+
+def _assert_timetz_rejected(
+    h: Int, mi: Int, s: Int, us: Int, offset_secs: Int
+) raises:
+    """Assert `TimeTz.from_hms` refuses the components with `USAGE`.
+
+    Args:
+        h: Hour that must be refused.
+        mi: Minute that must be refused.
+        s: Second that must be refused.
+        us: Microsecond that must be refused.
+        offset_secs: Zone offset in seconds that must be refused.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or
+            message.
+    """
+    try:
+        _ = TimeTz.from_hms(h, mi, s, us, offset_secs)
+    except e:
+        assert_equal(e.kind, PgErrorKind.USAGE)
+        assert_true("invalid timetz" in e.message)
+        return
+    raise Error("expected PgError from TimeTz.from_hms")
+
+
+def _assert_timetz_parse_rejected(text: String) raises:
+    """Assert `TimeTz.parse` refuses `text` with `TYPE_MISMATCH`.
+
+    Args:
+        text: Text outside the accepted timetz grammar.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or
+            message.
+    """
+    try:
+        _ = TimeTz.parse(text)
+    except e:
+        assert_equal(e.kind, PgErrorKind.TYPE_MISMATCH)
+        assert_true("cannot decode" in e.message)
+        return
+    raise Error(String('expected PgError for "', text, '"'))
+
+
+# --- Interval helpers --------------------------------------------------------
+
+
+def _interval_parsed(text: String) raises -> Interval:
+    """Decode `text` with `Interval.parse`, raising a plain `Error`.
+
+    Args:
+        text: The text to decode.
+
+    Returns:
+        The decoded `Interval`.
+
+    Raises:
+        Error: If `Interval.parse` raised a `PgError`.
+    """
+    try:
+        return Interval.parse(text)
+    except e:
+        raise Error(String(e))
+
+
+def _assert_interval_text(
+    micros: Int64, days: Int32, months: Int32, text: String
+) raises:
+    """Assert the `Interval` prints as `text` and `text` parses back.
+
+    Args:
+        micros: Microsecond field of the interval.
+        days: Day field of the interval, kept separate from `micros`.
+        months: Month field of the interval.
+        text: The text PostgreSQL prints for that triple.
+
+    Raises:
+        Error: If printing or parsing disagreed.
+    """
+    var value = Interval(micros, days, months)
+    assert_equal(String(value), text)
+    var decoded = _interval_parsed(text)
+    assert_equal(decoded.micros, micros)
+    assert_equal(decoded.days, days)
+    assert_equal(decoded.months, months)
+    assert_true(decoded == value)
+    assert_false(decoded != value)
+
+
+def _assert_interval_parse_rejected(text: String) raises:
+    """Assert `Interval.parse` refuses `text` with `TYPE_MISMATCH`.
+
+    Args:
+        text: Text outside the accepted interval grammar.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or
+            message.
+    """
+    try:
+        _ = Interval.parse(text)
+    except e:
+        assert_equal(e.kind, PgErrorKind.TYPE_MISMATCH)
+        assert_true("cannot decode" in e.message)
+        return
+    raise Error(String('expected PgError for "', text, '"'))
+
+
+# --- Time text and parse -----------------------------------------------------
+
+
+def test_time_text_midnight() raises:
+    _assert_time_text(0, "00:00:00")
+
+
+def test_time_text_end_of_day() raises:
+    _assert_time_text(86400000000, "24:00:00")
+
+
+def test_time_text_last_microsecond_of_day() raises:
+    _assert_time_text(86399999999, "23:59:59.999999")
+
+
+def test_time_text_trims_trailing_fraction_zeroes() raises:
+    _assert_time_text(0x0000000A8BE1BD20, "12:34:56.5")
+
+
+# --- Time.from_hms microsecond counts ----------------------------------------
+
+
+def test_time_from_hms_with_microseconds() raises:
+    assert_equal(_time_hms(12, 34, 56, 500000).micros, Int64(45296500000))
+
+
+def test_time_from_hms_accepts_hour_24() raises:
+    assert_equal(_time_hms_default_us(24, 0, 0).micros, Int64(86400000000))
+
+
+# --- Time.from_hms rejections ------------------------------------------------
+
+
+def test_time_rejects_past_end_of_day() raises:
+    _assert_time_rejected(24, 0, 1, 0)
+
+
+def test_time_rejects_minute_60() raises:
+    _assert_time_rejected(23, 60, 0, 0)
+
+
+def test_time_rejects_second_60() raises:
+    _assert_time_rejected(0, 0, 60, 0)
+
+
+def test_time_rejects_microsecond_overflow() raises:
+    _assert_time_rejected(0, 0, 0, 1000000)
+
+
+def test_time_rejects_negative_hour() raises:
+    _assert_time_rejected(-1, 0, 0, 0)
+
+
+# --- Time.parse rejections ---------------------------------------------------
+
+
+def test_time_parse_rejects_past_end_of_day() raises:
+    _assert_time_parse_rejected("24:00:01")
+
+
+def test_time_parse_rejects_unpadded_hour() raises:
+    _assert_time_parse_rejected("1:00:00")
+
+
+def test_time_parse_rejects_missing_seconds() raises:
+    _assert_time_parse_rejected("12:34")
+
+
+def test_time_parse_rejects_seven_fraction_digits() raises:
+    _assert_time_parse_rejected("12:34:56.1234567")
+
+
+# --- Time accessors ----------------------------------------------------------
+
+
+def test_time_accessors() raises:
+    var value = Time(45296500000)
+    assert_equal(value.hour(), 12)
+    assert_equal(value.minute(), 34)
+    assert_equal(value.second(), 56)
+    assert_equal(value.microsecond(), 500000)
+
+
+# --- TimeTz text and parse ---------------------------------------------------
+
+
+def test_timetz_text_whole_hour_offset() raises:
+    _assert_timetz_text(45296000000, -32400, "12:34:56+09")
+
+
+def test_timetz_text_offset_with_seconds() raises:
+    _assert_timetz_text(43200000000, -21208, "12:00:00+05:53:28")
+
+
+def test_timetz_text_negative_offset() raises:
+    _assert_timetz_text(43200000000, 12600, "12:00:00-03:30")
+
+
+def test_timetz_text_one_second_offset() raises:
+    _assert_timetz_text(0, -1, "00:00:00+00:00:01")
+
+
+def test_timetz_text_lowest_offset() raises:
+    _assert_timetz_text(43200000000, 57540, "12:00:00-15:59")
+
+
+def test_timetz_text_highest_offset() raises:
+    _assert_timetz_text(43200000000, -57599, "12:00:00+15:59:59")
+
+
+def test_timetz_text_zero_offset() raises:
+    assert_equal(String(TimeTz(0, 0)), "00:00:00+00")
+
+
+def test_timetz_parse_accepts_end_of_day() raises:
+    assert_true(_timetz_parsed("24:00:00+09") == TimeTz(86400000000, -32400))
+
+
+# --- TimeTz rejections -------------------------------------------------------
+
+
+def test_timetz_rejects_offset_above_maximum() raises:
+    _assert_timetz_rejected(12, 0, 0, 0, 57600)
+
+
+def test_timetz_rejects_offset_below_minimum() raises:
+    _assert_timetz_rejected(12, 0, 0, 0, -57600)
+
+
+def test_timetz_parse_rejects_offset_out_of_range() raises:
+    _assert_timetz_parse_rejected("12:00:00+16")
+
+
+# --- Interval text and parse -------------------------------------------------
+
+
+def test_interval_text_zero() raises:
+    _assert_interval_text(0, 0, 0, "00:00:00")
+
+
+def test_interval_text_one_day() raises:
+    _assert_interval_text(0, 1, 0, "1 day")
+
+
+def test_interval_text_minus_one_day() raises:
+    _assert_interval_text(0, -1, 0, "-1 days")
+
+
+def test_interval_text_one_month() raises:
+    _assert_interval_text(0, 0, 1, "1 mon")
+
+
+def test_interval_text_minus_eleven_months() raises:
+    _assert_interval_text(0, 0, -11, "-11 mons")
+
+
+def test_interval_text_one_year() raises:
+    _assert_interval_text(0, 0, 12, "1 year")
+
+
+def test_interval_text_two_years_one_month() raises:
+    _assert_interval_text(0, 0, 25, "2 years 1 mon")
+
+
+def test_interval_text_minus_one_second() raises:
+    _assert_interval_text(-1000000, 0, 0, "-00:00:01")
+
+
+def test_interval_text_minus_half_second() raises:
+    _assert_interval_text(-500000, 0, 0, "-00:00:00.5")
+
+
+def test_interval_text_hours_beyond_one_day() raises:
+    _assert_interval_text(360000000000, 0, 0, "100:00:00")
+
+
+def test_interval_text_largest_micros() raises:
+    _assert_interval_text(9223372036854775807, 0, 0, "2562047788:00:54.775807")
+
+
+def test_interval_text_day_and_time() raises:
+    _assert_interval_text(43200000000, 1, 0, "1 day 12:00:00")
+
+
+def test_interval_text_minus_day_plus_time() raises:
+    _assert_interval_text(7200000000, -1, 0, "-1 days +02:00:00")
+
+
+def test_interval_text_minus_day_plus_second() raises:
+    _assert_interval_text(1000000, -1, 0, "-1 days +00:00:01")
+
+
+def test_interval_text_minus_year_plus_day() raises:
+    _assert_interval_text(0, 1, -12, "-1 years +1 day")
+
+
+def test_interval_text_month_minus_day() raises:
+    _assert_interval_text(0, -1, 1, "1 mon -1 days")
+
+
+def test_interval_text_all_fields() raises:
+    _assert_interval_text(
+        14706789000, 3, 14, "1 year 2 mons 3 days 04:05:06.789"
+    )
+
+
+def test_interval_text_all_fields_negative() raises:
+    _assert_interval_text(
+        -14706789000, -3, -14, "-1 years -2 mons -3 days -04:05:06.789"
+    )
+
+
+# --- Interval infinities -----------------------------------------------------
+
+
+def test_interval_text_infinity() raises:
+    assert_equal(String(Interval.infinity()), "infinity")
+    assert_true(_interval_parsed("infinity") == Interval.infinity())
+
+
+def test_interval_text_negative_infinity() raises:
+    assert_equal(String(Interval.negative_infinity()), "-infinity")
+    assert_true(_interval_parsed("-infinity") == Interval.negative_infinity())
+
+
+def test_interval_infinity_predicates() raises:
+    var value = Interval.infinity()
+    assert_equal(value.micros, Int64.MAX)
+    assert_equal(value.days, Int32.MAX)
+    assert_equal(value.months, Int32.MAX)
+    assert_true(value.is_infinite())
+    assert_false(value.is_finite())
+
+
+def test_interval_negative_infinity_predicates() raises:
+    var value = Interval.negative_infinity()
+    assert_equal(value.micros, Int64.MIN)
+    assert_equal(value.days, Int32.MIN)
+    assert_equal(value.months, Int32.MIN)
+    assert_true(value.is_infinite())
+    assert_false(value.is_finite())
+
+
+def test_interval_largest_micros_is_finite() raises:
+    var value = Interval(Int64.MAX, 0, 0)
+    assert_false(value.is_infinite())
+    assert_true(value.is_finite())
+
+
+# --- Interval.parse rejections -----------------------------------------------
+
+
+def test_interval_parse_rejects_empty_text() raises:
+    _assert_interval_parse_rejected("")
+
+
+def test_interval_parse_rejects_week_unit() raises:
+    _assert_interval_parse_rejected("1 week")
+
+
+def test_interval_parse_rejects_repeated_unit() raises:
+    _assert_interval_parse_rejected("1 day 1 day")
+
+
+def test_interval_parse_rejects_iso8601_form() raises:
+    _assert_interval_parse_rejected("P1D")
+
+
+def test_interval_parse_rejects_time_without_seconds() raises:
+    _assert_interval_parse_rejected("1 days 02:00")
+
+
+def test_interval_parse_rejects_leading_plus() raises:
+    _assert_interval_parse_rejected("+1 day")
+
+
+def test_interval_parse_rejects_trailing_space() raises:
+    _assert_interval_parse_rejected("1 year ")
 
 
 def main() raises:

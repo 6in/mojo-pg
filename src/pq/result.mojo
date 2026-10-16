@@ -530,7 +530,16 @@ struct Row[origin: ImmOrigin](Copyable):
         | `Date`         | 1082 (date)                 | 1082 (date)         |
         | `Timestamp`    | 1114 (timestamp)            | 1114 (timestamp)    |
         | `TimestampTz`  | 1184 (timestamptz)          | 1184 (timestamptz)  |
+        | `Time`         | 1083 (time)                 | 1083 (time)         |
+        | `TimeTz`       | 1266 (timetz)               | 1266 (timetz)       |
+        | `Interval`     | 1186 (interval)             | 1186 (interval)     |
         | `String`       | any                         | string-like OIDs    |
+
+        The text column of the six date and time rows, and of `Interval`,
+        reads only the `DateStyle` `ISO, YMD` and the `IntervalStyle`
+        `postgres` that `Connection.open` pins; a session that changes
+        either GUC afterwards turns those text cells into a
+        `TYPE_MISMATCH`, while the binary column is unaffected.
 
         The two rows that differ between the formats:
 

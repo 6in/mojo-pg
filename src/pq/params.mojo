@@ -1,7 +1,7 @@
 """Query parameters and the libpq argument arrays built from them.
 
 `Param` is the single value type accepted by the parameterised execute
-APIs. Twenty-nine `@implicit` constructors make a plain list literal --
+APIs. Thirty-five `@implicit` constructors make a plain list literal --
 `[1, "a", 1.5, True, Param.null()]` -- convert to `List[Param]`, so the
 caller never names the type. Each constructor **encodes at construction
 time**: the Mojo value is turned into its PostgreSQL wire bytes right
@@ -57,9 +57,12 @@ from pq.decode_text import (
     OID_INT2,
     OID_INT4,
     OID_INT8,
+    OID_INTERVAL,
     OID_NUMERIC,
+    OID_TIME,
     OID_TIMESTAMP,
     OID_TIMESTAMPTZ,
+    OID_TIMETZ,
     OID_UUID,
 )
 from pq.encode_binary import (
@@ -70,13 +73,23 @@ from pq.encode_binary import (
     encode_int16,
     encode_int32,
     encode_int64,
+    encode_interval,
     encode_numeric,
+    encode_time,
     encode_timestamp,
     encode_timestamptz,
+    encode_timetz,
     encode_uuid,
 )
 from pq.errors import PgError, PgErrorKind
-from pq.types_datetime import Date, Timestamp, TimestampTz
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -102,7 +115,8 @@ struct Param(Copyable, Movable):
 
     Holds the PostgreSQL type OID, the wire format flag and the encoded
     bytes: big-endian binary for `Bool`, the integers, the floats,
-    `Decimal` (`numeric`), `UUID`, `Date`, `Timestamp` and `TimestampTz`,
+    `Decimal` (`numeric`), `UUID`, `Date`, `Timestamp`, `TimestampTz`,
+    `Time`, `TimeTz` and `Interval`,
     raw bytes for `bytea`, and NUL-free text bytes for `String`. A SQL
     NULL carries no bytes at all.
 
@@ -308,6 +322,36 @@ struct Param(Copyable, Movable):
         self = Param(OID_TIMESTAMPTZ, True, False, encode_timestamptz(v))
 
     @implicit
+    def __init__(out self, v: Time):
+        """Encode `v` as a binary `time` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIME, True, False, encode_time(v))
+
+    @implicit
+    def __init__(out self, v: TimeTz):
+        """Encode `v` as a binary `timetz` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMETZ, True, False, encode_timetz(v))
+
+    @implicit
+    def __init__(out self, v: Interval):
+        """Encode `v` as a binary `interval` parameter.
+
+        The three fields travel as they are, so a value carrying months
+        arrives as months rather than as some fixed number of days.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_INTERVAL, True, False, encode_interval(v))
+
+    @implicit
     def __init__(out self, var v: List[UInt8]):
         """Send `v` as a binary `bytea` parameter.
 
@@ -488,6 +532,42 @@ struct Param(Copyable, Movable):
             self = Param(v.value())
         else:
             self = Param.null(OID_TIMESTAMPTZ)
+
+    @implicit
+    def __init__(out self, v: Optional[Time]):
+        """Encode `v` as a binary `time` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `time`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIME)
+
+    @implicit
+    def __init__(out self, v: Optional[TimeTz]):
+        """Encode `v` as a binary `timetz` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `timetz`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMETZ)
+
+    @implicit
+    def __init__(out self, v: Optional[Interval]):
+        """Encode `v` as a binary `interval` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `interval`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_INTERVAL)
 
     def oid(self) -> UInt32:
         """Return the PostgreSQL type OID this parameter is sent as.
