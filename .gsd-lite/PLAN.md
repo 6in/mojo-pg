@@ -236,7 +236,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T6
   - 並列サブ作業: なし（推奨本数: **0**。1 ファイル中心で実行待ちが支配）
 
-- [ ] T8: `test_leak` に Phase 3 ループ 2 本 + 陽性対照、`examples/binary.mojo`、`examples/bench_formats.mojo`、`pixi.toml` / `final_check.sh` の追従
+- [x] T8: `test_leak` に Phase 3 ループ 2 本 + 陽性対照、`examples/binary.mojo`、`examples/bench_formats.mojo`、`pixi.toml` / `final_check.sh` の追従
   - 完了基準:
     - (a) `tests/test_leak.mojo`（P28）: `test_binary_execute_does_not_leak`（`MAIN_ITERATIONS` 回、1 接続を使い回し、
       `SELECT repeat('x', 65536)::text, 1.5::numeric, '2024-01-02'::date, '2024-01-02 03:04:05.678901'::timestamp, '2024-01-02 03:04:05+09'::timestamptz, '12:34:56'::time, '12:34:56+09'::timetz, '1 year 2 mons 3 days 04:05:06.789'::interval, gen_random_uuid(), '{"a":1}'::jsonb` を
