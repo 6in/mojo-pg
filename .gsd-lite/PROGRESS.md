@@ -370,3 +370,8 @@
   - 確認済み: `pixi run check` = 131 s（1/6〜4/6 計 7 s、5/6 124 s）。round 1 の約 140 s / turn 13 の 143 s と同水準
   - reflect への材料: (a) verify round 1 の指摘は impl の turn 5「未確認」と同一だった（申し送りが機能した例）、(b) 字句の指摘はクラス（同じ関数の docstring・コメント・メッセージ）でまとめて名指しする、
     (c) ファズの「期待される変化」は BAD 行ではなく集計の `ok / err` で書く、(d) 次マイルストーンの REQ §6 持ち越し: `params.mojo:643` / `:670` の 1 GB 文言、`test_connection.mojo:954` の `client_encoding` 文言、`decode_timetz` の時刻部範囲検査（残留リスク）
+## turn 15 — reflect — phase3-binary-all-types
+- やったこと: 振り返りを .gsd-lite/reflect/20261017-0254-phase3-binary-all-types.md に作成（提案 12 件）。turns.jsonl 14 行の集計（263 分 / USD 164.07 / リトライ 0 / 権限拒否 0）、PROGRESS turn 1〜14・PLAN・VERIFICATION・DECISIONS・REQ §9・前回 reflect の提案 12 件の反映を照合（守られた 11 / 部分 1）
+- 想定外: turns.jsonl の turn 6 が `usage` 188 トークン / `num_turns` 1 と記録されている（生ログの `modelUsage` は出力 153,239）。ループがサブエージェント完了通知で再起動した短い `result` を拾ったとみられ、Minus / ツール側提案に書いた。lean-ctx MCP は未接続（素の Read / Bash で実施）
+- やり直し: 0 回
+- 次への注意: 次マイルストーンの T1 持ち越しは VERIFICATION §5 先頭の字句 3 件 + `decode_timetz` 範囲検査 + 非 UTC 分岐。plan は追従先チェックリストを最初からスクリプトにして現在値を記録、impl は「未確認」行を同ターンでテスト化か PLAN 追記で処分、PROGRESS は 1 ターン 40 行上限で長い表は別ファイルへ
