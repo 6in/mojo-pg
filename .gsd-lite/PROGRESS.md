@@ -146,3 +146,30 @@
   - 未確認（B が契約外として報告。T6 / verify の材料）: `TimestampTz` の分解アクセサ 7 本と `from_utc` の拒否（`"invalid timestamptz"` の文面）はどのテストも通っていない（契約には在る）。`Timestamp` / `TimestampTz` の `is_infinite()` でのアクセサ raise も Date だけで確かめている。T6 (b) ③ の往復で `from_utc` は通るが、拒否側は空白のまま
   - 未確認: `Date` / `Timestamp` の**テキスト**経路は DateStyle `ISO, YMD` 前提（T1 の GUC 固定が効いている）。非 ISO で `TYPE_MISMATCH` になることの確認は T6 (b) ⑤ が担う。この前提は `result.mojo` の `Row.get` 表には書いていない（T9 の文書整備で 1 行足す候補）
   - 未確認: A の契約外提案 3 件 — `Date` / `Timestamp` の順序比較（`__lt__` 等。内部整数の比較でそのまま正しい）、`Date` ↔ `Timestamp` 変換、`TimestampTz.parse` のコロン無しオフセット `[+-]HHMM`。いずれも実装していない（現契約では `+HHMM` は拒否が正）
+## turn 7 — impl — T5 `Time` / `TimeTz` / `Interval` + codec / `Param` + 単体テスト
+- やったこと: `src/pq/types_datetime.mojo` に `Time` / `TimeTz` / `Interval` を追記（private ヘルパ `_write_fraction` / `_format_interval_time` / `_write_interval_part` を新設、T4 の `_format_time_of_day` / `_parse_hms` / `_parse_fraction` / `_pad2` / `_usage_error` / `_decode_error` は再利用）、
+  OID 3 個（1083 / 1186 / 1266）を `decode_text.mojo` に集約し、`decode_time` / `decode_timetz` / `decode_interval` と `encode_time` / `encode_timetz` / `encode_interval`、`decode_text` / `decode_binary` の 3 型分岐、`Param` の `@implicit` 6 本を結線。
+  テストは `tests/test_types_datetime.mojo` +57 件（75 → 132）/ `test_decode_binary` +9 件（68 → 77）/ `test_encode_binary` +4 件（22 → 26）/ `test_params` の既存 2 関数に 6 型分の assert 追記。
+  **サブエージェント 2 本を並行**（A: `types_datetime.mojo` / B: `tests/test_types_datetime.mojo` を契約から独立に）。codec・`params.mojo`・docstring 追従・統合検証は親
+- 想定外:
+  (1) **PLAN の期待値に 1 件誤りがあった**（T5 (d) の time `24:00:00` の hex）。`0000001406f40000` は 86015737856 で 86400000000 ではない（正: `000000141dd76000` = `0x141DD76000`）。
+      親が PG17 の `time_send` / `timetz_send` / `interval_send` で 33 値の原本を取り直して発見。PLAN を訂正。**他の 32 値（timetz 6 ゾーン・interval 18 件・time 4 件）は PLAN / RESEARCH と完全一致**
+  (2) interval テキストの `+` 規則は「それまでに負が 1 つでもあったか」ではなく **「直前に出した成分の符号」**（PG `AddPostgresIntPart` が毎回 `is_before = (value < 0)` を上書きする）。
+      `-1 years -2 mons +3 days` が成立するのはこのため。契約文に明記して A に渡したので実装は初回から正しかった
+  (3) `Interval` は `Copyable` だが `ImplicitlyCopyable` ではないので、`List[Interval]` の要素を `var x = list[i]` で受けるとコンパイルエラー（`.copy()` が必要）。親のテストで 1 回踏んだ
+  (4) A が `Interval.parse` に overflow の門を 4 つ足した（桁数 > 10、hour > 2562047788、時刻部の大きさが `Int64` 超、`months` / `days` が `Int32` 超）。
+      いずれも入力検査なので契約外の"保険"ではないと判断してそのまま採用。`Interval(Int64.MIN, 0, 0)` は番兵でない有限値なので、時刻部の絶対値は `UInt64` で求めて wrap を避けている（`-2562047788:00:54.775808` と往復する）
+- やり直し: 1 回（想定外 (3) の `.copy()`。A / B は担当範囲とも初回で green）
+- PLAN 訂正: 1 件
+  - T5 (d) の time `24:00:00` の hex `0000001406f40000` → **`000000141dd76000`**、86400000001 は `000000141dd76001`（根拠: 想定外 (1) の PG17 `time_send` 実測）
+- 既存テストの期待値を変えた箇所: **なし**（既存 18 ファイルは無変更で PASS。追記したのは上記 4 ファイルで、`test_params` は既存 2 関数への assert 追加のみ。既存ケースの期待値は触っていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 18 ファイル全 PASS**（36/36 が `0 failed`）。`pixi run check` **6/6 PASS = 125 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s / T4 118 s から微増だが「3 分を超えたら書く」には未達
+  - 確認済み（所要・単位 ms）: `test_types_datetime` 132 件 = **40〜46 ms**、`test_decode_binary` 77 件 = **82〜85 ms**、`test_encode_binary` 26 件 = **51〜58 ms**（いずれもサーバー不要）。`test_params` 33 件 = **115 s**、`test_binary` 14 件 = **59 s**、`test_leak` 12 件 = **66.9 s / サーバー**（T4 と同じ）
+  - 確認済み（追従先チェックリストの**最終件数**。全部目標値に一致、素のシェルで再現可）: `^comptime OID_` = **21**、`^    @implicit` = **35**（grep `'@implicit'` は 36）、`^def encode_` = **14**、`^def decode_` = **15**（14 本 + `decode_binary` 自身）、`elif T ==` は decode_text **16** / decode_binary **16**、`Thirty-five` = 1 / `Twenty-nine` = 0、`fourteen encoders` = 1、`-> ref` = **0**（P19）、`UInt32(1083)|UInt32(1186)|UInt32(1266)` の decode_text 以外での出現 = **0**
+  - 確認済み: interval テキスト 18 件は B の転記だけでなく **PG17 の `::text` 出力そのもの**とも一致する（親が `docker exec -i tests-pg17-1 psql -At -c "... v::text, encode(interval_send(v),'hex') ..."` で 20 件の原本を取得。`-1 days +02:00:00` / `-1 years -2 mons -3 days -04:05:06.789` / `1 mon -1 days` / `-00:00:00.5` / `100:00:00` / `2 years 1 mon` / `-11 mons` / `-1 years +1 day` が一致）。原本 SQL は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-007-wire.sql`
+  - 未確認（T6 への申し送り）: **`Time` / `TimeTz` / `Interval` のサーバー往復はまだ 1 件も通していない**。T5 は単体 + `Param` の OID / 形式までで、`SELECT $1::interval` の往復と text / binary の一致は T6 (b) が担う。特に PG14 の interval ±infinity（22008 / 22007）は未着手
+  - 未確認（A が契約外として報告）: `Interval.parse("+02:00:00")`（時刻部だけで先頭 `+`）は**拒否**になっている。`EncodeInterval` は単独の時刻部に `+` を付けないので「出力文法の逆」としては正しいが、契約文の `[+-]?H+:MM:SS` の literal な読みより狭い。T6 / verify の判断材料
+  - 未確認（A が契約外として報告）: `TimeTz.write_to` に生 ctor で範囲外の `offset_secs` を入れると時の桁が 3 桁以上で出る（`_pad2` は切り詰めない）。`decode_timetz` と `from_hms` が両方弾くので到達経路は無い
+  - 未確認: `_write_fraction` は `_format_time_of_day` 内のインライン実装と約 10 行重複している（A が append-only 指示を守った結果）。共通化は T9 の文書・整理フェーズの候補
+  - 未確認: `types_datetime.mojo` は **1892 行**になった（T4 末 1151 行）。T6 以降はこのファイルに足すものが無いので分割の必要は無い見込み

@@ -178,7 +178,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `tests/test_types_datetime.mojo`（対象: その 1 ファイル。A と同時に契約から書く）
     - 親: (c)(d)(e)
 
-- [ ] T5: `Time` / `TimeTz` / `Interval`（`types_datetime.mojo` 後半）+ codec / `Param` + 単体テスト
+- [x] T5: `Time` / `TimeTz` / `Interval`（`types_datetime.mojo` 後半）+ codec / `Param` + 単体テスト
   - 完了基準:
     - (a) `src/pq/types_datetime.mojo` に **決めた事項 8** の `Time` / `TimeTz` / `Interval` を追記（T4 の `_format_time_of_day` / `_parse_hms` / `_parse_fraction` を共用）。interval の文字列化は RESEARCH §3-5（`interval2itm` + `AddPostgresIntPart`、`is_before` 1 フラグ）、解釈はその逆 + `infinity` / `-infinity`。timetz のオフセットは §3-6（西が正、秒を保つ、`±HH[:MM[:SS]]` の 3 幅）
     - (b) `tests/test_types_datetime.mojo` に追記:
@@ -188,7 +188,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
       `Interval.parse` 拒否: `""`, `"1 week"`, `"1 day 1 day"`, `"P1D"`, `"1 days 02:00"`, `"+1 day"`（先頭 `+` は前が負のときだけ有効なので単独は拒否）、`"1 year "`（末尾空白）が `TYPE_MISMATCH`
     - (c) codec と結線（親）: `decode_text.mojo` に `OID_TIME = 1083` / `OID_TIMETZ = 1266` / `OID_INTERVAL = 1186` と 3 分岐；`decode_binary.mojo` に `decode_time`（8 byte、0..86400000000 の範囲外は `TYPE_MISMATCH` `"is out of range"`。P11）/ `decode_timetz`（12 byte、`|zone| < 57600` 以外は `TYPE_MISMATCH`）/ `decode_interval`（16 byte、**micros, days, months の順**。P7。範囲検査なし）と 3 分岐；
       `encode_binary.mojo` に `encode_time` / `encode_timetz`（8 + 4）/ `encode_interval`（8 + 4 + 4）；`params.mojo` に 3 型 × 2；`__init__.mojo` に再エクスポート。この時点で追従先チェックリストの最終件数（OID 21、`@implicit` 35、`encode_` 14、`decode_` 14、`elif T ==` 16 × 2）を全部確かめ PROGRESS に書く
-    - (d) codec の単体テスト: `tests/test_decode_binary.mojo` に RESEARCH の hex（time `0000000a8be1bd20` → `"12:34:56.5"`、`0000001406f40000`（86400000000）→ `"24:00:00"`、86400000001 の 8 byte → `TYPE_MISMATCH`；timetz `.. ffff8170` → `(.., -32400)`、`.. 00003138` → 12600、`.. ffffad28` → -21208、`.. 0000e0c4` → 57540、`.. ffff1f01` → -57599、`.. ffffffff` → -1、zone 57600 → `TYPE_MISMATCH`；interval `000000036c97ca88 00000003 0000000e` → `(14706789000, 3, 14)`、`00000001ad274800 ffffffff 00000000` → `(7200000000, -1, 0)`、`7fffffffffffffff 7fffffff 7fffffff` → `is_infinite()`、長さ 15 / 17 → `TYPE_MISMATCH`）；
+    - (d) codec の単体テスト: `tests/test_decode_binary.mojo` に RESEARCH の hex（time `0000000a8be1bd20` → `"12:34:56.5"`、**`000000141dd76000`**（86400000000）→ `"24:00:00"`、86400000001（`000000141dd76001`）の 8 byte → `TYPE_MISMATCH`（**turn 7 訂正**: 元の `0000001406f40000` は 86015737856 で 86400000000 ではない。`86400000000 = 0x141DD76000`。PG17 の `time_send` 実測で確認）；timetz `.. ffff8170` → `(.., -32400)`、`.. 00003138` → 12600、`.. ffffad28` → -21208、`.. 0000e0c4` → 57540、`.. ffff1f01` → -57599、`.. ffffffff` → -1、zone 57600 → `TYPE_MISMATCH`；interval `000000036c97ca88 00000003 0000000e` → `(14706789000, 3, 14)`、`00000001ad274800 ffffffff 00000000` → `(7200000000, -1, 0)`、`7fffffffffffffff 7fffffff 7fffffff` → `is_infinite()`、長さ 15 / 17 → `TYPE_MISMATCH`）；
       `tests/test_encode_binary.mojo` に `encode_interval(Interval(0,1,0)) == 00..00 00000001 00000000`、`Interval(0,0,1)` → `.. 00000000 00000001`（P7）、`encode_timetz(TimeTz(45296000000, -32400))` 末尾 `ffff8170`、幅 8 / 12 / 16、往復；`tests/test_params.mojo` に 3 型の oid / `is_binary()` / `Optional`
     - (e) `pixi run test` 両サーバー PASS、`pixi run check` 6/6
   - 対象: `src/pq/types_datetime.mojo`, `src/pq/decode_text.mojo`, `src/pq/decode_binary.mojo`, `src/pq/encode_binary.mojo`, `src/pq/params.mojo`, `src/pq/__init__.mojo`, `tests/test_types_datetime.mojo`, `tests/test_decode_binary.mojo`, `tests/test_encode_binary.mojo`, `tests/test_params.mojo`
