@@ -267,6 +267,33 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T8
   - 並列サブ作業: なし（推奨本数: **0**）
 
+- [ ] F1: `decode_numeric` の正規化後 weight 範囲検査（verify round 1 の指摘 1）+ docstring / コメントの字句 3 件
+  - 背景: `Decimal._from_parts`（`src/pq/types_numeric.mojo:253-264`）は先頭ゼログループを落とすたびに `stripped -= 1` し、最後に `Int16(stripped)` で狭める。
+    wire `0002 8000 0000 0000 0000 0001`（ndigits 2 / weight -32768 / digits [0, 1]）は `decode_numeric` の全検査を通り、`stripped = -32769` が `32767` に wrap して 1e131068 相当の値が**エラー無しで**返る
+    （verify turn 12 のファズ `turn-012-fuzz.mojo` の crafted ケース・コードレビュー・セキュリティチェックの 3 経路で一致。PG の `make_result` は同じ入力を `value overflows numeric format` で拒否する）。REQ §5.2「範囲外 weight → PgError」の取りこぼし。
+    サーバーは正規化済みの値しか送らないので実害は malformed wire に限るが、D3 の「不正値は PgError」の契約内
+  - 期待結果（**唯一の表**。完了基準とテストはこれを参照し、他所に重複して書かない）:
+    | wire（hex、空白は読みやすさのため） | 結果 |
+    |---|---|
+    | `0001 8000 0000 0000 0001`（既存 `test_numeric_minimum_weight_decodes`） | 成功のまま。`String()` は `0`（dscale 0） |
+    | `0002 8001 0000 0000 0000 0001`（先頭ゼロ 1 群、stripped weight = -32768） | 成功。1 行目の値と `==` |
+    | `0002 8000 0000 0000 0000 0001`（stripped weight = -32769） | `PgError(kind=TYPE_MISMATCH)`。message に `cannot decode binary numeric` と `weight` を含む |
+    | `0003 8000 0000 0000 0000 0000 0001`（14 byte、stripped weight = -32770） | 同上 |
+  - 完了基準:
+    - (a) `src/pq/decode_binary.mojo` `decode_numeric`: digits を読み終えた後・`_from_parts` を呼ぶ**前**に先頭ゼログループ数 `lead` を数え、`Int(weight) - lead < -32768` なら
+      `_binary_value_error("numeric", "weight <stripped> out of range after stripping <lead> leading zero groups")` を raise（表の 3・4 行目）。docstring の Raises に 1 行。
+      `Decimal._from_parts` の docstring に「stripped weight が `Int16` に収まることは呼び出し側が保証する。`_parse_opt` は先頭ゼロ群を作らないので検査不要、`decode_numeric` は検査してから渡す」を書く（コードは `_from_parts` を触らない）
+    - (b) `tests/test_decode_binary.mojo` に `test_numeric_rejects_weight_underflow_after_strip` を 1 件（表の 2〜4 行目を 1 関数で。既存の `_assert_numeric_rejected` / `_error_message` / `_ok[Decimal]` を使う。
+      message の部分文字列は `"cannot decode binary numeric"` と `"weight"`）。`grep -c '^def test_' tests/test_decode_binary.mojo` = **78**（現 77）
+    - (c) 字句 3 件（コードは触らない）:
+      `src/pq/params.mojo:655-657` のコメント「`paramLengths` is a C `int`, so a longer buffer would reach the server with a wrapped … length」→ 根拠を「PostgreSQL のメッセージ長 / `MaxAllocSize` の上限 1 GB（0x3FFFFFFF）に合わせた保守的な値。`c_int` 自体は 0x7FFFFFFF まで wrap しない」に；
+      `src/pq/result.mojo` `get_text` docstring の (3)「`Connection.open` leaves `client_encoding` at the `UTF8` the container and libpq default to」→「`pq` は `client_encoding` を触らない。libpq の既定はデータベースの `server_encoding`（または `PGCLIENTENCODING`）で、テストはテスト用コンテナで `UTF8` であることだけを確かめている。UTF-8 は検証しない」の趣旨；
+      `src/pq/__init__.mojo` `## Zero-copy access` 2 つ目の箇条書き末尾「`client_encoding` is `UTF8` and that is the guarantee」→ 同趣旨
+    - (d) `pixi run test` 両サーバー PASS、`pixi run check` 6/6 PASS（作業木のまま）。所要を PROGRESS に
+  - 対象: `src/pq/decode_binary.mojo`, `src/pq/types_numeric.mojo`（docstring のみ）, `src/pq/params.mojo`（コメントのみ）, `src/pq/result.mojo`（docstring のみ）, `src/pq/__init__.mojo`（docstring のみ）, `tests/test_decode_binary.mojo`
+  - 依存: T9
+  - 並列サブ作業: なし（推奨本数: **0**。実行待ちが支配）
+
 ## 決めた事項
 
 1. **`ResultFormat`**（REQ §4.1 / D14）: `src/pq/result.mojo` に `@fieldwise_init struct ResultFormat(Equatable, TrivialRegisterPassable, Writable)`、`var value: Int`、`comptime TEXT = Self(0)` / `comptime BINARY = Self(1)`、`__eq__` / `__ne__` / `write_to`（`"Text"` / `"Binary"`）。`PgErrorKind`（`src/pq/errors.mojo:9-86`）と同形。`pq` 直下で再エクスポート。

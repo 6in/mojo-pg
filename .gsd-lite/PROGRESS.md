@@ -316,3 +316,19 @@
   - 未確認（verify への申し送り。いずれも「テストが無い」のではなく「この格子に載っていない」もの）: turn 8 で挙げた 3 件がそのまま残っている — timetz の最大西 / 最大東（`-15:59` / `+15:59:59`）のサーバー往復、`test_timestamp_params_round_trip` の非 UTC 分岐（コンテナが `Etc/UTC` 固定で一度も走らない）、拡張型の NULL binary と `PreparedStatement` / `Transaction` 経由の binary。**REQ §5.1 / §5.2 の項目としては上の格子で全部に対応先がある**ので T9 (c) の「足す」対象には含めなかった
   - 未確認: `test_leak` は今回 `check`（5/6 段、PG17 のみ）と `pixi run test`（両サーバー）で通っているが、turn 10 以降 `test_leak.mojo` は無変更なので RSS のサンプル列は turn 10 の記録が最新
   - 未確認: PLAN の全 9 タスクが `- [x]` になった。次は `/gsd-lite-verify`（`phase: "verify"`）
+## turn 12 — verify — round 1: 指摘 1 件（F1、numeric の正規化後 weight が wrap）+ 字句 3 件 → impl へ差し戻し。マージ無し
+- やったこと: サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用）を並行させ、親はクリーンな `pixi run check`（6/6 PASS）、堅牢性の格子プローブ
+  （`scratch/turn-012-fuzz.mojo`: テキスト parser 8 種 × 22,788 入力 + バイナリ decoder 22 組 × 2,050 パターン + crafted numeric 3,027 + 生 ctor 極値 ≒ 230,000 呼び出し、クラッシュ 0）、
+  追従先チェックリスト 32 件の再実行（不一致 0）、T7 陽性対照の再実行（現 HEAD でもコンパイルエラー）、文書照合、timetz 極値の wire 実測を実施。VERIFICATION.md を round 1 の結果で作成し、F1 を PLAN に追記
+- 想定外:
+  (1) ファズの「`parse(String(v)) == v`」は **dscale が実桁より小さい非正規化 numeric** で偽になる（71 件）。実装の誤りではなくプローブ側の性質の立て方の問題（`String()` は一致）。
+      本物の指摘（weight wrap）は crafted ケースの `0002 8000 0000 0000 0000 0001` で別に出た
+  (2) Mojo 1.1.0 はモジュールレベル `var` を許さない（`error: global variables are not supported`）。集計と LCG 状態を `struct State` に入れて `mut` で渡した
+  (3) 指摘 1 は impl が turn 5「未確認」で挙げていたものと同一。impl 側の申し送りを verify が最初に読んで格子に入れたので、独立 3 経路（ファズ / レビュー / セキュリティ）で一致した
+- やり直し: 1 回（ファズ probe のコンパイル: 想定外 (2) のグローバル変数）
+- 次への注意:
+  - 確認済み: `pixi run check` 6/6 PASS = 約 140 s（ログ `turn-012-check.log`）。両サーバー 21 ファイル全 PASS
+  - 確認済み: F1 の期待結果は PLAN の表が唯一の正。`0002 8001 ...`（stripped -32768）は**成功**しなければならない（境界を含めて弾くと `test_numeric_minimum_weight_decodes` と矛盾する）
+  - 確認済み: F1 の検査位置は `decode_numeric` 側（`_from_parts` は raise しないシグネチャ。`_parse_opt` は先頭ゼロ群を作らないので対象外）
+  - 確認済み: round 2 は「round 1 の格子の再確認 + F1 差分の回帰」だけ。ファズは `scratch/turn-012-fuzz` を再ビルドして回せば `BAD bin decimal text roundtrip` の 71 件（dscale クラス）が残り、weight クラスの行が消えるのが期待
+  - 未確認: F1 (c) の文言は趣旨だけ PLAN に書いた。impl が英文にするときは「`pq` は `client_encoding` を設定しない」「UTF-8 を検証しない」の 2 点を落とさない
