@@ -1,13 +1,14 @@
 """Binary-format encoding of Mojo values into PostgreSQL wire bytes.
 
-Holds eight encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
-`encode_int64`, `encode_float32`, `encode_float64`, `encode_numeric` and
+Holds eleven encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
+`encode_int64`, `encode_float32`, `encode_float64`, `encode_numeric`,
+`encode_date`, `encode_timestamp`, `encode_timestamptz` and
 `encode_uuid` -- each returning the value's PostgreSQL binary
 representation as a `List[UInt8]` in network byte order (big-endian).
 Lengths are fixed for all but one: 1 byte for `bool`, 2 for `int2`, 4 for
-`int4` and `float4`, 8 for `int8` and `float8`, 16 for `uuid`. Only
-`numeric` is variable: an 8 byte header plus two bytes per base-10000
-digit group.
+`int4`, `float4` and `date`, 8 for `int8`, `float8`, `timestamp` and
+`timestamptz`, 16 for `uuid`. Only `numeric` is variable: an 8 byte
+header plus two bytes per base-10000 digit group.
 
 There is no `Int` encoder on purpose: callers widen with `Int64(v)` and use
 `encode_int64`, so the wire width is always chosen explicitly.
@@ -23,6 +24,7 @@ decoder of the same suffix there.
 
 from std.memory import bitcast
 
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -157,6 +159,54 @@ def encode_numeric(d: Decimal) -> List[UInt8]:
     for i in range(ndigits):
         _append_be16(out, bitcast[DType.uint16, 1](d._digits[i]))
     return out^
+
+
+def encode_date(d: Date) -> List[UInt8]:
+    """Encode `d` as the four byte PostgreSQL `date` binary format.
+
+    `Date` already holds the day count from 2000-01-01 the wire format
+    wants, so this is `encode_int32` of that field; the `infinity`
+    sentinels go out unchanged.
+
+    Args:
+        d: The value to encode.
+
+    Returns:
+        Four bytes, big-endian two's complement.
+    """
+    return encode_int32(d.days)
+
+
+def encode_timestamp(t: Timestamp) -> List[UInt8]:
+    """Encode `t` as the eight byte PostgreSQL `timestamp` binary format.
+
+    `Timestamp` already holds the microsecond count from 2000-01-01
+    00:00:00 the wire format wants, so this is `encode_int64` of that
+    field; the `infinity` sentinels go out unchanged.
+
+    Args:
+        t: The value to encode.
+
+    Returns:
+        Eight bytes, big-endian two's complement.
+    """
+    return encode_int64(t.micros)
+
+
+def encode_timestamptz(t: TimestampTz) -> List[UInt8]:
+    """Encode `t` as the eight byte `timestamptz` binary format.
+
+    The field is the same microsecond count as `timestamp`, and the server
+    reads a binary `timestamptz` parameter as UTC, which is the time zone
+    `TimestampTz` keeps its value in.
+
+    Args:
+        t: The value to encode.
+
+    Returns:
+        Eight bytes, big-endian two's complement.
+    """
+    return encode_int64(t.micros)
 
 
 def encode_uuid(u: UUID) -> List[UInt8]:

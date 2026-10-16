@@ -1,17 +1,26 @@
 """Tests for `pq.encode_binary`: fixed widths and network byte order."""
 
-from pq.decode_binary import decode_numeric
+from pq.decode_binary import (
+    decode_date,
+    decode_numeric,
+    decode_timestamp,
+    decode_timestamptz,
+)
 from pq.decode_text import parse_bytea_hex
 from pq.encode_binary import (
     encode_bool,
+    encode_date,
     encode_float32,
     encode_float64,
     encode_int16,
     encode_int32,
     encode_int64,
     encode_numeric,
+    encode_timestamp,
+    encode_timestamptz,
     encode_uuid,
 )
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 from std.testing import TestSuite, assert_equal, assert_true
@@ -130,6 +139,9 @@ def test_encoded_widths_are_fixed() raises:
     assert_equal(len(encode_float32(0.0)), 4)
     assert_equal(len(encode_float64(0.0)), 8)
     assert_equal(len(encode_uuid(_uuid())), 16)
+    assert_equal(len(encode_date(Date(0))), 4)
+    assert_equal(len(encode_timestamp(Timestamp(0))), 8)
+    assert_equal(len(encode_timestamptz(TimestampTz(0))), 8)
 
 
 def _hex(digits: String) raises -> List[UInt8]:
@@ -276,6 +288,88 @@ def test_uuid_wire_matches_the_server() raises:
         _hex("a0eebc999c0b4ef8bb6d6bb9bd380a11"),
         "uuid",
     )
+
+
+def test_date_wire_matches_the_server() raises:
+    _assert_bytes(encode_date(Date(8825)), _hex("00002279"), "date 8825")
+    _assert_bytes(encode_date(Date(-10957)), _hex("ffffd533"), "date -10957")
+    _assert_bytes(encode_date(Date(0)), _hex("00000000"), "date 0")
+
+
+def test_timestamp_wire_matches_the_server() raises:
+    _assert_bytes(
+        encode_timestamp(Timestamp(0x0002B0EC85204F35)),
+        _hex("0002b0ec85204f35"),
+        "timestamp 2024-01-02 03:04:05.678901",
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp(-946684800000001)),
+        _hex("fffca2fec4c81fff"),
+        "timestamp 1969-12-31 23:59:59.999999",
+    )
+    _assert_bytes(
+        encode_timestamptz(TimestampTz(0x0002B0EC85204F35)),
+        _hex("0002b0ec85204f35"),
+        "timestamptz 2024-01-02 03:04:05.678901+00",
+    )
+
+
+def test_datetime_sentinels_encode_to_the_wire_sentinels() raises:
+    _assert_bytes(encode_date(Date.infinity()), _hex("7fffffff"), "date inf")
+    _assert_bytes(
+        encode_date(Date.negative_infinity()), _hex("80000000"), "date -inf"
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp.infinity()),
+        _hex("7fffffffffffffff"),
+        "timestamp inf",
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp.negative_infinity()),
+        _hex("8000000000000000"),
+        "timestamp -inf",
+    )
+    _assert_bytes(
+        encode_timestamptz(TimestampTz.negative_infinity()),
+        _hex("8000000000000000"),
+        "timestamptz -inf",
+    )
+
+
+def test_datetime_round_trips_through_the_decoders() raises:
+    var days: List[Int32] = [0, 8825, -10957, -730485, -2451545, 2145031948]
+    for i in range(len(days)):
+        var value = Date(days[i])
+        var back: Date
+        try:
+            back = decode_date(Span[UInt8](encode_date(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("date round trip ", days[i]))
+
+    var micros: List[Int64] = [
+        0,
+        1,
+        0x0002B0EC85204F35,
+        -946684800000001,
+        0x7FFFFF5BB3B29FFF,
+    ]
+    for i in range(len(micros)):
+        var value = Timestamp(micros[i])
+        var back: Timestamp
+        var back_tz: TimestampTz
+        try:
+            back = decode_timestamp(Span[UInt8](encode_timestamp(value)))
+            back_tz = decode_timestamptz(
+                Span[UInt8](encode_timestamptz(TimestampTz(micros[i])))
+            )
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("timestamp round trip ", micros[i]))
+        assert_true(
+            back_tz == TimestampTz(micros[i]),
+            String("timestamptz round trip ", micros[i]),
+        )
 
 
 def main() raises:

@@ -153,7 +153,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `types_uuid.mojo` + `tests/test_types_uuid.mojo`
     - 親: (e)(f)(g)。codec モジュールと `params.mojo` は親だけが触る
 
-- [ ] T4: `Date` / `Timestamp` / `TimestampTz`（`types_datetime.mojo` 前半 + 暦算法）+ codec / `Param` + 単体テスト
+- [x] T4: `Date` / `Timestamp` / `TimestampTz`（`types_datetime.mojo` 前半 + 暦算法）+ codec / `Param` + 単体テスト
   - 完了基準:
     - (a) `src/pq/types_datetime.mojo`（新設。T5 が同じファイルに追記する）: private ヘルパ `_days_from_civil(y, m, d) -> Int` / `_civil_from_days(days) -> (Int, Int, Int)`（RESEARCH §2.2.3 のコードそのまま。`//` は床除算、`(y-399)/400` は書かない）/ `_is_leap(y)` / `_days_in_month(y, m)` /
       `_format_date(y, m, d, mut writer)`（4 桁ゼロ埋め・4 桁超はそのまま・`y <= 0` は `1 - y` + ` BC` を**呼び出し側が付ける**）/ `_format_time_of_day(micros_in_day, mut writer)`（`HH:MM:SS[.f]`、末尾ゼロ削り）/ `_parse_fraction(digits) -> Int`（1〜6 桁、7 桁以上は拒否。P14）/ `_parse_hms(text, start) -> micros`（桁位置で読む。P25）。

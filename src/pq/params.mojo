@@ -1,7 +1,7 @@
 """Query parameters and the libpq argument arrays built from them.
 
 `Param` is the single value type accepted by the parameterised execute
-APIs. Twenty-three `@implicit` constructors make a plain list literal --
+APIs. Twenty-nine `@implicit` constructors make a plain list literal --
 `[1, "a", 1.5, True, Param.null()]` -- convert to `List[Param]`, so the
 caller never names the type. Each constructor **encodes at construction
 time**: the Mojo value is turned into its PostgreSQL wire bytes right
@@ -51,25 +51,32 @@ from pq._ffi.types import CStrArray, IntPtr, OidPtr
 from pq.decode_text import (
     OID_BOOL,
     OID_BYTEA,
+    OID_DATE,
     OID_FLOAT4,
     OID_FLOAT8,
     OID_INT2,
     OID_INT4,
     OID_INT8,
     OID_NUMERIC,
+    OID_TIMESTAMP,
+    OID_TIMESTAMPTZ,
     OID_UUID,
 )
 from pq.encode_binary import (
     encode_bool,
+    encode_date,
     encode_float32,
     encode_float64,
     encode_int16,
     encode_int32,
     encode_int64,
     encode_numeric,
+    encode_timestamp,
+    encode_timestamptz,
     encode_uuid,
 )
 from pq.errors import PgError, PgErrorKind
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -95,8 +102,9 @@ struct Param(Copyable, Movable):
 
     Holds the PostgreSQL type OID, the wire format flag and the encoded
     bytes: big-endian binary for `Bool`, the integers, the floats,
-    `Decimal` (`numeric`) and `UUID`, raw bytes for `bytea`, and NUL-free
-    text bytes for `String`. A SQL NULL carries no bytes at all.
+    `Decimal` (`numeric`), `UUID`, `Date`, `Timestamp` and `TimestampTz`,
+    raw bytes for `bytea`, and NUL-free text bytes for `String`. A SQL
+    NULL carries no bytes at all.
 
     Construction is implicit from any of the supported Mojo types and
     from `Optional` of each of them, so `List[Param]` accepts a plain
@@ -269,6 +277,37 @@ struct Param(Copyable, Movable):
         self = Param(OID_UUID, True, False, encode_uuid(v))
 
     @implicit
+    def __init__(out self, v: Date):
+        """Encode `v` as a binary `date` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_DATE, True, False, encode_date(v))
+
+    @implicit
+    def __init__(out self, v: Timestamp):
+        """Encode `v` as a binary `timestamp` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMESTAMP, True, False, encode_timestamp(v))
+
+    @implicit
+    def __init__(out self, v: TimestampTz):
+        """Encode `v` as a binary `timestamptz` parameter.
+
+        The value travels as the UTC microsecond count it holds, so the
+        server's session `TimeZone` affects only how it prints the result
+        back.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMESTAMPTZ, True, False, encode_timestamptz(v))
+
+    @implicit
     def __init__(out self, var v: List[UInt8]):
         """Send `v` as a binary `bytea` parameter.
 
@@ -412,6 +451,43 @@ struct Param(Copyable, Movable):
             self = Param(v.value())
         else:
             self = Param.null(OID_UUID)
+
+    @implicit
+    def __init__(out self, v: Optional[Date]):
+        """Encode `v` as a binary `date` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `date`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_DATE)
+
+    @implicit
+    def __init__(out self, v: Optional[Timestamp]):
+        """Encode `v` as a binary `timestamp` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `timestamp`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMESTAMP)
+
+    @implicit
+    def __init__(out self, v: Optional[TimestampTz]):
+        """Encode `v` as a binary `timestamptz` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of
+                `timestamptz`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMESTAMPTZ)
 
     def oid(self) -> UInt32:
         """Return the PostgreSQL type OID this parameter is sent as.

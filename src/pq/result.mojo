@@ -527,6 +527,9 @@ struct Row[origin: ImmOrigin](Copyable):
         | `List[UInt8]`  | 17 (bytea), hex form only   | 17 (bytea)          |
         | `Decimal`      | 1700 (numeric)              | 1700 (numeric)      |
         | `UUID`         | 2950 (uuid)                 | 2950 (uuid)         |
+        | `Date`         | 1082 (date)                 | 1082 (date)         |
+        | `Timestamp`    | 1114 (timestamp)            | 1114 (timestamp)    |
+        | `TimestampTz`  | 1184 (timestamptz)          | 1184 (timestamptz)  |
         | `String`       | any                         | string-like OIDs    |
 
         The two rows that differ between the formats:

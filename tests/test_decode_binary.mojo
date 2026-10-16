@@ -10,6 +10,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from pq.decode_binary import decode_binary
 from pq.decode_text import parse_bytea_hex
 from pq.errors import PgErrorKind
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -549,6 +550,107 @@ def test_uuid_rejects_wrong_length() raises:
 
 def test_uuid_rejects_text_column() raises:
     _assert_oid_rejected[UUID]("a0eebc999c0b4ef8bb6d6bb9bd380a11", 25)
+
+
+# --- date / timestamp / timestamptz -------------------------------------------
+
+
+def _assert_date(digits: String, expected: Int) raises:
+    """Assert a `date` cell decodes to the day count the server sent.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        expected: The day count from 2000-01-01.
+
+    Raises:
+        Error: If decoding failed or produced another day count.
+    """
+    var value = _ok[Date](digits, 1082)
+    assert_equal(Int(value.days), expected, String("date ", digits))
+
+
+def _assert_timestamp(digits: String, expected: String) raises:
+    """Assert a `timestamp` cell decodes to the text PostgreSQL prints.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        expected: The `timestamp_out` text of the same value.
+
+    Raises:
+        Error: If decoding failed or printed something else.
+    """
+    var value = _ok[Timestamp](digits, 1114)
+    assert_equal(String(value), expected, String("timestamp ", digits))
+
+
+def test_date_decodes_the_measured_day_counts() raises:
+    _assert_date("00000000", 0)
+    _assert_date("ffffd533", -10957)
+    _assert_date("00002279", 8825)
+    _assert_date("fff4da8b", -730485)
+    _assert_date("ffda97a7", -2451545)
+    _assert_date("7fda970c", 2145031948)
+    _assert_date("002c95d4", 2921940)
+
+
+def test_date_sentinels_decode_as_infinite() raises:
+    var pos = _ok[Date]("7fffffff", 1082)
+    assert_true(pos.is_infinite())
+    assert_false(pos.is_finite())
+    assert_equal(String(pos), "infinity")
+    var neg = _ok[Date]("80000000", 1082)
+    assert_true(neg.is_infinite())
+    assert_equal(String(neg), "-infinity")
+
+
+def test_date_rejects_wrong_length() raises:
+    _assert_length_rejected[Date]("000022", 1082, 4)
+    _assert_length_rejected[Date]("0000227900", 1082, 4)
+    _assert_length_rejected[Date]("", 1082, 4)
+
+
+def test_date_rejects_timestamp_column() raises:
+    _assert_oid_rejected[Date]("00002279", 1114)
+
+
+def test_timestamp_decodes_the_measured_values() raises:
+    _assert_timestamp("0000000000000000", "2000-01-01 00:00:00")
+    _assert_timestamp("0002b0ec85204f35", "2024-01-02 03:04:05.678901")
+    _assert_timestamp("fffca2fec4c81fff", "1969-12-31 23:59:59.999999")
+    _assert_timestamp("ff1fc63d1bb12000", "0001-01-01 00:00:00 BC")
+    _assert_timestamp("fd0f7fbdaf17e000", "4713-01-01 00:00:00 BC")
+    _assert_timestamp("7fffff5bb3b29fff", "294276-12-31 23:59:59.999999")
+
+
+def test_timestamp_sentinels_decode_as_infinite() raises:
+    var neg = _ok[Timestamp]("8000000000000000", 1114)
+    assert_true(neg.is_infinite())
+    assert_equal(String(neg), "-infinity")
+    var pos = _ok[Timestamp]("7fffffffffffffff", 1114)
+    assert_true(pos.is_infinite())
+    assert_equal(String(pos), "infinity")
+
+
+def test_timestamp_rejects_wrong_length() raises:
+    _assert_length_rejected[Timestamp]("0002b0ec85204f", 1114, 8)
+    _assert_length_rejected[Timestamp]("0002b0ec85204f3501", 1114, 8)
+    _assert_length_rejected[Timestamp]("", 1114, 8)
+
+
+def test_timestamp_rejects_timestamptz_column() raises:
+    _assert_oid_rejected[Timestamp]("0002b0ec85204f35", 1184)
+
+
+def test_timestamptz_decodes_as_utc() raises:
+    var value = _ok[TimestampTz]("0002b0ec85204f35", 1184)
+    assert_equal(value.micros, Int64(0x0002B0EC85204F35))
+    assert_equal(String(value), "2024-01-02 03:04:05.678901+00")
+
+
+def test_timestamptz_rejects_wrong_length_and_oid() raises:
+    _assert_length_rejected[TimestampTz]("0002b0ec85204f", 1184, 8)
+    _assert_length_rejected[TimestampTz]("0002b0ec85204f3501", 1184, 8)
+    _assert_oid_rejected[TimestampTz]("0002b0ec85204f35", 1114)
 
 
 def main() raises:

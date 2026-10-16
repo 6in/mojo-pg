@@ -34,6 +34,7 @@ from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.params import Param
 from pq.result import Result, Row
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -536,6 +537,21 @@ def test_param_oids_of_the_extended_types() raises:
     assert_true(as_uuid.is_binary())
     assert_false(as_uuid.is_null())
 
+    var as_date = Param(Date(8825))
+    assert_equal(as_date.oid(), UInt32(1082))
+    assert_true(as_date.is_binary())
+    assert_false(as_date.is_null())
+
+    var as_timestamp = Param(Timestamp(762525296789000))
+    assert_equal(as_timestamp.oid(), UInt32(1114))
+    assert_true(as_timestamp.is_binary())
+    assert_false(as_timestamp.is_null())
+
+    var as_timestamptz = Param(TimestampTz(762525296789000))
+    assert_equal(as_timestamptz.oid(), UInt32(1184))
+    assert_true(as_timestamptz.is_binary())
+    assert_false(as_timestamptz.is_null())
+
 
 def test_param_from_empty_optional_of_an_extended_type() raises:
     var no_numeric = Param(Optional[Decimal](None))
@@ -545,6 +561,18 @@ def test_param_from_empty_optional_of_an_extended_type() raises:
     var no_uuid = Param(Optional[UUID](None))
     assert_equal(no_uuid.oid(), UInt32(2950))
     assert_true(no_uuid.is_null())
+
+    var no_date = Param(Optional[Date](None))
+    assert_equal(no_date.oid(), UInt32(1082))
+    assert_true(no_date.is_null())
+
+    var no_timestamp = Param(Optional[Timestamp](None))
+    assert_equal(no_timestamp.oid(), UInt32(1114))
+    assert_true(no_timestamp.is_null())
+
+    var no_timestamptz = Param(Optional[TimestampTz](None))
+    assert_equal(no_timestamptz.oid(), UInt32(1184))
+    assert_true(no_timestamptz.is_null())
 
 
 def test_param_from_empty_optional_keeps_the_oid() raises:

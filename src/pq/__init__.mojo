@@ -9,8 +9,9 @@ Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
-`PreparedStatement`, `Transaction`, the `Decimal` and `UUID` value types
-for the PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK`
+`PreparedStatement`, `Transaction`, the `Decimal`, `UUID`, `Date`,
+`Timestamp` and `TimestampTz` value types for the PostgreSQL types that
+have no Mojo equivalent, the `CONNECTION_OK`
 / `CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
 status constants.
 
@@ -32,6 +33,9 @@ returns the text unchanged.
 | float8 | 701 | `Float64` | same |
 | numeric | 1700 | `Decimal` | position notation, `NaN` / `±Infinity` |
 | uuid | 2950 | `UUID` | lowercase `8-4-4-4-12` |
+| date | 1082 | `Date` | `YYYY-MM-DD`, ` BC` suffix, `±infinity` |
+| timestamp | 1114 | `Timestamp` | `YYYY-MM-DD HH:MM:SS[.f]`, same |
+| timestamptz | 1184 | `TimestampTz` | same plus the UTC offset |
 | text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is |
 | json, jsonb | 114, 3802 | `String` | as-is; jsonb drops its version byte |
 | bytea | 17 | `List[UInt8]` | `\\x` hex form only |
@@ -91,6 +95,9 @@ wire format and the OID sent in `paramTypes`:
 | `Float64` | IEEE 754, 8 byte BE | 701 | same |
 | `Decimal` | binary, 8 byte header + digits | 1700 | `numeric` |
 | `UUID` | binary, 16 byte | 2950 | |
+| `Date` | binary, 4 byte BE | 1082 | days from 2000-01-01 |
+| `Timestamp` | binary, 8 byte BE | 1114 | µs from 2000-01-01 |
+| `TimestampTz` | binary, 8 byte BE | 1184 | same, read as UTC |
 | `String`, `StringLiteral` | text, NUL-terminated | 0 | server infers |
 | `List[UInt8]` | binary, with length | 17 | empty / NUL-containing ok |
 | NULL | NULL | 0, or the given OID | see below |
@@ -159,5 +166,6 @@ from .params import Param
 from .prepared import PreparedStatement
 from .result import Result, ResultFormat, Row
 from .transaction import Transaction
+from .types_datetime import Date, Timestamp, TimestampTz
 from .types_numeric import Decimal
 from .types_uuid import UUID

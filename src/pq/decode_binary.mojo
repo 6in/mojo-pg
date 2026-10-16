@@ -1,8 +1,9 @@
 """Binary-format decoding of PostgreSQL wire bytes into Mojo types.
 
-Holds eight decoders -- the fixed-width `decode_bool`, `decode_int16`,
-`decode_int32`, `decode_int64`, `decode_float32`, `decode_float64` and
-`decode_uuid`, plus the variable-length `decode_numeric` -- and the
+Holds eleven decoders -- the fixed-width `decode_bool`, `decode_int16`,
+`decode_int32`, `decode_int64`, `decode_float32`, `decode_float64`,
+`decode_uuid`, `decode_date`, `decode_timestamp` and
+`decode_timestamptz`, plus the variable-length `decode_numeric` -- and the
 `comptime if` type switch `decode_binary[T]` that turns one libpq
 binary-format cell into a Mojo value. Each decoder is the inverse of the
 `encode_<pgtype>` function of the same suffix in `pq.encode_binary`, reading
@@ -26,7 +27,9 @@ number:
 - Values outside the type's wire domain are rejected: a `bool` byte must be
   0 or 1, a `jsonb` cell must open with version byte 1, and a `numeric`
   header must carry one of the five defined signs, a `dscale` of at most
-  16383 and digit groups in `0..9999`.
+  16383 and digit groups in `0..9999`. `date`, `timestamp` and
+  `timestamptz` have no such check: every cell of the right width is a
+  value those types can hold, the `infinity` sentinels included.
 
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
@@ -42,6 +45,7 @@ from pq.decode_text import (
     OID_BOOL,
     OID_BPCHAR,
     OID_BYTEA,
+    OID_DATE,
     OID_FLOAT4,
     OID_FLOAT8,
     OID_INT2,
@@ -52,10 +56,13 @@ from pq.decode_text import (
     OID_NAME,
     OID_NUMERIC,
     OID_TEXT,
+    OID_TIMESTAMP,
+    OID_TIMESTAMPTZ,
     OID_UUID,
     OID_VARCHAR,
 )
 from pq.errors import PgError, PgErrorKind
+from pq.types_datetime import Date, Timestamp, TimestampTz
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
 
@@ -401,6 +408,86 @@ def decode_uuid[
     return UUID(raw)
 
 
+def decode_date[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> Date:
+    """Decode the four byte PostgreSQL `date` binary format.
+
+    The wire value is the day count from 2000-01-01, which is exactly what
+    `Date` holds, so it is kept as-is. The `infinity` / `-infinity`
+    sentinels are ordinary values here and are not singled out; no range
+    check is applied, because every four byte cell a `date` column can
+    send is one `Date` can hold.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the server's day count.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            four bytes.
+    """
+    _check_length(bytes, "date", 4)
+    return Date(bitcast[DType.int32, 1](UInt32(_be_bits(bytes))))
+
+
+def decode_timestamp[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> Timestamp:
+    """Decode the eight byte PostgreSQL `timestamp` binary format.
+
+    The wire value is the microsecond count from 2000-01-01 00:00:00,
+    which is what `Timestamp` holds, sentinels included, so only the
+    length is checked.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the server's microsecond count.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            eight bytes.
+    """
+    _check_length(bytes, "timestamp", 8)
+    return Timestamp(bitcast[DType.int64, 1](_be_bits(bytes)))
+
+
+def decode_timestamptz[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> TimestampTz:
+    """Decode the eight byte PostgreSQL `timestamptz` binary format.
+
+    The wire value is the same microsecond count as `timestamp`, read as
+    UTC -- the server's session `TimeZone` changes the text form only, so
+    this decoder is independent of it.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the server's microsecond count in UTC.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            eight bytes.
+    """
+    _check_length(bytes, "timestamptz", 8)
+    return TimestampTz(bitcast[DType.int64, 1](_be_bits(bytes)))
+
+
 def decode_binary[
     origin: ImmOrigin, //, T: Copyable
 ](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> T:
@@ -410,7 +497,8 @@ def decode_binary[
     conversion is performed. `Bool` requires oid 16, `Int16` oid 21,
     `Int32` oid 23, `Int64` and `Int` oid 20, `Float32` oid 700,
     `Float64` oid 701, `List[UInt8]` oid 17, `Decimal` oid 1700
-    (`numeric`) and `UUID` oid 2950. `String` requires one of
+    (`numeric`), `UUID` oid 2950, `Date` oid 1082, `Timestamp` oid 1114
+    and `TimestampTz` oid 1184. `String` requires one of
     the six string-shaped OIDs -- 25 (`text`), 1043 (`varchar`), 1042
     (`bpchar`), 19 (`name`), 114 (`json`) and 3802 (`jsonb`) -- and is
     therefore not the catch-all it is on the text path. Any other `T` is a
@@ -510,6 +598,21 @@ def decode_binary[
         if oid != OID_UUID:
             raise _binary_oid_error(oid, "UUID")
         var value = decode_uuid(bytes)
+        return rebind[T](value).copy()
+    elif T == Date:
+        if oid != OID_DATE:
+            raise _binary_oid_error(oid, "Date")
+        var value = decode_date(bytes)
+        return rebind[T](value).copy()
+    elif T == Timestamp:
+        if oid != OID_TIMESTAMP:
+            raise _binary_oid_error(oid, "Timestamp")
+        var value = decode_timestamp(bytes)
+        return rebind[T](value).copy()
+    elif T == TimestampTz:
+        if oid != OID_TIMESTAMPTZ:
+            raise _binary_oid_error(oid, "TimestampTz")
+        var value = decode_timestamptz(bytes)
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"
