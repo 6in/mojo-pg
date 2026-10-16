@@ -97,3 +97,30 @@
   - 未確認: 0 byte の jsonb のメッセージが `binary jsonb value has 0 bytes, expected 1` で、1 が下限なのに固定幅のような読みになる（kind と拒否は正しい）。T3 で jsonb を触るなら文面を見直す候補
   - 未確認（T6 / T7 の材料。C が契約外として報告）: `column_format(-1)` の負値、0 列結果（binary DDL / INSERT）の `column_format`、明示 `result_format=ResultFormat.TEXT`、複数行の binary 結果（行オフセットのずれを突く）、未対応 OID を `get_optional` で引いたとき。いずれも T2 の完了基準に無いので足していない
   - 未確認: 切断後の binary 実行（T2 (e) ⑦）は、C の実測では **PG14 / PG17 とも 2 回目も `CONNECTION`**（SQLSTATE 空）だった。テストは PLAN の文言どおり `CONNECTION` / `SERVER` のどちらでも通る形にしてある。既存 `tests/test_connection.mojo` は無条件 `CONNECTION` を期待しているので、verify が厳しくしたければ締められる
+## turn 5 — impl — T3 `Decimal` / `UUID` / json・jsonb の OID + codec と `Param` ctor
+- やったこと: `src/pq/types_numeric.mojo`（`Decimal`）と `src/pq/types_uuid.mojo`（`UUID`）を新設し、OID 4 個（114 / 1700 / 2950 / 3802）を `decode_text.mojo` に集約、
+  `decode_numeric` / `decode_uuid` / `encode_numeric` / `encode_uuid` と `decode_text` / `decode_binary` の 2 型分岐、`Param` の `@implicit` 4 本（値 + `Optional`）を結線。
+  **サブエージェント 2 本を並行**（A: `Decimal` + 単体テスト / B: `UUID` + 単体テスト。対象ファイルは重ならせず、codec・`params.mojo`・docstring 追従・統合検証は親）
+- 想定外:
+  (1) `@fieldwise_init` が `Decimal` に 4 引数の**公開**位置引数 ctor（`Decimal(_sign, _weight, _dscale, _digits)`）を生む。正規化を飛ばせるので `__eq__` の前提（正規化後の比較）を壊せる。
+      Mojo に可視性制御は無く、明示 `__init__` に書き換えても公開面は同じなので**そのままにした**（`_from_parts` / `nan()` / `infinity()` / `negative_infinity()` が内部でこれを通す。パッケージ外から呼ぶ理由は無い）。verify が「契約に無い公開 ctor」として締めたければ候補
+  (2) numeric の長さ誤りのメッセージは**値エラー側の文面**にせざるを得なかった（決めた事項 4 は長さ不一致の分類に置いていたが、T3 (f) が不正 5 ケース全部に `"cannot decode binary numeric"` を要求している）。PLAN を訂正
+  (3) 追従先チェックリストの `grep -c '@implicit' src/pq/params.mojo` はモジュール docstring の「`@implicit` constructors」行も数える（実 ctor 数 + 1）。元の最終期待値 35 は実 ctor 数で、grep 値ではなかった。PLAN を訂正
+  (4) RESEARCH §2.2.2 の表は 30 byte 行（`123456789012345678901234567890.123456789`）の digit 部を `...` で省略していたので、`encode(numeric_send(v), 'hex')` で 23 値の wire を PG17 から取り直して期待値にした。
+      §3-2 の式から手計算した `000b000700000009 000c 0d80 1ed2 04d2 162e 2334 0d80 1ed2 04d2 162e 2328` と**実測が完全一致**したので、parse の式の写し取りはこれで裏が取れた
+- やり直し: 0 回（親の統合・検証は初回で green。サブエージェント A は自分の担当範囲内で小数点の `write_to` 漏れを 1 回直して報告）
+- PLAN 訂正: 4 件
+  - 決めた事項 4 に「numeric だけは長さ誤りも `cannot decode binary numeric: ...` の文面」を追記（根拠: 想定外 (2)。T3 (f) の要求と可変長型の性質）
+  - 追従先チェックリストの `@implicit` 最終期待値 35 → **36**（grep は docstring 行も数える。ctor だけなら `grep -c '^    @implicit'`。根拠: 想定外 (3) の実測）
+  - 同チェックリスト T2 行の `grep -rn 'Phase 3'` 期待値 1 → **2**（`__init__.mojo` の Layout 行に Phase 3 の追加モジュールを書いた。既存の「Phase 1 adds ... Phase 2 adds ...」の続きで placeholder ではない）
+  - 同チェックリスト `^def decode_` の turn 5 実測 **9**（6 本 + `decode_numeric` + `decode_uuid` + 自身）を追記
+- 既存テストの期待値を変えた箇所: **なし**（既存 13 ファイルは無変更で PASS。追記したのは `test_decode_binary` +14 件 / `test_encode_binary` +4 件 / `test_params` +2 件で、既存ケースの期待値は触っていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 17 ファイル全 PASS**（0 failed）。`pixi run check` **6/6 PASS = 112 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s から変化なし（PLAN の「3 分を超えたら書く」には未達）
+  - 確認済み（所要・単位 ms）: `test_types_numeric` 45 件 = **133〜143 ms**、`test_types_uuid` 14 件 = **15 ms**、`test_decode_binary` 58 件 = **52 ms**、`test_encode_binary` 18 件 = **33 ms**（いずれもサーバー不要）。`test_params` 33 件 = **127 s**（サーバー往復込み）
+  - 確認済み（追従先チェックリストの中間値、素のシェルで再現可）: `^comptime OID_` = **15**、`^    @implicit` = **23**（grep `'@implicit'` は 24）、`^def encode_` = **8**、`^def decode_` = **9**、`elif T ==` は decode_text **10** / decode_binary **10**（最終目標は各 16）、`UInt32(1700)|UInt32(2950)|UInt32(114)|UInt32(3802)` の decode_text 以外での出現 = **0**、`Nineteen` = 0 / `Twenty-three` = 1、`exactly six` = 0、`anything else` = 1、`-> ref` = **0**（P19）
+  - 確認済み: PG の wire を取る一番速い手は **`docker exec -i tests-pg17-1 psql -U pq -d pq_test`** + `encode(<type>_send(v), 'hex')`。T4 / T5 の date / timestamp / time / timetz / interval の期待値もこれで原本を作れる（`date_send` / `timestamp_send` / `timestamptz_send` / `time_send` / `timetz_send` / `interval_send`）。RESEARCH の表で `...` 省略されている行はこれで埋める
+  - 未確認: `Decimal._from_parts` は weight が `Int16.MIN` で**かつ**先頭ゼログループがあるとき stripped weight が wrap する（A の報告）。サーバーは先頭ゼログループを送らないので到達しないが、`decode_numeric` のヘッダ検査に足すかは T6（サーバー格子）か verify の判断
+  - 未確認: 0 byte の jsonb のメッセージ（`binary jsonb value has 0 bytes, expected 1`）は turn 4 からの持ち越しのまま。T3 は jsonb の OID を `decode_text` に移しただけで分岐の文面は触っていない（既存テストが文面の部分文字列を見ているので、直すなら T9 でテストと同時に）
+  - 未確認: `types_numeric.mojo` / `types_uuid.mojo` の `_usage_error` / `_decode_error` は**モジュールごとに同名で重複定義**している（決めた事項 4 の「`decode_text` を import すると循環するため型モジュール側に private ビルダーを置く」どおり）。T4 / T5 の `types_datetime.mojo` も 3 本目の同じ対を持つことになる。共通化したいなら置き場は `errors.mojo`（verify / T9 の判断）
+  - 未確認: `Decimal` / `UUID` を**サーバー往復**で見るのは T6（拡張型 8 種の格子）。T3 は単体 + `Param` の OID / 形式までで、`SELECT $1::numeric` の往復はまだ 1 件も通していない
