@@ -70,18 +70,22 @@ uuid / json / jsonb）をテキスト・バイナリの両形式で `Row.get[T]`
 ### 4.3 拡張型（`types.mojo` 等の新モジュール。すべて `pq` 直下で公開、`Copyable & Movable & Equatable & Writable`）
 | PostgreSQL | OID | Mojo 型 | 内部表現 | テキスト | バイナリ |
 |---|---|---|---|---|---|
-| numeric | 1700 | `Decimal` | `sign` / `weight: Int16` / `dscale: Int16` / `digits: List[Int16]`（base-10000）+ NaN / +Inf / -Inf（PG14 以降）フラグ | 10 進文字列を自前 parse / format（`1.50`、`-0.001`、`1e5` 形式は受けない） | ndigits, weight, sign, dscale, digits（`numeric_send` と同じ） |
+| numeric | 1700 | `Decimal` | `sign` / `weight: Int16` / `dscale: Int16` / `digits: List[Int16]`（base-10000）+ NaN / +Inf / -Inf（PG14 以降）フラグ | 10 進文字列を自前 parse / format（`1.50`、`-0.001`、`1e5` 形式は受けない） | ndigits, weight, sign, dscale, digits（`numeric_send` と同じ）。**サーバーは ±Infinity を dscale=32 で送ってくる**（research turn 1 実測。NaN は 0）。decode は sign が special なら weight / dscale を無視、encode は 0 を送る（サーバーは受理し 32 に正規化して返す）。往復テストは値比較 |
 | date | 1082 | `Date` | `days: Int32`（2000-01-01 起点） | `YYYY-MM-DD`（紀元前 ` BC` 付きは受ける） | int32 |
 | timestamp | 1114 | `Timestamp` | `micros: Int64`（2000-01-01 00:00:00 起点） | `YYYY-MM-DD HH:MM:SS[.ffffff]` | int64 |
 | timestamptz | 1184 | `TimestampTz` | `micros: Int64`（UTC） | 同上 + オフセット（`+09`、`+09:30`、`-03:00:30`）を解釈して UTC に正規化 | int64（UTC） |
 | time | 1083 | `Time` | `micros: Int64`（0〜86400000000） | `HH:MM:SS[.ffffff]` | int64 |
 | timetz | 1266 | `TimeTz` | `micros: Int64` + `offset_secs: Int32`（PG と同じ符号規則。西が正） | `HH:MM:SS[.ffffff]±HH[:MM[:SS]]` | int64 + int32 |
-| interval | 1186 | `Interval` | `micros: Int64` / `days: Int32` / `months: Int32` | IntervalStyle `postgres` 形式（`1 year 2 mons 3 days 04:05:06.789`、負値 `-1 days +02:00:00` 含む） | int64 + int32 + int32 |
+| interval | 1186 | `Interval` | `micros: Int64` / `days: Int32` / `months: Int32` | IntervalStyle `postgres` 形式（`1 year 2 mons 3 days 04:05:06.789`、負値 `-1 days +02:00:00` 含む）。**PG17 以降は `infinity` / `-infinity` もある**（research turn 1 訂正。PG14 には無い: `'infinity'::interval` は 22007） | int64 + int32 + int32（この順。PG17 の ±infinity は 3 フィールド全部 `MAX` / 全部 `MIN` が番兵） |
 | uuid | 2950 | `UUID` | 16 byte（`InlineArray[UInt8, 16]` 相当） | `8-4-4-4-12`（大文字小文字どちらも受ける。出力は小文字） | 16 byte |
 | json | 114 | `String` | — | そのまま | そのまま |
 | jsonb | 3802 | `String` | — | そのまま | 先頭 1 byte のバージョン（= 1。それ以外は `TYPE_MISMATCH`）を剥がしてテキスト |
-- 日時系の `±infinity`: PG と同じ番兵（`Int64.MAX` / `Int64.MIN`、date は `Int32.MAX` / `Int32.MIN`）を保持し `is_infinite()` / `is_finite()` を持つ。
+- 日時系の `±infinity`: PG と同じ番兵（`Int64.MAX` / `Int64.MIN`、date は `Int32.MAX` / `Int32.MIN`、interval は 3 フィールド全部 MAX / 全部 MIN = PG17 の番兵）を保持し
+  `is_infinite()` / `is_finite()` を持つ（research turn 1 訂正: interval も含める。PG14 では interval の無限値は発生しないので、PG14 向けテストは送らない）。
   テキストは `infinity` / `-infinity` と相互変換
+- テキスト形式の細部（research turn 1 で実測）: timestamptz の ` BC` は**オフセットの後**（`0001-01-01 00:00:00+00 BC`）。オフセットは `+09` / `+05:30` / `+05:53:28` の 3 幅。
+  小数秒は末尾ゼロを削った 1〜6 桁（`.5` = 500000 µs）。年は 4 桁ゼロ埋めで 4 桁超はそのまま（`10000-01-01`）。interval の複数形は値 ≠ 1 のとき（`-1 days`）、
+  `+` 接頭辞は「前に出した成分が負で、この成分が正」のとき（`-1 years +1 day`）、時刻部の時は 2 桁以上で上限なし（`36:00:00`）。詳細は RESEARCH §2.2.3
 - 日時系の分解アクセサ `year() / month() / day() / hour() / minute() / second() / microsecond()` と構築子
   `Date.from_ymd(y, m, d) raises` / `Timestamp.from_ymd_hms(...)` / `TimestampTz.from_utc(...)`（範囲外は `USAGE`）。
   `Interval` は `months / days / micros` の 3 フィールドのまま（正規化はサーバーに任せる）
@@ -104,7 +108,10 @@ uuid / json / jsonb）をテキスト・バイナリの両形式で `Row.get[T]`
 - **成立条件**: research がプローブで「`Result` を破棄した後にその slice を使うコードがコンパイルエラーになる」ことを確かめる。
   不成立（origin が付けられない / `Result` の移動を防げない）なら RESEARCH に根拠を書いてスコープから外し、
   REQ §2 のこの項を「見送り」に書き換える。unsafe な代替 API は公開しない
-- 成立した場合、§5.2 の「`Result` より長生きしない」はコンパイルエラーの陽性対照（PROGRESS にエラーメッセージを貼る）で示す
+- **research turn 1 の判定: 成立**（RESEARCH §2.3.1）。「破棄」の形は **`Result` を消費する移動**（`var r2 = res^` / 関数へ `res^` を渡す）で、
+  その後の slice 使用は `error: use of uninitialized value 'res'` になる。**`_ = res^` はエラーにならず、`Result` の破棄が slice の最後の使用の後まで延びる**
+  （安全だがエラーではない。Mojo の `_ = x^` は生存マーカー）。docstring はこの区別を書く
+- 成立した場合、§5.2 の「`Result` より長生きしない」はコンパイルエラーの陽性対照（**消費する移動の形**。PROGRESS にエラーメッセージを貼る）で示す
 
 ### 4.6 text vs binary の簡易ベンチ（`examples/bench_formats.mojo`、`pixi run bench`）
 - 10 万行 × 5 列（int4, int8, float8, text, timestamp）を `generate_series` で作り、text / binary で全行 `get[T]` した所要を表示
@@ -133,14 +140,16 @@ uuid / json / jsonb）をテキスト・バイナリの両形式で `Row.get[T]`
 - バイナリ形式で `execute` した結果の `column_format(i)` が `BINARY`、`execute(sql)` の結果は `TEXT`
 - 拡張型 8 種を `$1` で送り（§4.4）`SELECT $1::<type>` で同じ値が返る（text / binary の両結果形式）
 - `SHOW DateStyle` が `ISO, YMD`（§4.7）。`examples/bench_formats.mojo` が実行でき所要を表示する（§4.6）
-- zero-copy（§4.5）が成立した場合: `get_text` / `get_bytes` の値が `get[String]` / `get[List[UInt8]]` と一致し、`Result` 破棄後の使用がコンパイルエラー
+- zero-copy（§4.5）が成立した場合: `get_text` / `get_bytes` の値が `get[String]` / `get[List[UInt8]]` と一致し、`Result` を消費する移動（`var r2 = res^` 等）の後の使用がコンパイルエラー
+  （research turn 1 訂正: `_ = res^` は生存延長であってエラーにならない）
 
 ### 5.2 堅牢性（差し戻し対象。Phase 1 / 2 §5.2 を Phase 3 の API に拡張）
 - どの入力・出力状態（長さ不足のバイナリ列、不正な uuid 長、numeric の不正 ndigits / 範囲外 weight、
   jsonb の未知バージョンバイト、テキスト形式の非 ISO 日時文字列、NULL、空結果、未接続・切断後）でも
   クラッシュ・トレースバックを出さず `PgError` で返す
 - 正常系・異常系の両方で `PQclear` / `PQfinish` / `PQfreemem` が呼ばれ、二重解放しない
-- 解放済みポインタへのアクセスが型・所有権の上で起こらない（zero-copy の slice / span が `Result` より長生きしない）
+- 解放済みポインタへのアクセスが型・所有権の上で起こらない（zero-copy の slice / span が `Result` より長生きしない: 消費する移動はコンパイルエラー、`_ = res^` は `Result` の生存が延びる。
+  公開 API は `ref` を返さない — `ref` 束縛は生存延長されない。RESEARCH §0.5）
 - 10,000 回のバイナリ形式 execute（拡張型の列を含む）のループでメモリ使用量が単調増加しない
   （`test_leak` に Phase 3 分のループを追加。判定方式は §5.3）
 
@@ -171,6 +180,9 @@ uuid / json / jsonb）をテキスト・バイナリの両形式で `Row.get[T]`
 8. `tests/test_leak.mojo` の docstring に §5.3 の +83〜85 ページ注記
 9. `Transaction` docstring の「conn.execute との混用」節に「手で `COMMIT` / `ROLLBACK` を送ると破棄時の ROLLBACK が
    サーバー WARNING になる（データは手動 COMMIT どおり）」を 1 文
+10. （research turn 1 追加）`result.mojo` モジュール docstring・`Row` / `RowIter`・`prepared.mojo`・`transaction.mojo`・`connection.prepare` / `transaction` の docstring にある
+    「`Result`（`Connection`）より長生きするのはコンパイルエラー」を「消費する移動（`var r2 = res^` / 関数へ `res^`）の後の使用がコンパイルエラー。`_ = res^` は破棄ではなく生存延長で、
+    `PQclear` は `Row` の最後の使用の後に走る」に直す（RESEARCH §2.3.1 で実測: 現行の文言のまま書いたコードはコンパイルが通り、安全に動く）
 
 ## 7. 既知のサーバー挙動（Phase 2 で実測済み。前 REQ の誤記を訂正した正）
 
