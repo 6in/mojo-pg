@@ -68,3 +68,32 @@
   - 確認済み: `_reject_nul(name, "name")` は `self._check_open()` の**後**・`escape_identifier` の前に置いた（「先頭」を厳密に取ると閉じたブロックでの NUL が USAGE → TYPE_MISMATCH に変わるため、既存の優先順位を保った。REQ §6-6 の目的「メッセージが `in s` でなく `in name`」は満たす）
   - 未確認: T2 で `String(unsafe_from_utf8=span)` の ctor 名（turn 2 の申し送りのまま。最初のコンパイルで確定する）
   - 未確認: `_SESSION_SETUP_SQL` の失敗経路（`SET` が拒否される状況）は再現手段が無く未実測。コードレビューのみ（PLAN「観点の担当」の異常系どおり）
+
+## turn 4 — impl — T2 `ResultFormat` / `result_format` 引数 / `decode_binary`（既存 8 型）/ `Row.get` の形式自動切替
+- やったこと: `ResultFormat`（`PgErrorKind` と同形の Int newtype）と `Result.column_format` / `Row._raw` を `result.mojo` に新設、3 つの `execute`（Connection / PreparedStatement / Transaction）に `result_format: ResultFormat = ResultFormat.TEXT` を追加、
+  `src/pq/decode_binary.mojo` を新設（既存 8 型、長さ厳密 + bool は 0/1 のみ + jsonb version 1 のみ）、`Row.get` / `get_optional` を `PQfformat` で分岐するだけにした。
+  テストは `tests/test_decode_binary.mojo` 44 件（サーバー不要）+ `tests/test_binary.mojo` 14 件（サーバー）。**サブエージェント 3 本を並行**（A: decode_binary + 単体テスト / B: ResultFormat と結線 / C: test_binary.mojo を契約から独立に）。対象ファイルは重ならせず、統合・`fmt` 1 回・全検証は親が実施
+- 想定外:
+  (1) **`bytes: Span[UInt8]`（origin 無し）はコンパイルできない**（`error: 'Span' failed to infer parameter 'origin'`）。決めた事項 3 のシグネチャは `[origin: ImmOrigin, //, T: Copyable]` + `Span[UInt8, origin]` が**必須**で、`Span` を取る全関数（個別 decoder 6 本 + `_be_bits` / `_check_length`）に同じ前置が要る。呼び出し側は `decode_binary[T](span, oid)` のままなので B / C の書き方には影響しなかった
+  (2) **`(-0.0)::float8` では負のゼロにならない**。`-0.0` が numeric リテラルとして解釈され、numeric に符号付きゼロが無いため PG14 / PG17 とも `0` を返す。`'-0'::float8` / `'-0'::float4` と書く必要がある（C が実測して気づき、PLAN を訂正）
+  (3) 追従先チェックリストの `grep -c '^def decode_' src/pq/decode_binary.mojo` の期待値 14 は、`decode_binary` 自身の行を数え落としていた（正しくは 15）
+  (4) `Row.get` が 1 セルにつき `PQftype` + `PQfformat` の 2 回 FFI を呼ぶ形になった。形式は結果全体で一定なので `Result.__init__` で 1 回キャッシュできるが、契約外なので実装せず T8 の bench への申し送りに回した
+- やり直し: 0 回（3 本とも担当範囲は初回で green。親の統合でも修正は不要で、`pixi run fmt` が `result.mojo` / `test_binary.mojo` を整形しただけ）
+- PLAN 訂正: 4 件
+  - 決めた事項 3 のシグネチャを `[origin: ImmOrigin, //, T: Copyable]` + `Span[UInt8, origin]` に（根拠: 想定外 (1) のコンパイルエラー実測）
+  - 追従先チェックリストの `^def decode_` 期待値 14 → **15**（根拠: 想定外 (3)。turn 4 実測は 7 = 6 本 + 自身）
+  - T2 (e) ① に「負のゼロは `'-0'::float8` / `'-0'::float4` と書く」を追記（根拠: 想定外 (2) の実測）
+  - T2 (d) の長さ不一致ケースは bool だけ 3 → **2**（1 byte 型なので「-1 byte」と「0 byte」が同一入力。根拠: A の報告）
+- 既存テストの期待値を変えた箇所: **なし**（T2 (f) のとおり後方互換。`test_result` 15 / `test_params` 31 / `test_prepared` 14 / `test_transaction` 13 / `test_connection` 31 / `test_decode_text` 49 / `test_encode_binary` 14 / `test_errors` 7 / `test_ffi` 7 / `test_leak` 12 / `test_smoke` 4 / `test_loader_fail` 1 が無変更で PASS）
+- 次への注意:
+  - 確認済み: `pixi run test` 両サーバー 15 ファイル全 PASS（新規 2 本が 54317 / 54314 で各 1 回、計 4 回ログに出る）。`pixi run check` **6/6 PASS = 117 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。所要は T1 の 113 s からほぼ変わらず、PLAN の「3 分を超えたら書く」には達していない
+  - 確認済み（所要・単位 ms。TestSuite の `Summary [ N ]` は ms）: `tests/test_binary.mojo` 14 件 = **60.7 ms**（54314）/ **66 ms** 程度（54317）、`tests/test_decode_binary.mojo` 44 件 = **0.025 ms**（サーバー不要なので実質ゼロ）。`test_leak` は 12 件 73.5 s / サーバーで T1 から変化なし
+  - 確認済み: **`String(unsafe_from_utf8=span)` が正しい ctor 名**（UTF-8 検証なし）。turn 2 / turn 3 から持ち越していた未確認事項はこれで解消。検証ありの方は `String(from_utf8=span)`
+  - 確認済み: 追従先チェックリストの T2 行 — `grep -rn 'Phase 3' src/pq --include='*.mojo'` = **`encode_binary.mojo:16` の 1 行だけ**、`grep -c 'result_format'` = connection **6** / prepared **4** / transaction **4**（各 ≥ 2）。中間値は `^def decode_` **7**、`elif T ==` が decode_binary **8** / decode_text **8**（最終目標は各 16）。`grep -rn -- '-> ref' src/pq/*.mojo` = **0**（P19。T7 で再確認する）
+  - 確認済み: `tests/run_tests.sh:76` は `for f in tests/test_*.mojo` の glob なので、新しいテストファイルは runner への追従が不要（T6 / T7 でも同じ）
+  - 未確認: T3 が `decode_text.mojo` に `OID_JSON` / `OID_JSONB` を足したら、`decode_binary.mojo:52-55` の private な `_OID_JSON` / `_OID_JSONB` を import に置き換える（そのためのコメントを 2 行入れてある）。OID の唯一の置き場は `decode_text.mojo` という決めた事項 11 を守るため
+  - 未確認: `decode_binary.mojo` の `_be_bits` は `UInt64` を返すので **8 byte までしか読めない**。T3 の numeric（可変長）・uuid（16 byte）、T5 の interval（16 byte）は自前の読み出しが必要（date / time / timestamp / timestamptz は再利用可）。三つのエラービルダー（`_binary_oid_error` / `_binary_length_error` / `_binary_value_error`）と `_check_length` は再利用すること（テストが文面の部分文字列を見ている）
+  - 未確認: `String` 分岐は「jsonb を先に early return → 残り 5 OID を `and` 連鎖で判定」の二段構造。T3 で文字列系 OID を足すときは**その連鎖を伸ばす**（`elif T == String` を増やすと新 OID が OID 不一致に落ちる）。`else: comptime assert False` は常に最後に置く
+  - 未確認: 0 byte の jsonb のメッセージが `binary jsonb value has 0 bytes, expected 1` で、1 が下限なのに固定幅のような読みになる（kind と拒否は正しい）。T3 で jsonb を触るなら文面を見直す候補
+  - 未確認（T6 / T7 の材料。C が契約外として報告）: `column_format(-1)` の負値、0 列結果（binary DDL / INSERT）の `column_format`、明示 `result_format=ResultFormat.TEXT`、複数行の binary 結果（行オフセットのずれを突く）、未対応 OID を `get_optional` で引いたとき。いずれも T2 の完了基準に無いので足していない
+  - 未確認: 切断後の binary 実行（T2 (e) ⑦）は、C の実測では **PG14 / PG17 とも 2 回目も `CONNECTION`**（SQLSTATE 空）だった。テストは PLAN の文言どおり `CONNECTION` / `SERVER` のどちらでも通る形にしてある。既存 `tests/test_connection.mojo` は無条件 `CONNECTION` を期待しているので、verify が厳しくしたければ締められる
