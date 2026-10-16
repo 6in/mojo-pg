@@ -2,51 +2,61 @@
 
 Layout follows HANDOFF.md §4. Phase 1 adds `_ffi`, `connection`, `result`.
 Phase 2 adds `params`, `prepared`, `transaction`. Phase 3 adds
-`decode_binary` and the `types_*` modules holding the value types for
-PostgreSQL types Mojo has no built-in for.
+`decode_binary`, `types_numeric`, `types_datetime` and `types_uuid` -- the
+binary decoders and the value types for PostgreSQL types Mojo has no
+built-in for.
 
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
 `PreparedStatement`, `Transaction`, the `Decimal`, `UUID`, `Date`,
-`Timestamp`, `TimestampTz`, `Time`, `TimeTz` and `Interval` value types
-for the PostgreSQL types that
-have no Mojo equivalent, the `CONNECTION_OK`
-/ `CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
+`Timestamp`, `TimestampTz`, `Time`, `TimeTz` and `Interval` value types for
+the PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK` /
+`CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
 status constants.
 
 ## Type mapping
 
-`Row.get[T]` and `Row.get_optional[T]` decode a column's text form into `T`.
-The column OID must match `T` exactly: **there is no widening**, so reading
-an `int2` column as `Int32` is a `TYPE_MISMATCH`, and so is reading an `int4`
-column as `Int64`. `String` is the single exception -- it accepts any OID and
-returns the text unchanged.
+`Row.get[T]` and `Row.get_optional[T]` decode a column into `T`, reading
+whichever wire format the column actually arrived in -- see `## Result
+format` below. The column OID must match `T` exactly: **there is no
+widening**, so reading an `int2` column as `Int32` is a `TYPE_MISMATCH`, and
+so is reading an `int4` column as `Int64`.
 
-| PostgreSQL | OID | Mojo type | text form |
-|---|---|---|---|
-| bool | 16 | `Bool` | `t` / `f` |
-| int2 | 21 | `Int16` | decimal |
-| int4 | 23 | `Int32` | decimal |
-| int8 | 20 | `Int64` (also readable as `Int`) | decimal |
-| float4 | 700 | `Float32` | decimal, `NaN` / `Infinity` / `-Infinity` |
-| float8 | 701 | `Float64` | same |
-| numeric | 1700 | `Decimal` | position notation, `NaN` / `±Infinity` |
-| uuid | 2950 | `UUID` | lowercase `8-4-4-4-12` |
-| date | 1082 | `Date` | `YYYY-MM-DD`, ` BC` suffix, `±infinity` |
-| timestamp | 1114 | `Timestamp` | `YYYY-MM-DD HH:MM:SS[.f]`, same |
-| timestamptz | 1184 | `TimestampTz` | same plus the UTC offset |
-| time | 1083 | `Time` | `HH:MM:SS[.f]`, `24:00:00` included |
-| timetz | 1266 | `TimeTz` | same plus `±HH[:MM[:SS]]` |
-| interval | 1186 | `Interval` | `IntervalStyle` `postgres` only |
-| text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is |
-| json, jsonb | 114, 3802 | `String` | as-is; jsonb drops its version byte |
-| bytea | 17 | `List[UInt8]` | `\\x` hex form only |
-| anything else | -- | `String` in the text format only; a binary result raises `TYPE_MISMATCH` | as-is |
+`String` is the one type whose accepted OIDs depend on the format. In text
+it is a wildcard that accepts **any** OID and returns the text unchanged; in
+binary it accepts only the six string-shaped OIDs in the table, because
+there is nothing sensible to hand back for the others.
 
-`pq.decode_text.decode_text` implements the table and is the one place to
-change when a type is added.
+| PostgreSQL | OID | Mojo type | text form | binary form |
+|---|---|---|---|---|
+| bool | 16 | `Bool` | `t` / `f` | 1 byte, 0 or 1 |
+| int2 | 21 | `Int16` | decimal | 2 byte BE |
+| int4 | 23 | `Int32` | decimal | 4 byte BE |
+| int8 | 20 | `Int64` (also readable as `Int`) | decimal | 8 byte BE |
+| float4 | 700 | `Float32` | decimal, `NaN` / `Infinity` / `-Infinity` | IEEE 754, 4 byte BE |
+| float8 | 701 | `Float64` | same | IEEE 754, 8 byte BE |
+| numeric | 1700 | `Decimal` | position notation, `NaN` / `±Infinity` | ndigits, weight, sign, dscale, then base-10000 digits |
+| uuid | 2950 | `UUID` | lowercase `8-4-4-4-12` | 16 byte |
+| date | 1082 | `Date` | `YYYY-MM-DD`, ` BC` suffix, `±infinity` | int32 days from 2000-01-01 |
+| timestamp | 1114 | `Timestamp` | `YYYY-MM-DD HH:MM:SS[.f]`, same | int64 µs from 2000-01-01 |
+| timestamptz | 1184 | `TimestampTz` | same plus the UTC offset | same, always UTC |
+| time | 1083 | `Time` | `HH:MM:SS[.f]`, `24:00:00` included | int64 µs into the day |
+| timetz | 1266 | `TimeTz` | same plus `±HH[:MM[:SS]]` | int64 µs + int32 zone |
+| interval | 1186 | `Interval` | `IntervalStyle` `postgres` only | int64 µs + int32 days + int32 months |
+| text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is | as-is, `PQgetlength` bytes |
+| json | 114 | `String` | as-is | as-is |
+| jsonb | 3802 | `String` | as-is | leading version byte (1) stripped |
+| bytea | 17 | `List[UInt8]` | `\\x` hex form only | the raw bytes |
+| anything else | -- | `String` in text, nothing in binary | as-is | `TYPE_MISMATCH`, pointing at `ResultFormat.TEXT` |
+
+`pq.decode_text.decode_text` and `pq.decode_binary.decode_binary` implement
+one column of the table each, and are the two places to change when a type
+is added. `Row.get_bytes` is outside the table on purpose: it hands back the
+column's bytes as they arrived without consulting the OID at all, so a
+`bytea` read with it is the eight bytes of `\\x00ff00` in text format and the
+three bytes `00 ff 00` in binary -- see `## Zero-copy access`.
 
 ## Result format
 

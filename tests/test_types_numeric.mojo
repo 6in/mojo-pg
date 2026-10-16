@@ -381,5 +381,22 @@ def test_rejects_scale_over_limit() raises:
     assert_true("invalid numeric literal" in _error_message(text))
 
 
+def test_rejects_weight_over_limit() raises:
+    """A literal whose base-10000 weight overflows `Int16` is rejected.
+
+    `weight` is the exponent of the leading base-10000 group, so it only
+    leaves `Int16` once the integer part reaches 131,073 digits -- four
+    decimal digits per step past 32,767. The wire format has no room for a
+    wider exponent, so the constructor refuses instead of truncating.
+    """
+    var text = String("1")
+    for _ in range(131072):
+        text += "0"
+    assert_equal(_error_kind(text), PgErrorKind.USAGE)
+    assert_true("invalid numeric literal" in _error_message(text))
+    assert_equal(_parse_error_kind(text), PgErrorKind.TYPE_MISMATCH)
+    assert_true("cannot decode" in _parse_error_message(text))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -256,7 +256,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - A: `examples/binary.mojo` + `examples/bench_formats.mojo` + `pixi.toml` + `final_check.sh` 4/6（対象: その 4 ファイル）
     - 親: (a)(b)(e)
 
-- [ ] T9: 文書の最終整備（`__init__.mojo` 型マッピング / Parameters 表）+ 受け入れ基準の総点検 + 最終判定
+- [x] T9: 文書の最終整備（`__init__.mojo` 型マッピング / Parameters 表）+ 受け入れ基準の総点検 + 最終判定
   - 完了基準:
     - (a) `src/pq/__init__.mojo:13-34` の型マッピング表を REQ §4.2 / §4.3 の 17 行（+ json / jsonb）に拡張し「text form」「binary form」の 2 列、「anything else」行を「`String` in text format only; `TYPE_MISMATCH` in binary」に。`:36-63` の Parameters 表に 8 型（OID / binary / 幅）。`:3-4` の「Phase 2 adds ...」に「Phase 3 adds `decode_binary`, `types_numeric`, `types_datetime`, `types_uuid`」。
       `## Result format` / `## Zero-copy access` 節（T2 / T7）の内容と矛盾が無いことを読み合わせる
