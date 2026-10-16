@@ -111,13 +111,17 @@ if [ "$doc_missing" -ne 0 ]; then
 fi
 
 # ------------------------------------------------------- 4. examples run
-# Both examples run; either one failing fails the stage. They are judged
-# together because the stage name is what the summary reports, and the two are
-# the same promise: the package's re-exported surface is enough on its own.
+# All examples run; any one failing fails the stage. They are judged together
+# because the stage name is what the summary reports, and they are the same
+# promise: the package's re-exported surface is enough on its own.
+#
+# `examples/bench_formats.mojo` is deliberately absent: it reports timings and
+# has no verdict to give, so `pixi run bench` is where it belongs.
 stage "4/6 examples"
 examples_failed=0
 run_logged mojo run -I src examples/basic.mojo || examples_failed=1
 run_logged mojo run -I src examples/params.mojo || examples_failed=1
+run_logged mojo run -I src examples/binary.mojo || examples_failed=1
 if [ "$examples_failed" -ne 0 ]; then
     fail "4/6 examples"
 fi
@@ -137,11 +141,16 @@ run_logged env PQ_TEST_LEAK_SERVERS=1 bash tests/run_tests.sh || fail "5/6 tests
 # or COMMIT (the server answers those with "there is already a transaction in
 # progress" / "there is no transaction in progress").
 #
+# The default rollback-failure handler's line is counted as a third pattern.
+# It is written to stderr from a destructor, where nothing can raise, so a
+# transaction whose implicit ROLLBACK failed would otherwise pass unnoticed:
+# the test suite is green and the single reported line scrolls past in $LOG.
+#
 # Nothing below may emit the counted literals through say(); they would land in
 # $LOG and count themselves. printf without tee stays out of $LOG, so the
 # report lines are safe -- they are worded without the literals anyway.
 stage "6/6 zero compiler and server warnings in log"
-warnings=$(grep -cE 'warning:|WARNING:' "$LOG" || true)
+warnings=$(grep -cE 'warning:|WARNING:|implicit ROLLBACK failed' "$LOG" || true)
 printf 'matched lines in %s: %s\n' "$LOG" "$warnings"
 if [ "$warnings" -ne 0 ]; then
     failed_stages+=("6/6 warnings ($warnings)")

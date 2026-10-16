@@ -1,17 +1,16 @@
-# PLAN — phase2-params-prepared-tx
+# PLAN — phase3-binary-all-types
 
 - 作成: 2026-10-16 / gsd-lite-plan（turn 2）
-- 入力: REQUIREMENTS.md / DECISIONS.md / RESEARCH.md / `.gsd-lite/reflect/20261015-2308-phase1-sync-text-basic.md` /
-  `archive/phase1-sync-text-basic/{PLAN,VERIFICATION}.md` / `src/pq/*.mojo` / `tests/*` / `.pixi/envs/default/include/libpq-fe.h`
-- 対象リポジトリ: `.`（in-repo 形）。`CLAUDE.md` / `AGENTS.md` は無い（`find . -maxdepth 1 -name 'CLAUDE.md' -o -name 'AGENTS.md'` 空）
+- 入力: REQUIREMENTS.md / DECISIONS.md / RESEARCH.md / `.gsd-lite/reflect/20261016-0246-phase2-params-prepared-tx.md`（直近）/
+  `.gsd-lite/reflect/20261015-2308-phase1-sync-text-basic.md` / `archive/phase2-params-prepared-tx/PLAN.md`（書式の手本）/
+  `src/pq/*.mojo` / `tests/*` / `examples/*` / `HANDOFF.md` §4・§6・§8・§10・§11
+- 対象リポジトリ: `.`（in-repo 形）。`CLAUDE.md` / `AGENTS.md` は無い（`ls CLAUDE.md AGENTS.md` → 両方 "そのようなファイルやディレクトリはありません"）
 - 無人シェルの注意（RESEARCH 冒頭と同じ）: `mojo` / `pixi` は PATH に無い → **`/home/parallels/.pixi/bin/pixi run ...`**。`rg` は無い（`grep`）。
-  docker の DB は `tests-pg17-1`（127.0.0.1:54317）/ `tests-pg14-1`（127.0.0.1:54314）が healthy で起動中（plan 時点 `docker ps`）
-- **plan 時のプローブ**（`.gsd-lite/logs/phase2-params-prepared-tx/scratch/turn-002-cyc/`。出力 4 行すべて期待どおり、警告なし）:
-  (1) パッケージ内の**循環 import**（`a.mojo` が `from .b import Tx, default_handler`、`b.mojo` が `from .a import Conn`）は Mojo 1.1.0 で通る →
-  `connection.mojo` ↔ `transaction.mojo` / `prepared.mojo` の相互 import を前提にしてよい。
-  (2) `from std.sys import stderr` + `print("...", message, sep="", file=stderr)` が動く（既定ハンドラの実装）。
-  (3) `from std.os import setenv, getenv` の往復（`setenv(name, value, True)`）が動く（テスト用フックの観測手段）。
-  (4) `Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(self._counter.unsafe_ptr()))[] += 1` で不変 `self` からカウンタ更新（`pq_stmt_1` / `pq_stmt_2`）
+  docker の DB は `tests-pg17-1`（127.0.0.1:54317）/ `tests-pg14-1`（127.0.0.1:54314）が healthy で起動中（plan 時点 `docker ps`、Up 24 hours）。
+  Mojo は 1.1.0 (8189361e)（`pixi run mojo --version`）。lean-ctx MCP は未接続（素の Read / Bash で可）
+- research のプローブ（`.gsd-lite/logs/phase3-binary-all-types/scratch/turn-001-*`、gitignore 対象）は impl が**雛形として開いてよい**:
+  `probe-binary.mojo`（`Params` / `exec_fmt` / hex ダンプ）、`probe-zerocopy-neg6.mojo`（zero-copy の 3 行と陽性対照の形）、
+  `probe-civil.mojo`（Hinnant 暦算法、そのまま写せる）、`probe-bench.mojo`（ベンチ SQL と計時）、`probe-binary-pg17.log` / `-pg14.log`（期待値の原本）
 
 ## 検証コマンド
 
@@ -19,452 +18,369 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 ```bash
 /home/parallels/.pixi/bin/pixi run db-up        # 環境の初期化（--wait 付き。起動済みなら即終了）
-/home/parallels/.pixi/bin/pixi run test         # tests/run_tests.sh: 54317 → 54314 の順に tests/test_*.mojo を 1 ファイル 1 プロセス。T1 以降 test_leak は build/test_leak（mojo build 済み）で実行
-/home/parallels/.pixi/bin/pixi run mojo run -I src tests/test_params.mojo    # 単一ファイル（PQ_TEST_CONNINFO 未設定なら 54317）
+/home/parallels/.pixi/bin/pixi run test         # tests/run_tests.sh: 54317 → 54314 の順に tests/test_*.mojo を 1 ファイル 1 プロセス（test_leak は build/test_leak）
+/home/parallels/.pixi/bin/pixi run mojo run -I src tests/test_decode_binary.mojo   # 単一ファイル（サーバー不要のものは PQ_TEST_CONNINFO 無関係）
+/home/parallels/.pixi/bin/pixi run mojo run -I src tests/test_binary.mojo          # 単一ファイル（PQ_TEST_CONNINFO 未設定なら 54317）
+/home/parallels/.pixi/bin/pixi run mojo build -I src tests/test_leak.mojo -o build/test_leak   # leak だけ手で回すとき（run_tests.sh と同じ）
 /home/parallels/.pixi/bin/pixi run package      # mojo precompile src/pq -o build/pq.mojoc（警告ゼロ確認）
 /home/parallels/.pixi/bin/pixi run check        # 最終判定: bash tests/final_check.sh（6 段、exit 0 が合格）
 ```
 
 - 環境の初期化（テストの前に毎回）: `/home/parallels/.pixi/bin/pixi run db-up`
-- 最終判定（クリーンな状態から全検査。verify と T7 が使う）: **`/home/parallels/.pixi/bin/pixi run check`**
-  - **T1 完了まで**は 1/6 段が `git diff` 判定なので **`check` はコミット後にだけ回す**（未コミットの整形済み差分で落ちる。reflect 提案 2）。
-    T1 で「コピーに `mojo format` → `diff -r`」に変えたあとは作業木のままで回せる
-  - T1 以降 `check` の 5/6 段は `PQ_TEST_LEAK_SERVERS=1` で `test_leak` を **PG17（54317）だけ**回す。`pixi run test` は両方で回す（REQ §5.3）
-  - 6/6 段は `warning:`（コンパイラ）に加えて **`WARNING:`（libpq の notice processor がサーバー WARNING を stderr に出したもの）も 0 件**を要求する（T1 で追加。P13）
-- 所要の目安: Phase 1 末の `check` は 96 s（test_leak 42〜43 s/サーバー）。T1 で 1 サーバー化、T6 で Phase 2 ループ 4 本（各 10,000 回）が乗る。
-  **T6 完了時点の実測: `check` 82 s（test_leak 1 サーバー 57〜58 s）、`pixi run test` 5〜6 分**（当初見込みの `check` 2〜3 分は過大 — T6 の PLAN 訂正）。impl は所要を PROGRESS に書く。
-  **T7 完了時点の実測: `check` 111 s**（4/6 段が example 2 本で 4 s、test_leak 59 s。82 s からの差の大半は同一コードでの実行ごとのばらつき — turn 9 の PLAN 訂正。目安は 80〜115 s と読む）
+- 最終判定（クリーンな状態から全検査。verify と T9 が使う）: **`/home/parallels/.pixi/bin/pixi run check`**
+  - 1/6 段はコピーに `mojo format` → `diff -r` なので**作業木のまま**回せる（Phase 2 T1 で修正済み。`tests/final_check.sh:57-79`）
+  - 5/6 段は `PQ_TEST_LEAK_SERVERS=1` で `test_leak` を PG17 だけ（`final_check.sh:127`）。`pixi run test` は両サーバーで回す
+  - 6/6 段は `grep -cE 'warning:|WARNING:'`（`final_check.sh:144`）。T1 で `|implicit ROLLBACK failed` を足す（REQ §6-2）。**見出し行と `say()` にこれらの文字列を含めない**
+- 所要の目安（Phase 2 末の実測: `check` 80〜115 s、`pixi run test` 5〜6 分、test_leak 1 サーバー 57〜59 s）。Phase 3 で乗るもの:
+  `Connection.open` の SET 1 往復（約 +1 ms × connect ループ 10,000 回 ≒ +10 s）、leak ループ 2 本（約 +5 s）、example 1 本、
+  新テストファイル 7 本（各 2〜10 s）。**`check` は 2〜3 分、`pixi run test` は 7〜8 分と見込む**（未確認。impl は所要を PROGRESS に単位付きで書く）
+  - **T1 実測（turn 3）**: `check` **113 s**（6/6 PASS。1/6 fmt 1 s・2〜4/6 計 7 s・5/6 tests 105 s・6/6 grep 0 s）、
+    `pixi run test` **約 200 s**（両サーバー 13 ファイル。test_leak は 74 s / サーバー）。GUC の SET 1 往復を足しても Phase 2 末（80〜115 s / 5〜6 分）とほぼ同じで、見込みは過大だった
+- PG14 / PG17 の差は interval の ±infinity だけ（RESEARCH §2.2.7）。**PG17 限定ケースは `conn.server_version() >= 170000`（`src/pq/connection.mojo:712-719`）で分岐**。他は全テスト両サーバー同一期待値
 
 ## 追従先チェックリスト
 
 | 変更の種類 | 直す場所 | 確かめ方 |
 |---|---|---|
-| libpq 関数のバインディングを足す（T2: 50 → **53 本**） | `src/pq/_ffi/functions.mojo` のフィールド + `__init__` の `_dl_sym` 行（`# libpq-fe.h:<行>` コメント付き）、`tests/test_ffi.mojo` の `_symbol_names()` と `assert_equal(len(names), 53)`、テスト名 `test_all_fifty_symbols_present` → `test_all_symbols_present`、本 PLAN の「53 本」 | `grep -c '^    var PQ' src/pq/_ffi/functions.mojo` = 53、`grep -cE '^        (String\()?"PQ[A-Za-z]+"\)?,$' tests/test_ffi.mojo` = 53、`grep -c fifty tests/test_ffi.mojo` = 0、`grep -n '50 本' .gsd-lite/PLAN.md .gsd-lite/PROGRESS.md` = 0 件（REQ §4.6 の「現在 50 本」は discuss 時点の記述なので触らない） |
-| `PgErrorKind` を足す（T2: `USAGE`） | `src/pq/errors.mojo` の定数 + `write_to` の名前表 + モジュール / struct docstring の「five」、`src/pq/__init__.mojo` の `## PgErrorKind` 一覧（「exactly five」）、`tests/test_errors.mojo` | `grep -rnE 'exactly five|the five failure|five failure' src/pq` = 0 件（`__init__.mojo:8` の「the five `PQTRANS_*`」は別物で残る）、`grep -c 'USAGE' src/pq/errors.mojo` ≥ 3 |
-| 公開 struct を足す（`Param` / `PreparedStatement` / `Transaction`） | `src/pq/__init__.mojo` の再エクスポート + モジュール docstring（T3 / T4 / T5 で 1 行ずつ、文書は T7）、docstring 診断 | `grep -nE 'Param|PreparedStatement|Transaction' src/pq/__init__.mojo` が 3 型とも出る、`mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -vE "'(__init__\|__deinit__\|__copyinit__\|__moveinit__)'" \| grep -c 'doc string'` = 0 |
-| `Row.get[T]` の対応型を足す | （Phase 2 では足さない） | — |
-| `examples/` を足す（T7: `params.mojo`） | `pixi.toml` `[tasks]` に `example-params`、`tests/final_check.sh` 4/6 段に実行行 | `grep -rn 'examples/' pixi.toml tests/final_check.sh` に `examples/params.mojo` が両方出る |
-| テストファイルを足す | 無し（`run_tests.sh` は glob）。ただし **`tests/test_leak.mojo` だけ名前で特別扱い**（T1: `build/test_leak` を実行） | `pixi run test` のログに新ファイル名が 2 回出る（leak は `PQ_TEST_LEAK_SERVERS` 未設定なら 2 回） |
-| libpq を呼ぶ新しい経路を足す | `char*` は即 `String` にコピー、`PQfreemem` は `connection.mojo` の `escape_literal` / `escape_identifier` 各 1 回のみ（savepoint は `escape_identifier` 経由）、`PQexec` の直呼びは `Connection.execute(sql)`、`Connection.prepare` の describe 失敗時 DEALLOCATE、2 つの `__deinit__`（Transaction の ROLLBACK / PreparedStatement の DEALLOCATE。raise できないので `_take_result` を使えない）の 4 箇所のみ | `grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行、`grep -rn 'PQexec(' src/pq/*.mojo` = 4 行（connection ×2 / transaction / prepared）、`grep -rc get_function src/pq` 全 0 |
-| 埋め込み NUL の経路を足す | `sql` は `_reject_nul(sql, "sql")`（TYPE_MISMATCH、Phase 1 規則）、String パラメータは `params.mojo` で **USAGE**（REQ §4.1。決めた事項 20） | `grep -rn '_reject_nul' src/pq` に `connection.mojo` の `execute(sql, params)` が追加されている |
-| テスト環境の環境変数を足す（T1: `PQ_TEST_LEAK_SERVERS`） | `tests/run_tests.sh` 冒頭コメント、`tests/final_check.sh` 5/6 段、本 PLAN「検証コマンド」 | `grep -rn PQ_TEST_LEAK_SERVERS tests/run_tests.sh tests/final_check.sh` ≥ 2 |
-| リークループを足す（T6） | `tests/test_leak.mojo` のモジュール docstring（ループ数・所要）、本 PLAN T6 | `grep -c '^def test_' tests/test_leak.mojo` = 12（4 単体 + 4 Phase 1 + 4 Phase 2） |
+| `Row.get[T]` の対応型を足す（T3〜T5: 8 型） | `src/pq/decode_text.mojo:156-236` の `comptime if` 分岐 + `:132-155` docstring の型一覧、`src/pq/decode_binary.mojo`（T2 新設）の分岐 + docstring、`src/pq/result.mojo:377-392` の `Row.get` 表、`src/pq/__init__.mojo:13-34` の型マッピング表、`examples/binary.mojo`（T8）、`src/pq/__init__.mojo` の再エクスポート | `grep -c 'elif T ==' src/pq/decode_text.mojo` = 16（現 8）、`grep -c 'elif T ==' src/pq/decode_binary.mojo` = 16、`grep -nE 'Decimal|Date|Timestamp|UUID|Interval' src/pq/__init__.mojo` に 8 型全部、`grep -c 'anything else' src/pq/__init__.mojo` = 1（行は残すが「`String`（text 形式）のみ。binary では `TYPE_MISMATCH`」に書き換え） |
+| OID 定数を足す（T3〜T5: 10 個） | `src/pq/decode_text.mojo:18-49`（現 11 個。ここが唯一の置き場。`params.mojo:51-59` / `decode_binary.mojo` はここから import） | `grep -c '^comptime OID_' src/pq/decode_text.mojo` = 21、`grep -rn 'UInt32(1700)\|UInt32(1082)\|UInt32(2950)' src/pq --include='*.mojo' \| grep -v decode_text.mojo` = 0 件（定数を他所に重複定義しない） |
+| `Param` の `@implicit` ctor を足す（T3〜T5: 8 型 × 2 = 16 本） | `src/pq/params.mojo:4`「Nineteen `@implicit` constructors」→ **Thirty-five**、`src/pq/params.mojo:87-99` struct docstring、`src/pq/connection.mojo:301-313` の `execute(sql, params)` 表、`src/pq/__init__.mojo:36-63` の Parameters 表、`tests/test_params.mojo:496` `test_param_oids_and_formats` 系に新型の OID / `is_binary()` | `grep -c '@implicit' src/pq/params.mojo` = **36**、`grep -c Nineteen src/pq/params.mojo` = 0、`grep -c Thirty-five src/pq/params.mojo` = 1（**turn 5 訂正**: この grep はモジュール docstring の「`@implicit` constructors」行も数えるので **実 ctor 数 + 1**。元の期待値 35 は実 ctor 数で、grep 値ではなかった。ctor だけ数えるなら `grep -c '^    @implicit'`。T3 完了時点の実測は grep 24 / ctor 23） |
+| `encode_binary.mojo` に encoder を足す（T3〜T5: 8 本） | `src/pq/encode_binary.mojo:3`「Holds exactly six encoders」→ **fourteen** + 一覧、`tests/test_encode_binary.mojo:119-125` `test_encoded_widths_are_fixed` に固定長の型（date 4 / timestamp 8 / timestamptz 8 / time 8 / timetz 12 / interval 16 / uuid 16） | `grep -c '^def encode_' src/pq/encode_binary.mojo` = 14、`grep -c 'exactly six' src/pq/encode_binary.mojo` = 0 |
+| `decode_binary.mojo` に decoder を足す | 名前は `encode_<pgtype>` / `decode_<pgtype>` で対（`encode_binary.mojo:16-18` の約束） | `grep -c '^def decode_' src/pq/decode_binary.mojo` = **15**（bool / int16 / int32 / int64 / float32 / float64 / numeric / date / timestamp / timestamptz / time / timetz / interval / uuid の 14 本 **+ `decode_binary` 自身**が同じ grep に当たる。**turn 4 訂正**: 元の期待値 14 は `decode_binary` の行を数え落としていた。turn 4 時点の実測は 7 = 6 本 + 自身。**turn 5 実測**: 9 = 6 本 + `decode_numeric` + `decode_uuid` + 自身）（text 系・bytea・jsonb は `decode_binary[T]` 内で直接扱い、関数は作らない） |
+| `execute` に `result_format` 引数を足す（T2） | `src/pq/connection.mojo:286-288` / `:326-327`「Results always come back in text form; a binary `result_format` is Phase 3.」、`src/pq/prepared.mojo:127` / `:138-139`（同文）、`src/pq/transaction.mojo:393`（`execute(sql, params)` の passthrough）、`src/pq/__init__.mojo` に `ResultFormat` の節 | `grep -rn 'Phase 3' src/pq --include='*.mojo'` が `encode_binary.mojo:16`（名前の対の説明）と `__init__.mojo` の Layout 行（**turn 5 訂正**: 期待値 1 → **2**。`__init__.mojo` 冒頭は「Phase 1 adds ... Phase 2 adds ...」を列挙する既存文で、T3 でその続きに Phase 3 の追加モジュールを書いた。placeholder の「a binary `result_format` is Phase 3.」ではない）の 2 行だけ（**turn 3 訂正**: 元の `grep -rn 'is Phase 3'` は該当文が `is` と `Phase 3.` の間で行送りされているため変更前でも 0 件で、検査にならない）、`grep -c 'result_format' src/pq/connection.mojo src/pq/prepared.mojo src/pq/transaction.mojo` が各 ≥ 2 |
+| 公開 struct を足す（`ResultFormat` / `Decimal` / `Date` / `Timestamp` / `TimestampTz` / `Time` / `TimeTz` / `Interval` / `UUID`） | `src/pq/__init__.mojo:102-116` の再エクスポート + モジュール docstring、docstring 診断（3/6 段） | `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -vE "'(__init__\|__deinit__\|__copyinit__\|__moveinit__)'" \| grep -c 'doc string'` = 0、`from pq import ResultFormat, Decimal, Date, Timestamp, TimestampTz, Time, TimeTz, Interval, UUID` が `examples/binary.mojo` でコンパイルする |
+| `examples/` を足す（T8: `binary.mojo` / `bench_formats.mojo`） | `pixi.toml:17-18` の並びに `example-binary` / `bench`、`tests/final_check.sh:117-123` の 4/6 段に `examples/binary.mojo` の実行行（**`bench_formats.mojo` は足さない**: 合否なし。P29） | `grep -c 'examples/binary.mojo' pixi.toml` / 同 `tests/final_check.sh` が各 1、`grep -c 'bench_formats' pixi.toml` = 1、`grep -c '^[^#]*bench_formats' tests/final_check.sh` = 0 かつ `grep -c '^#.*bench_formats' tests/final_check.sh` = 1（**turn 11 訂正**: 元の `grep -rn 'examples/' ...` 目視は `final_check.sh:118` の「`examples/bench_formats.mojo` is deliberately absent: ...」という**意図を述べたコメント**を拾って FAIL に見える。実行行（`run_logged`）は無く P29 は満たしているので、コメントを残したまま検査できる形に分けた） |
+| テストファイルを足す（T2〜T7 で 7 本） | 無し（`run_tests.sh:76` は glob）。サーバー不要のファイルも両サーバーで 2 回回る（`run_tests.sh:15-17` の方針） | `pixi run test` のログに新ファイル名が 2 回出る |
+| リークループを足す（T8: 2 本） | `tests/test_leak.mojo:33`「Twelve tests」→ **Fourteen** + 箇条書きに Phase 3 の段、`:47-51` の所要見積もり | `grep -c '^def test_' tests/test_leak.mojo` = 14、`grep -c Twelve tests/test_leak.mojo` = 0 |
+| `test_connection` にテストを足す（T1: 3 件） | 無し（件数を書いた文書は無い） | `grep -c '^def test_' tests/test_connection.mojo` = 31（現 28） |
+| libpq を呼ぶ新しい経路を足す | T1 の `SET` は `Connection.execute(sql)` 経由（`PQexec` 直呼びは増やさない）。zero-copy は `PQgetvalue` / `PQgetlength` の読み出しのみで解放経路は増えない | `grep -rn 'PQexec(' src/pq/*.mojo` = 4 行のまま（connection ×2 / transaction / prepared）、`grep -rn 'PQfreemem(' src/pq/*.mojo` = 2 行のまま |
+| 生存期間の docstring 文言（REQ §6-10） | `src/pq/result.mojo:14-17` / `:340-347`、`src/pq/prepared.mojo:8-11`、`src/pq/transaction.mojo:11-13`、`src/pq/connection.mojo:422-424` / `:759-762` の「outlive ... compile error」 | `grep -rn 'compile error' src/pq/*.mojo` の各行が「消費する移動（`var r2 = res^` / 関数へ `res^`）の後の使用」の文脈になっている（`connection.mojo:6` の `var b = a` は別物で残る）。T7 の陽性対照でその文言が事実であることを示す |
+| `ref` を返す公開 API を作らない（P19） | `src/pq/*.mojo` | `grep -rn -- '-> ref' src/pq/*.mojo` = 0 件（T7 で 1 回確かめて PROGRESS に書く。`final_check.sh` には足さない） |
 
 ## Tasks
 
-- [x] T1: 持ち越し整理（REQ §6）+ リーク測定を `mojo build` バイナリに切り替え（§5.3）+ `final_check.sh` の fmt 判定 / WARNING 計数
-  - **PLAN 訂正（turn 3 実測）**: (d) の 1/6 段は `mojo format --quiet build/fmtcheck/src ...` と**ディレクトリを渡しては動かない**。
-    `mojo format` はディレクトリ走査時に `.gitignore` の除外を尊重し、コピー先の `build/` が除外されるため
-    `No Mojo files are present to be formatted` で何も整形せず、`diff -r` が常に一致して**段が常に PASS する無言の no-op**になる。
-    `find build/fmtcheck -name '*.mojo' -type f -print0` の**明示的なファイル列**を渡す形に変更した（明示指定されたファイルは除外されない。Mojo 1.1.0 実測）。
-    陽性対照で `src/pq/errors.mojo` を崩すと実際の `pixi run check` が 1/6 段だけで FAIL することを確認済み
-  - **PLAN 訂正（turn 3 実測）**: (f) の `TOLERANCE_PAGES` は **256 を維持**（16 には下げない）。built binary の 16 系列中 2 系列に +83 ページの一段が出たため（PLAN の分岐どおり）
+- [x] T1: 持ち越し整理（REQ §6 の 10 件）+ 接続直後の GUC 固定（REQ §4.7）+ `test_connection` 3 件
   - 完了基準:
-    - (a) docstring 3 件（REQ §6-1。前回 VERIFICATION round 2 残留リスク）:
-      `src/pq/connection.mojo:239-240` の `execute` Raises の `CONNECTION` 説明を「libpq returns no result at all, or the connection was lost while running `sql` **and libpq reported it without an SQLSTATE**（sqlstate 付きの FATAL が先に届いた切断は `SERVER` のまま、次の `execute` で `CONNECTION`）」に；
-      `src/pq/result.mojo:423-424` / `:484-485`（`Row.get[T](col: String)` / `get_optional[T](col: String)` の Raises）の「when `col` contains a NUL byte」に「the message names `name`, the argument of `Result.column_index` it delegates to（`embedded NUL byte in name`）」を足す（テストは `name` を assert 済みなので docstring 側を直す）；
-      `tests/test_leak.mojo:48-59` `PAYLOAD_BYTES` docstring の「first sample is taken before `ABORT_PAGES` is reached」を「`ABORT_PAGES` は最初のサンプルからの増分なので、サンプル間隔 × `PAYLOAD_BYTES` が `ABORT_PAGES` より十分小さく、リークは数サンプル以内で打ち切られる」に書き直す。
-      あわせて `tests/test_leak.mojo:1-28` のモジュール docstring と `:87-101` `TOLERANCE_PAGES` docstring を「`tests/run_tests.sh` が `mojo build` したバイナリで実行する（コンパイラの常駐ヒープが無い。`mojo run` で直接回すと 64 KiB payload のおかげで検出はできるが +83 ページの一段で偽陽性になり得る）」に合わせて書き直す（数値は (f) の決定後に）
-    - (b) REQ §6-2（`PQ_MOJO_LIBPQ` 設定時はその 1 本のみ）: コード変更なし。`grep -n 'that one path only' src/pq/_ffi/loader.mojo` が 1 件あることを PROGRESS の追従先チェックリスト ✓ に書く
-    - (c) REQ §6-4（`OID_TEXT` 等 4 定数）: T1 ではコード変更なし（T3 の `params.mojo` が `pq.decode_text` の `OID_*` を import して `Param` の型 OID に使い、T4 のテストが `OID_TEXT` を参照する。決めた事項 4）
-    - (d) `tests/final_check.sh` 1/6 段（REQ §6-3 / P23）: `rm -rf build/fmtcheck && mkdir -p build/fmtcheck` → `cp -r src tests examples hello.mojo build/fmtcheck/` → `mojo format --quiet build/fmtcheck/src build/fmtcheck/tests build/fmtcheck/examples build/fmtcheck/hello.mojo` →
-      `diff -r -q src build/fmtcheck/src`（tests / examples / hello.mojo も同様）。差分があれば差分ファイル名を `say` して `fail "1/6 fmt (diff not empty)"`。`git diff` は使わない（RESEARCH §2.3 の実測手順。`mojo format` に `--check` は無い）。
-      **陽性対照**（同じターンで実測、PROGRESS に貼る）: `src/pq/errors.mojo` の 1 行をわざと `   x = 1` のように崩した作業木で 1/6 段の各コマンドを手で順に実行し `diff` が非 0 になること、元に戻して `diff` が 0 になること。
-      6/6 段: `grep -c 'warning:'` を `grep -cE 'warning:|WARNING:'` にして **libpq が stderr に出すサーバー WARNING**（`WARNING:  there is already a transaction in progress` 等。RESEARCH F2 / F4）も 0 件を要求する（P13。見出し行にこの文字列を含めない）。
-      5/6 段: `run_logged env PQ_TEST_LEAK_SERVERS=1 bash tests/run_tests.sh`（見出しに「test_leak on the first server only」）。4/6 段は T7 で `examples/params.mojo` を足すまで `basic` のみ
-    - (e) `tests/run_tests.sh`（REQ §5.3 / P7）: ループの前に `mkdir -p build` → `mojo build -I src tests/test_leak.mojo -o build/test_leak`（`== mojo build tests/test_leak.mojo` を echo、失敗なら `status=1` にして leak は skip 扱いで続行）。
-      サーバーごとのループで `tests/test_leak.mojo` のときだけ `build/test_leak` を実行（他は従来の `mojo run -I src "$f"`）。サーバーの通し番号（0 始まり）が `PQ_TEST_LEAK_SERVERS`（既定: 無制限）以上なら
-      `-- $label tests/test_leak.mojo skipped (PQ_TEST_LEAK_SERVERS=N)` を出して回さない。冒頭コメントに `PQ_TEST_LEAK_SERVERS` の意味（`check` が 1 を渡す）と「leak はビルド済みバイナリで回す理由（`mojo run` の常駐ヒープ）」を書く。
-      `build/test_leak` は `.gitignore` の `build/` 配下（確認: `.gitignore:6`）
-    - (f) `TOLERANCE_PAGES` の決定（D4 / P6）: (e) のあと `pixi run test` を **2 回**（= PG17 ×2 + PG14 ×2 の leak 系列 4 組 × 4 ループ）回し、16 系列すべてを PROGRESS に貼る。
-      **全系列で `samples[-1] - samples[0] ≤ 8` かつ +83 ページの一段が 1 回も無ければ `TOLERANCE_PAGES = 16`**。一段が 1 回でも出たら 256 のまま維持し、理由（出たループと系列）を PROGRESS に書く（REQ §5.3 のフォールバック）。
-      どちらでも `is_leaking` の単体テスト 4 件（tolerance 16 を引数で渡す）は変更しない
-    - (g) **陽性対照**（REQ §5.3。同じターン、`.gsd-lite/logs/phase2-params-prepared-tx/scratch/turn-NNN-leaksrc/` に `src/pq` をコピーして `mojo build -I <copy> tests/test_leak.mojo -o <scratch>/turn-NNN-test_leak_<name>`。雛形: `scratch/turn-001-leaksrc/`、RESEARCH §2.3）:
-      ① `Result.__deinit__` の `PQclear`（`src/pq/result.mojo:99`）を `pass` に → `test_connect_query_close_does_not_leak` が **FAIL**（研究時: 5 サンプル目で `ABORT_PAGES` 超過）；
-      ② `escape_literal` の `PQfreemem`（`connection.mojo:350`）を消す → `test_escape_literal_does_not_leak` が **FAIL**。両方のサンプル列を PROGRESS に貼る（PG17 でよい）。REQ は「いずれか」だが PQclear と PQfreemem の 2 経路で検出力を示す
-    - (h) `pixi run test` 両サーバー PASS（ログに `== mojo build` 行、`build/test_leak` が存在、54314 側は leak を回す）。**作業木が未コミットのまま** `pixi run check` が 6/6 PASS（(d) の効果。ログに `skipped (PQ_TEST_LEAK_SERVERS=1)` が 54314 側で出る）。
-      `check` と `test` の所要秒数、test_leak の 1 サーバー所要を PROGRESS に書く
-  - 対象: `src/pq/connection.mojo`, `src/pq/result.mojo`, `tests/test_leak.mojo`, `tests/run_tests.sh`, `tests/final_check.sh`
+    - (a) REQ §6-1: `src/pq/prepared.mojo:127-163`（`execute` docstring）に「A prepared statement binds values of the **same width** the server resolved at `PQprepare` time: `$1::int4` wants `Int32`, and passing `Int` (`int8`) is SQLSTATE `22P03`」を 1 文、
+      `src/pq/__init__.mojo:36-63`（Parameters 節）に同趣旨を 1 文
+    - (b) REQ §6-2: `tests/final_check.sh:144` を `grep -cE 'warning:|WARNING:|implicit ROLLBACK failed'` に（`transaction.mojo:89` の既定ハンドラが `pq: implicit ROLLBACK failed: ` を stderr に出す）。
+      見出し行（`:143`）・コメントにこの文字列を書かない（コメントは「the default rollback-failure handler's line」のように言い換える）。陽性対照: `printf 'pq: implicit ROLLBACK failed: x\n' >> build/final_check.log` を手で足した状態で 6/6 段の grep が 1 を返すことを確かめ、ログを消す
+    - (c) REQ §6-3: `tests/test_prepared.mojo:543-544` の `find("3")` / `find("1")` を `find("takes 3 parameters, got 1") >= 0` の 1 行に
+    - (d) REQ §6-4: `src/pq/connection.mojo:103-113`（`Connection.__init__` docstring）に `_stmt_counter`（per-connection、`prepare` が `pq_stmt_<n>` を採番）と `_rollback_failure_handler`（既定は stderr 1 行。`transaction()` 時にコピーされる）の説明
+    - (e) REQ §6-5: `src/pq/prepared.mojo:227-237` の `param_type_oid` を、`len(self._param_types) == 0` なら `parameter index N out of range (statement takes no parameters)`、それ以外は現行のまま。`tests/test_prepared.mojo` に 0 パラメータ文で `"takes no parameters"` を含むことを 1 件
+    - (f) REQ §6-6: `src/pq/transaction.mojo:283-309` / `:312-339` / `:342-365`（`savepoint` / `rollback_to` / `release`）の先頭で `_reject_nul(name, "name")`（`escape_identifier` の `_reject_nul(s, "s")`（`connection.mojo:691`）より先）。
+      `tests/test_savepoint.mojo` の NUL テストの期待を `"embedded NUL byte in name"` に（現状 `in s` を期待している箇所があれば直す。`grep -n 'in s' tests/test_savepoint.mojo` で確認）
+    - (g) REQ §6-7: `src/pq/params.mojo:454-456`（binary 分岐）と `:466-477`（text 分岐）の前に `if len(params[i]._data) > 0x3FFFFFFF: raise PgError(USAGE, "parameter $N is too large (N bytes; libpq takes at most 1073741823)")`。
+      テストは不要（1 GiB の確保を避ける）。docstring（`:425-440` Raises）に 1 行
+    - (h) REQ §6-8 / D4: `tests/test_leak.mojo:115-134` の `TOLERANCE_PAGES` docstring を「256 を**恒久仕様**とする。+83〜85 ページの一段が 1 回出ることがある（**glibc arena の拡張と推測、未特定**）」に書き換える（現行の「a lazy first-use allocation somewhere under libpq」は推測の主語を glibc arena に改め、未特定である旨を明記）
+    - (i) REQ §6-9: `src/pq/transaction.mojo:99-119`（「Use the value on its last line」節）に「Sending `COMMIT` / `ROLLBACK` by hand through `conn.execute` ends the block on the server; the implicit `ROLLBACK` at destruction then draws a server `WARNING: there is no transaction in progress`, and the data stays as the manual command left it」を 1 文
+    - (j) REQ §6-10: 追従先チェックリスト「生存期間の docstring 文言」の 6 箇所を「A `Row` is bound to the `Result`'s origin, so using it after the result has been **moved away** (`var r2 = res^`, or passing `res^` to a function) is a compile error (`use of uninitialized value`). `_ = res^` is **not** a destroy: it is a keep-alive marker, and `PQclear` runs after the last use of any `Row` or slice borrowed from the result」の趣旨に（`Transaction` / `PreparedStatement` / `Connection` は主語を替えて同文）。`src/pq/__init__.mojo:65-75` の Transactions 節の `_ = x^` の説明は現行で正しいので触らない
+    - (k) REQ §4.7 / D12 / P16 / P17: `src/pq/connection.mojo` に `comptime _SESSION_SETUP_SQL = "SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'"` を置き、`_adopt`（`:127-156`）の末尾を
+      `var connection = Connection(conn, pq); _ = connection.execute(String(_SESSION_SETUP_SQL)); return connection^` にする。失敗時は `execute` が raise し、`connection` の `__deinit__`（`:121-124`）が `PQfinish` する（別途 `PQfinish` を書かない。kind は `_take_result` の分類どおり `SERVER`（22023 等）または `CONNECTION`）。
+      `open(String)` / `open(Dict)` の docstring Raises に「`SERVER` when the session setup `SET` is rejected; the connection is closed before raising」を足し、`_adopt` の docstring に 2 文を 1 つの `PQexec` で送る理由（暗黙トランザクションで両方 or 無し。RESEARCH §0-4）と「Phase 4 の非同期接続も同じ SQL を最初のクエリステップとして送る」を書く
+    - (l) `tests/test_connection.mojo` に 3 件: `test_open_fixes_datestyle`（`SHOW DateStyle` → `get[String](0) == "ISO, YMD"`）、`test_open_fixes_intervalstyle`（`SHOW IntervalStyle` → `"postgres"`）、`test_client_encoding_is_utf8`（`SHOW client_encoding` → `"UTF8"`。P20）。
+      `open(Dict)` 経由でも `SHOW DateStyle` が `ISO, YMD` であることを `test_open_fixes_datestyle` の中で 2 本目の接続として確かめる
+    - (m) `pixi run test` 両サーバー PASS（test_connection 31 件、test_prepared / test_savepoint の変更分）、`pixi run check` 6/6 PASS（作業木のまま）。所要を PROGRESS に書く
+  - 対象: `src/pq/prepared.mojo`, `src/pq/__init__.mojo`, `src/pq/connection.mojo`, `src/pq/transaction.mojo`, `src/pq/params.mojo`, `src/pq/result.mojo`, `tests/final_check.sh`, `tests/test_prepared.mojo`, `tests/test_savepoint.mojo`, `tests/test_leak.mojo`, `tests/test_connection.mojo`
   - 依存: なし
-  - 並列サブ作業:
-    - A: docstring 3 件 + `test_leak.mojo` の docstring 書き換え（数値は親が (f) で確定して最後に直す）（対象: `src/pq/connection.mojo`, `src/pq/result.mojo`, `tests/test_leak.mojo` の docstring 部分のみ。コードは触らない）
-    - B: `run_tests.sh` の `mojo build` 分岐 + `PQ_TEST_LEAK_SERVERS` / `final_check.sh` の 1/6・5/6・6/6 段（対象: `tests/run_tests.sh`, `tests/final_check.sh`）
-    - 親: (f) の実測と `TOLERANCE_PAGES` の決定、(g) の陽性対照、(d) の fmt 陽性対照、(h)
+  - 並列サブ作業（推奨本数: **1**。docstring 編集が散るだけで実行待ちは `test` 1 回）:
+    - A: (a)(d)(h)(i)(j) の docstring 編集のみ（対象: `src/pq/prepared.mojo`, `src/pq/__init__.mojo`, `src/pq/connection.mojo` の docstring 部分, `src/pq/transaction.mojo` の docstring 部分, `src/pq/result.mojo`, `tests/test_leak.mojo` の docstring 部分。コードは触らない）
+    - 親: (b)(c)(e)(f)(g)(k)(l)(m)
 
-- [x] T2: 基盤 — `_ffi` 3 本（53 本）+ `PgErrorKind.USAGE` + `Result.command_tag()` + `Connection._take_result` 抽出 + `encode_binary.mojo`
-  - **PLAN 訂正（turn 4 実測）**: (e) の `encode_int16` / `encode_int32` は「シフト `(v >> (8*(n-1-i))) & 0xFF`」を
-    **符号付き型に直接適用できない**。`SIMD.__rshift__` の rhs は `Self` 固定で `v >> Int` が通らず、
-    符号付き右シフトは符号拡張するため上位バイトが `0xFF` で埋まる。`bitcast[DType.uint16/uint32, 1](v)` で
-    ゼロ拡張してから `UInt64` に広げ、共通ヘルパ `_be_bytes(bits: UInt64, size: Int)` でシフトする形にした
-    （シフトで組む点・ホストのエンディアンに依存しない点は PLAN どおり。`memcpy` / ポインタ再解釈は使っていない）。
-    (f) の期待値 16 件はすべて PLAN の数値どおり実測一致
+- [x] T2: `ResultFormat` / `result_format` 引数 / `Result.column_format` + `decode_binary.mojo`（既存 8 型）+ `Row.get` の形式自動切替 + `tests/test_decode_binary.mojo` + `tests/test_binary.mojo`
   - 完了基準:
-    - (a) `src/pq/_ffi/functions.mojo` の「result inspection」節に **決めた事項 2 の表**どおり 3 フィールド + `__init__` の `_dl_sym` 3 行（`# libpq-fe.h:600 / 607 / 608`）。
-      `tests/test_ffi.mojo`: `_symbol_names()` に `"PQcmdStatus"`, `"PQnparams"`, `"PQparamtype"` を足し `assert_equal(len(names), 53)`、関数名を `test_all_symbols_present` に改名。追従先チェックリスト 1 行目の 3 コマンドが 53 / 53 / 0
-    - (b) `src/pq/errors.mojo`: `comptime USAGE = Self(5)`（docstring: 「The caller misused the `pq` API. Detected client-side; nothing was sent to the server, so `sqlstate` and the other diagnostics are empty.」）、`write_to` に `"Usage"`、`errors.mojo:3` / `:13` の「five」→「six」+ 一覧に `USAGE` を追加。
-      `src/pq/__init__.mojo:36-47` の `## PgErrorKind` を「exactly six」にして `USAGE` (`Usage`) の箇条書きを足す。
-      `tests/test_errors.mojo` に追加: `PgErrorKind.USAGE.value == 5`、`String(PgErrorKind.USAGE) == "Usage"`（`String(PgError(PgErrorKind.USAGE, "m"))` に `kind=Usage` を含む）、`PgErrorKind.USAGE != PgErrorKind.TYPE_MISMATCH`
-    - (c) `src/pq/result.mojo`: `command_tag(self) -> String`（`String(unsafe_from_utf8_ptr=self._pq[].PQcmdStatus(self._res))`。NULL にはならない。prepare / describe の結果では空文字。docstring に J5〜J7 の例 `SELECT 1` / `UPDATE 0` / `CREATE TABLE`）。
-      `tests/test_result.mojo` に追加: `SELECT 1` → `"SELECT 1"`、`CREATE TEMP TABLE pq_p2_tag(x int)` → `"CREATE TABLE"`、`INSERT INTO pq_p2_tag VALUES (1),(2)` → `"INSERT 0 2"`、`UPDATE pq_p2_tag SET x = 0 WHERE false` → `"UPDATE 0"`
-    - (d) `src/pq/connection.mojo`: `_take_result(self, res: PGresultPtr) raises PgError -> Result` に `connection.mojo:251-304`（NULL → CONNECTION、TUPLES_OK / COMMAND_OK → `Result`、EMPTY_QUERY → `PQclear` + `SERVER "empty query"`、それ以外 → 診断コピー → `PQclear` → sqlstate 空 かつ `CONNECTION_BAD` なら CONNECTION）を**そのまま移す**。
-      `execute(sql)` は `_reject_nul` → `PQexec` → `_ = sql^` → `return self._take_result(res)` の 4 行。docstring に「`execute(sql, params)` / `PreparedStatement.execute` / `Transaction` の各コマンドも同じ `_take_result` を通る」。挙動変更なし: `tests/test_connection.mojo` の 28 件が無変更で PASS
-    - (e) `src/pq/encode_binary.mojo`（決めた事項 8）: `encode_bool(v: Bool) -> List[UInt8]`（1 byte: 1 / 0）、`encode_int16(v: Int16)`（2 byte BE）、`encode_int32(v: Int32)`（4）、`encode_int64(v: Int64)`（8）、
-      `encode_float32(v: Float32)`（`bitcast[DType.uint32, 1](v)` → 4 byte BE）、`encode_float64(v: Float64)`（`bitcast[DType.uint64, 1](v)` → 8）。実装はシフト `(v >> (8*(n-1-i))) & 0xFF`（`scratch/turn-001-probe-encode.mojo:15-20` の `be_bytes`。ホストのエンディアン非依存）。
-      モジュール docstring に「Phase 3 の `decode_binary` はこの逆。関数名は `encode_<pgtype>` / `decode_<pgtype>` で対にする」
-    - (f) `tests/test_encode_binary.mojo`（DB 不要）: RESEARCH §2.2 probe-encode の実測値をそのまま期待値に — `encode_int16(-32768) == [0x80, 0x00]`、`encode_int16(32767) == [0x7f, 0xff]`、`encode_int32(-1)` が 0xff ×4、`encode_int32(2147483647) == [0x7f, 0xff, 0xff, 0xff]`、
-      `encode_int64(Int64.MIN) == [0x80, 0, 0, 0, 0, 0, 0, 0]`、`encode_int64(-1)` が 0xff ×8、`encode_int64(42)` が `[0,0,0,0,0,0,0,0x2a]`、`encode_bool(True) == [1]` / `False == [0]`、
-      `encode_float32(1.5) == [0x3f, 0xc0, 0, 0]`、`encode_float32(NaN) == [0x7f, 0xc0, 0, 0]`（`Float32(0.0) / Float32(0.0)`）、`+inf == [0x7f, 0x80, 0, 0]`、`-inf == [0xff, 0x80, 0, 0]`、
-      `encode_float64(-0.0) == [0x80, 0, 0, 0, 0, 0, 0, 0]`（`-Float64(0.0)`）、`encode_float64(NaN) == [0x7f, 0xf8, 0, 0, 0, 0, 0, 0]`、`encode_float64(1.5) == [0x3f, 0xf8, 0, 0, 0, 0, 0, 0]`。各関数の `len` が 1 / 2 / 4 / 8 / 4 / 8
-    - (g) `pixi run test` 両サーバー PASS（test_ffi 53 / test_errors / test_result / test_encode_binary）、`pixi run package` 警告ゼロ、`pixi run check` 6/6（作業木のまま）
-  - 対象: `src/pq/_ffi/functions.mojo`, `tests/test_ffi.mojo`, `src/pq/errors.mojo`, `src/pq/__init__.mojo`, `tests/test_errors.mojo`, `src/pq/result.mojo`, `tests/test_result.mojo`, `src/pq/connection.mojo`, `src/pq/encode_binary.mojo`, `tests/test_encode_binary.mojo`
-  - 依存: T1（`check` を作業木で回せること）
-  - 並列サブ作業:
-    - A: `_ffi` 3 本 + `test_ffi.mojo`（対象: `src/pq/_ffi/functions.mojo`, `tests/test_ffi.mojo`。契約: 決めた事項 2 の表の thin 型をそのまま）
-    - B: `USAGE` + docstring「five → six」+ `test_errors.mojo`（対象: `src/pq/errors.mojo`, `src/pq/__init__.mojo`, `tests/test_errors.mojo`）
-    - C: `encode_binary.mojo` + `test_encode_binary.mojo`（対象: `src/pq/encode_binary.mojo`, `tests/test_encode_binary.mojo`。契約: 決めた事項 8 のシグネチャ、期待値は (f)）
-    - D: `Result.command_tag()` + `test_result.mojo` 追記 + `Connection._take_result` 抽出（対象: `src/pq/result.mojo`, `tests/test_result.mojo`, `src/pq/connection.mojo`）
+    - (a) `src/pq/result.mojo`: **決めた事項 1** の `ResultFormat`。`Result.column_format(self, i: Int) raises PgError -> ResultFormat`（範囲検査は `column_type_oid`（`:222-239`）と同形、`PQfformat`（`_ffi/functions.mojo:101-103`）の 0 / 1 を写す）。
+      `Row._raw(self, col: Int) -> Span[UInt8, Self.origin]`（private。`PQgetvalue` のアドレスを `Pointer[UInt8, Self.origin](unsafe_from_address=)` に、長さは `PQgetlength`。RESEARCH §3-11 の 3 行。`_check_cell` 済み前提）。
+      `Row.get[T]` / `get_optional[T]`（`:368-418` / `:450-479`）は「`_check_cell` → NULL 検査 → **`PQfformat` が 1 なら `decode_binary[T](self._raw(col), oid)`、0 なら従来の `decode_text[T](self._res[]._text(...), oid)`**」の分岐だけにする（REQ §4.2 末尾）。
+      `Row.get` docstring の表（`:380-389`）に「binary」列を足し、「`String` は text では任意 OID、binary では文字列系 OID のみ」「`List[UInt8]` は両形式とも bytea のみ」を書く
+    - (b) `src/pq/connection.mojo:286-288` を `execute(self, var sql: String, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT)`、`:362` の `c_int(0)` を `c_int(result_format.value)` に。
+      `src/pq/prepared.mojo:127` を `execute(self, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT)`、`:188` 同様。`src/pq/transaction.mojo:393` の `execute(sql, params)` に同じ引数を足して `self._conn[].execute(sql^, params, result_format)` に渡す（**決めた事項 2**）。
+      3 箇所の「Results always come back in text form; a binary `result_format` is Phase 3.」を「`result_format` selects text (default) or binary results for **every** column; `Row.get` reads `PQfformat` and decodes accordingly, so callers do not change」に。`execute(sql)` 単体は `PQexec` のまま（docstring に「always text; use `execute(sql, [], result_format=ResultFormat.BINARY)` for binary」）。
+      `src/pq/__init__.mojo` に `from .result import Result, ResultFormat, Row` と `## Result format` 節（既定 TEXT、全列一括、`column_format(i)`、binary の `String` 制限）
+    - (c) `src/pq/decode_binary.mojo`（新設。**決めた事項 3** のシグネチャと分岐、**決めた事項 4** のメッセージ）: `decode_binary[T: Copyable](bytes: Span[UInt8], oid: UInt32) raises PgError -> T` と `decode_bool / decode_int16 / decode_int32 / decode_int64 / decode_float32 / decode_float64`（`encode_binary.mojo` の 6 本の逆。`bitcast[DType.float32, 1](UInt32)` / `bitcast[DType.int16, 1](UInt16)` 等。RESEARCH §0.5）。
+      長さ検査は各 decoder の先頭（P21）。`String` は OID 25 / 1043 / 1042 / 19 / 114 / 3802 のみ、3802 は先頭 1 byte が 1 であることを検査して剥がす（P22。長さ 0 の jsonb は `TYPE_MISMATCH`）。`List[UInt8]` は 17 のみ。`Int` は 20 を `Int64` と同じに。
+      **binary の `String` は `PQgetlength` の長さで `String(unsafe_from_utf8=span)` にコピーする**（NUL を含み得るので C 文字列扱いしない。REQ §4.2。UTF-8 は検証しない — text 経路 `_text`（`result.mojo:312-337`）と同じ前提。P20 の docstring）
+    - (d) `tests/test_decode_binary.mojo`（サーバー不要。雛形は `tests/test_decode_text.mojo:10-82` の `_ok[T]` / `_error_kind[T]` / `_error_message[T]`。`Span[UInt8](list)` で渡す）。期待値は RESEARCH §2.2.1 の hex をそのまま:
+      bool `01` / `00` → True / False、`02` → `TYPE_MISMATCH` + `"expected 0 or 1"`（P24）；int2 `8000` / `7fff` → -32768 / 32767；int4 `80000000` / `7fffffff`；int8 `8000000000000000` / `7fffffffffffffff`（`Int64` と `Int` の両方）；
+      float4 `7fc00000` → isnan、`7f800000` / `ff800000` → ±inf、`80000000` → -0.0（`1.0 / x` が -inf で判定）、`3fc00000` → 1.5；float8 `7ff8000000000000` → isnan、`8000000000000000` → -0.0、`3fb999999999999a` → 0.1、`7e37e43c8800759c` → 1e300；
+      text `68c3a96c6c6f`（oid 25）→ `"héllo"`、長さ 0 → `""`、`68c3a96c6c6f` を oid 1043 / 1042 / 19 / 114 でも `String` に、`01 7b7d`（oid 3802）→ `"{}"`、`02 7b7d`（3802）→ `TYPE_MISMATCH` + `"version byte is 2"`、長さ 0 の 3802 → `TYPE_MISMATCH`；
+      `00 68 00`（oid 25）→ `byte_length() == 3`（NUL を含む text）；bytea `00ff00` → `[0, 255, 0]`、長さ 0 → `[]`；
+      **長さ不一致**（P21）: bool / int2 / int4 / int8 / float4 / float8 それぞれ「-1 byte」「+1 byte」「0 byte」の 3 ケースが `TYPE_MISMATCH` でメッセージに `"bytes, expected <n>"`（n は 1 / 2 / 4 / 8 / 4 / 8）。**turn 4 訂正**: bool だけは 1 byte 型なので「-1 byte」と「0 byte」が同一入力で、0 byte / 2 byte の 2 ケースになる；
+      **OID 不一致**（P23 / D9）: `Int32` を oid 20 で、`String` を oid 23 / 600 / 1007 で、`List[UInt8]` を oid 25 / 600 で要求 → `TYPE_MISMATCH` でメッセージに `"oid <n>"` と `"ResultFormat.TEXT"`。
+      `ResultFormat.TEXT.value == 0` / `BINARY.value == 1` / `String(ResultFormat.BINARY) == "Binary"` / `TEXT != BINARY` も 1 件
+    - (e) `tests/test_binary.mojo`（サーバー。雛形は `tests/test_result.mojo:56-120` のラッパー群。両サーバー同一期待値）:
+      ① `execute(sql, [], result_format=ResultFormat.BINARY)` で RESEARCH A1〜A8 の 8 型を取り、同じ SQL の text 結果と `get[T]` が**値一致**（float は `isnan` / 同符号 inf / `-0.0`、bpchar は両方 `"ab   "`、`1e300` の text は `"1e+300"` だが `Float64` 比較で一致）；
+      **turn 4 訂正**: 負のゼロの SQL リテラルは `'-0'::float8` / `'-0'::float4` と書く。`(-0.0)::float8` は `-0.0` が **numeric リテラルとして解釈され** numeric に符号付きゼロが無いため PG14 / PG17 とも `0` を返し、検査したい性質が消える（turn 4 実測）；
+      ② `column_format(i)` が binary 結果で全列 `BINARY`、`execute(sql)` の結果で `TEXT`、`execute(sql, [])`（既定）で `TEXT`、`column_format(ncols)` が `TYPE_MISMATCH`；
+      ③ `PreparedStatement.execute([...], result_format=ResultFormat.BINARY)` と `Transaction.execute(sql, [], result_format=BINARY)` でも `column_format(0) == BINARY` で値が読める；
+      ④ **未対応 OID の格子**（P23 / RESEARCH X1）: `SELECT ARRAY[1,2]::int4[], point(1,2), 1::oid, 'a'::"char", int4range(1,5), 1.5::money, '08:00:2b:01:02:03'::macaddr` を binary で取り、7 列 × {`String`, `List[UInt8]`, `Int32`} の 21 セルが全部 `TYPE_MISMATCH` でメッセージに `"oid "` と `"ResultFormat.TEXT"`。同じ SQL を text で取ると `get[String]` が 7 列とも通る（Phase 1 規則）；
+      ⑤ 0 行の binary 結果（`SELECT 1 WHERE false`）で `row_count() == 0`、binary 付き DDL / INSERT（`CREATE TEMP TABLE` / `INSERT`）が `command_tag()` `CREATE TABLE` / `INSERT 0 1`（RESEARCH X2〜X4）；
+      ⑥ NULL 列を binary で `get[Int32]` → `NULL_VALUE`、`get_optional[Int32]` → None、`is_null` → True；
+      ⑦ 切断後の binary 実行: `SELECT pg_terminate_backend(pg_backend_pid())` の後の `execute("SELECT 1", [], result_format=BINARY)` が `CONNECTION`（または最初の 1 回だけ `SERVER`。`tests/test_connection.mojo:660` `test_terminated_backend_then_connection_error` と同じ形）で、トレースバックを出さない（REQ §5.2「未接続・切断後」。binary も `_take_result` を通ることの確認）。
+      NUL を含む text の binary 読み出しはサーバーが作れない（`chr(0)` は 54000）ので (d) の単体テストだけで担保する
+    - (f) `tests/test_result.mojo` / `tests/test_params.mojo` / `tests/test_prepared.mojo` / `tests/test_transaction.mojo` が無変更で PASS（既定 TEXT の後方互換）。`pixi run test` 両サーバー PASS、`pixi run check` 6/6
+  - 対象: `src/pq/result.mojo`, `src/pq/connection.mojo`, `src/pq/prepared.mojo`, `src/pq/transaction.mojo`, `src/pq/__init__.mojo`, `src/pq/decode_binary.mojo`, `tests/test_decode_binary.mojo`, `tests/test_binary.mojo`
+  - 依存: T1
+  - 並列サブ作業（推奨本数: **3**。契約は決めた事項 1〜4）:
+    - A: `decode_binary.mojo` + `tests/test_decode_binary.mojo`（対象: その 2 ファイルのみ）
+    - B: `ResultFormat` / `column_format` / `Row._raw` / `Row.get` 分岐 / 3 つの `execute` の引数 / `__init__.mojo`（対象: `src/pq/result.mojo`, `src/pq/connection.mojo`, `src/pq/prepared.mojo`, `src/pq/transaction.mojo`, `src/pq/__init__.mojo`）
+    - C: `tests/test_binary.mojo`（対象: その 1 ファイル。A / B の API は契約どおりに書き、親が統合後にコンパイルを通す）
+    - 親: 統合・`fmt` 1 回・(f)
 
-- [x] T3: `params.mojo`（`Param` + `_ParamBuffers`）+ `Connection.execute(sql, params)` + `tests/test_params.mojo`
-  - **PLAN 補強（turn 5 実測）**: (a) の「バイナリはそのまま」は保ちつつ、`_ParamBuffers` が
-    バイナリ用バッファを `capacity=len+1` で確保するようにした。libpq は `values[i]` が NULL なら
-    `lengths[i]` に関わらず SQL NULL と解釈するため、**空 `bytea` パラメータが黙って NULL になる**
-    経路があった（空 `List[UInt8]` の `unsafe_ptr()` が NULL を返すかは stdlib の実装詳細）。
-    決めた事項 5 の末尾ダミー 1 要素と同じ趣旨の非 NULL 保証を内側のバッファにも広げた形。
-    送るバイト列は `_data` のままで `lengths` も変えていない
+- [x] T3: `Decimal`（`types_numeric.mojo`）+ `UUID`（`types_uuid.mojo`）+ json / jsonb の `String` 扱い + 両型の codec / `Param` ctor + 単体テスト
   - 完了基準:
-    - (a) `src/pq/params.mojo`: **決めた事項 4** の `Param`（`@implicit` 構築 19 本 + `Param.null()` / `Param.null(oid)`、`oid()` / `is_null()` / `is_binary()`）と **決めた事項 5** の `_ParamBuffers`（`PQexecParams` / `PQexecPrepared` 用の types / values / lengths / formats。
-      `lengths` / `formats` は **`List[c_int]`**（P3）、各 List に末尾ダミー 1 要素、テキストは NUL 付きバイト列、String パラメータに NUL があれば **`PgError(USAGE, "embedded NUL byte in parameter $N")`**（N は 1 始まり。P4）。
-      `OID_*` は `pq.decode_text` から import（REQ §6-4）
-    - (b) `src/pq/connection.mojo`: `execute(self, var sql: String, params: List[Param]) raises PgError -> Result`（決めた事項 6）。docstring に「params が空でも `PQexecParams`。**単一文のみ**（複数文は 42601）。`$1`〜`$n`。送信形式の表（REQ §4.1）。
-      `String` は OID 0 なので `SELECT $1` は text、`SELECT $1 + 1` は int4 に推論される（A2 / L12）。`Int` は int8 で int4 列へは assignment cast で入る（B1）。`result_format` は常にテキスト（Phase 3 で引数化）」。
-      `src/pq/__init__.mojo` に `from .params import Param` を足す（docstring の表は T7）
-    - (c) `tests/test_params.mojo`（PQ_TEST_CONNINFO 必須。`CREATE TEMP TABLE pq_p2_*` で自己完結）に少なくとも:
-      1. **全型往復（REQ §5.1）**: `CREATE TEMP TABLE pq_p2_types(b bool, i2 int2, i4 int4, i8 int8, n int8, f4 float4, f8 float8, t text, by bytea, z int4)` →
-         `execute("INSERT INTO pq_p2_types VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [True, Int16(-32768), Int32(2147483647), Int64.MIN, Int(42), Float32(1.5), Float64(-2.5), "héllo", <List[UInt8] [0,1,0,255]>, Param.null()])` が `affected_rows() == 1` / `command_tag() == "INSERT 0 1"` →
-         `SELECT * FROM pq_p2_types` を `get[Bool](0)` … `get[List[UInt8]](8)` で一致、`is_null(9)`、`column_type_oid` が 16/21/23/20/20/700/701/25/17/23
-      2. **SQL インジェクション（REQ §5.1 / §5.1a、テキスト経路）**: `CREATE TEMP TABLE pq_p2_inj(t text)` → `execute("INSERT INTO pq_p2_inj VALUES ($1)", ["'; DROP TABLE pq_p2_inj; --"])` → `SELECT count(*) FROM pq_p2_inj` = 1、`SELECT t FROM pq_p2_inj` が原文と一致（テーブルが残っている = 2 つ目の SELECT が通る）
-      3. **境界値（REQ §5.1a、`SELECT $1::<type>`）**: Int16 -32768 / 32767 / 0 / -1；Int32 -2147483648 / 2147483647；Int64 `Int64.MIN` / `Int64.MAX`；Int `Int.MIN` / `Int.MAX`（`get[Int]`）；
-         Float32 1.5 / NaN（`isnan`）/ +inf / -inf（`isinf` + 符号）/ **-0.0**（`bitcast[DType.uint32, 1](get[Float32]) == 0x80000000`。P17）；Float64 同 4 種（-0.0 は `0x8000000000000000`）；
-         空 bytea → `len == 0`；NUL 入り bytea `[0x61, 0, 0x62]` → 3 byte 一致（K2）；空文字 → `""`；**64 KiB の text と 64 KiB の bytea を同じ文で**（`SELECT $1::text, $2::bytea`）→ 長さと内容が一致（P5）
-      4. **NULL（D14）**: `Param.null()` を `SELECT $1::int4` → `is_null(0)`；`Param.null(23)` を `SELECT $1` → `column_type_oid(0) == 23`（A4）；`Param.null()` を `SELECT $1` → OID 25（A3。PG14 / 17 で 42P18 にはならない）；
-         `var none: Optional[Int] = None` を `SELECT $1` → NULL かつ OID 20；`Optional[Int](7)` → 7；`Optional[String]` の Some / None；`Optional[Bool](None)` → OID 16
-      5. **型推論（P22）**: `SELECT $1` に `"hello"` → OID 25 かつ値一致；`SELECT $1 + 1` に `"7"` → `get[Int32] == 8`（L12）；`SELECT $1` に `Int(1)` → OID 20（L10）
-      6. **型不一致（P18。REQ §5.1a の題材差し替え、決めた事項 14）**: `CREATE TEMP TABLE pq_p2_i4(x int4)`；`[True]` → `kind == SERVER` かつ `sqlstate != ""`（実測 42804、L1）；`[Int(3000000000)]` → sqlstate `"22003"`（L4）；`[Int(5)]` は **成功**（B1、assignment cast）を正として固定
-      7. **個数不一致はサーバー任せ（REQ §4.2）**: `execute("SELECT $1::int4, $2::int4", [1])` → `SERVER`、sqlstate `"08P01"`、直後 `execute("SELECT 1")` が通り `status() == CONNECTION_OK`（C1 / C2）
-      8. **空 SQL / 複数文（P8）**: `execute("", [])` → `SERVER`, message `"empty query"`（C5）；`execute("SELECT 1; SELECT 2", [])` → `42601`（C3）；`execute("SELECT 1;", [])` は成功（C4）
-      9. **NUL（P4 / 決めた事項 20）**: `execute("SELECT $1", ["ab" + chr(0) + "cd"])` → `kind == USAGE`、message `"embedded NUL byte in parameter $1"`、sqlstate 空、直後 `execute("SELECT 1")` が通る；`execute("SELECT 1" + chr(0) + "x", [])` → `TYPE_MISMATCH` `"embedded NUL byte in sql"`
-      10. **12 パラメータ混在（P3、RESEARCH A1 そのまま）**: `SELECT $1,$2,...,$12` に bool / Int16(-32768) / Int32(2147483647) / Int64.MIN / Float32 NaN / Float64 -0.0 / text `'; DROP TABLE x; --` / bytea `[0,1,0,255]` / `Param.null()` を `$9::int4` / 空 bytea / 空 text / Float64 +inf →
-          OID 16/21/23/20/700/701/25/17/23/17/25/701 と各値（2 個目以降のバイナリ長がずれていないことの検査）
-      11. **aborted tx 内（H3）**: `execute("BEGIN")` → `execute("SELEC")` 失敗 → `execute("SELECT $1", [1])` → `25P02` → `execute("ROLLBACK")`
-      12. **`Param` の構築（DB 不要、同ファイル先頭）**: `Param.null().oid() == 0` / `is_null()`、`Param.null(23).oid() == 23`、`Param(Int(1)).oid() == 20` / `is_binary()`、`Param(Int16(1)).oid() == 21`、`Param(Float32(1)).oid() == 700`、`Param("a").oid() == 0` / `not is_binary()` / `not is_null()`、
-          `Param(<List[UInt8]>).oid() == 17` / `is_binary()`、`Param(Optional[Int32](None)).oid() == 23` / `is_null()`、`Param(Optional[String](None)).oid() == 0`；リスト literal `var ps: List[Param] = [1, "a", 1.5, True, Param.null()]` が `len == 5` で各 OID 20 / 0 / 701 / 16 / 0
-    - (d) `pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ、`pixi run check` 6/6
-  - 対象: `src/pq/params.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`, `tests/test_params.mojo`
+    - (a) `src/pq/types_numeric.mojo`: **決めた事項 5** の `Decimal`。`Decimal(text: String) raises PgError`（`USAGE`）/ `Decimal.parse(text) raises PgError -> Self`（`TYPE_MISMATCH`）/ `Decimal.nan()` / `infinity()` / `negative_infinity()` / `dscale() -> Int` / `is_nan()` / `is_infinite()` / `is_finite()` / `__eq__` / `__ne__` / `write_to` / `_from_parts(sign, weight, dscale, var digits)`（normalize）。
+      文字列化は RESEARCH §3-1（`get_str_from_var`）、解釈は §3-2（`set_var_from_str`）。D14: `1e5` / `0x10` / 空 / `.` / `-` / `+` / 空白付きは拒否（P26）。dscale > 16383 は拒否（P6）。weight が Int16 に収まらない桁数は拒否
+    - (b) `tests/test_types_numeric.mojo`（サーバー不要）: RESEARCH §4 の P2〜P6 / P26 の検証欄をそのまま:
+      `String(Decimal("1.50")) == "1.50"`（`dscale() == 2`）、`"-0.001"`、`"0"`、`"0.00"`、`"0.000001"`、`"12345678.9"`、`"1000000"`、`"123456789012345678901234567890.123456789"`、`"12.3400"`、`"0.0001"`、`"0.5"`、`"-0.5"` が往復一致；`Decimal("+1")` → `"1"`；`Decimal("1.")` → `"1"`；`Decimal(".5")` → `"0.5"`；
+      `"1" + "0" × 130` が往復一致（長さ 131。P4）；`Decimal("1.0") == Decimal("1.00")`、`"0" == "0.00"`、`"NaN" == "NaN"`、`"1" != "-1"`、`"Infinity" == "Infinity"`、`"Infinity" != "-Infinity"`、`"NaN" != "Infinity"`（P5）；
+      `String(Decimal.nan()) == "NaN"`、`infinity()` → `"Infinity"`、`negative_infinity()` → `"-Infinity"`、`is_infinite()` / `is_nan()` / `is_finite()` の真偽表；
+      拒否（P26）: `"1e5"`, `"0x10"`, `""`, `"."`, `"-"`, `" 1"`, `"1 "`, `"1.2.3"`, `"inf"`, `"nan"`, `"1_000"` が ctor で `USAGE`（メッセージに `invalid numeric literal`）、`Decimal.parse` で `TYPE_MISMATCH`（`cannot decode`）；16,384 桁の小数（`"0." + "1" × 16384`）が `USAGE`
+    - (c) `src/pq/types_uuid.mojo`: **決めた事項 6** の `UUID`。`UUID(bytes: Array[UInt8, 16])` / `UUID(text: String) raises PgError`（`USAGE`）/ `UUID.parse(text)`（`TYPE_MISMATCH`）/ `write_to`（小文字 `8-4-4-4-12`）/ `__eq__` / `__ne__`。入力は大文字小文字どちらも、`{}` 囲みと ハイフン無しは**拒否**（PG の `uuid_in` より狭い。D14 の流儀）
+    - (d) `tests/test_types_uuid.mojo`: `"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"` 往復、`"A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"` → 小文字出力で前者と `==`、全ゼロ / 全 `f` の往復、拒否: 35 文字 / 37 文字 / `g` を含む / ハイフン位置違い / `{...}` が ctor `USAGE`（`invalid uuid literal`）・`parse` `TYPE_MISMATCH`
+    - (e) codec と結線（親）: `decode_text.mojo` に `OID_NUMERIC = 1700` / `OID_UUID = 2950` / `OID_JSON = 114` / `OID_JSONB = 3802` と `elif T == Decimal: ... Decimal.parse(text)` / `elif T == UUID`（OID 不一致は `_oid_error`）；
+      `decode_binary.mojo` に `decode_numeric(bytes) raises -> Decimal`（長さ ≥ 8、`8 + 2*ndigits == len`、sign 5 値、dscale ≤ 0x3FFF、digit 0..9999。special は sign だけ見て dscale 0。P1 / P21）と `decode_uuid`（16 byte）と `T == Decimal` / `T == UUID` 分岐；
+      `encode_binary.mojo` に `encode_numeric(d: Decimal)`（special は `0000 0000 <sign> 0000`）/ `encode_uuid(u: UUID)`；`params.mojo` に `Decimal` / `Optional[Decimal]` / `UUID` / `Optional[UUID]` の `@implicit`（OID 1700 / 2950、binary）；`__init__.mojo` に再エクスポート
+    - (f) codec の単体テスト: `tests/test_decode_binary.mojo` に RESEARCH §2.2.2 の表 **全 20 行**の hex → `String(Decimal)` 一致（`0000 0000 d000 0020` → `"Infinity"` かつ `dscale() == 0`、`0000 0000 0000 0002` → `"0.00"`、`0001 ffff 0000 0005 0001` → `"0.00010"`、`0001 fffe 0000 0005 03e8` → `"0.00001"`（P2）、`0003 0001 0000 0001 04d2 162e 2328` → `"12345678.9"`（P3）、`0001 0020 0000 0000 0064` → 131 文字（P4）、weight `0x8000` の `0001 8000 0000 0000 0001` が raise せず文字列化できる）、
+      不正: 長さ 7 / `0002 0000 0000 0002 0001`（ndigits 2 で 10 byte）/ sign `1234` / digit `2710`（10000）/ dscale `4000`（16384）が `TYPE_MISMATCH`（メッセージ `"cannot decode binary numeric"`）；uuid 15 / 17 byte が `TYPE_MISMATCH`；
+      `tests/test_encode_binary.mojo` に `encode_numeric(Decimal("1.50")) == 0002 0000 0000 0002 0001 1388`、`"-0.001"`、`"0.00"`、`nan()` → `0000 0000 c000 0000`、`infinity()` → `0000 0000 d000 0000`、`encode_uuid` 16 byte；表 20 行の **encode → decode 往復**が `==`；
+      `tests/test_params.mojo` に `Param(Decimal("1"))`.oid() == 1700 / `is_binary()`、`Param(UUID(...))`.oid() == 2950、`Optional[Decimal](None)` → `is_null()` かつ oid 1700
+    - (g) `pixi run test` 両サーバー PASS、`pixi run check` 6/6。追従先チェックリストの OID / `@implicit` / encoder 件数の中間値（OID 15、`@implicit` 23、`encode_` 8）を PROGRESS に書く
+  - 対象: `src/pq/types_numeric.mojo`, `src/pq/types_uuid.mojo`, `src/pq/decode_text.mojo`, `src/pq/decode_binary.mojo`, `src/pq/encode_binary.mojo`, `src/pq/params.mojo`, `src/pq/__init__.mojo`, `tests/test_types_numeric.mojo`, `tests/test_types_uuid.mojo`, `tests/test_decode_binary.mojo`, `tests/test_encode_binary.mojo`, `tests/test_params.mojo`
   - 依存: T2
-  - 並列サブ作業:
-    - A: `params.mojo`（対象: `src/pq/params.mojo`。契約: 決めた事項 4 / 5 を字義どおり。`encode_binary` の関数を使う）
-    - B: `Connection.execute(sql, params)` + `__init__.mojo` の 1 行（対象: `src/pq/connection.mojo`, `src/pq/__init__.mojo`。契約: 決めた事項 5 の `_ParamBuffers` アクセサ名と 6 の手順）
-    - C: `tests/test_params.mojo` を (c) の箇条書きから独立に書く（対象: `tests/test_params.mojo`。契約: `from pq.params import Param`、エラー kind は上の各項目どおり）
+  - 並列サブ作業（推奨本数: **2**。契約は決めた事項 5・6）:
+    - A: `types_numeric.mojo` + `tests/test_types_numeric.mojo`
+    - B: `types_uuid.mojo` + `tests/test_types_uuid.mojo`
+    - 親: (e)(f)(g)。codec モジュールと `params.mojo` は親だけが触る
 
-- [x] T4: `prepared.mojo`（`PreparedStatement[origin]`）+ `Connection.prepare` + 接続ごとの連番 + `tests/test_prepared.mojo`
-  - **PLAN 訂正（turn 6 実測）**: (b)-1 の `execute([1, 2, "x"])` は**失敗する**（`SERVER` / `22003` ではなく
-    **`22P03` `incorrect binary data format in bind parameter 1`**）。リスト literal の `1` は `Param(Int)`
-    = OID 20 の 8 byte バイナリだが、`PQexecPrepared` には `paramTypes` 引数が無く、パラメータ型は
-    `PQprepare` の時点で int4 に確定しているため、サーバーは 8 byte を int4 として読んで長さ不一致になる。
-    **`execute(sql, params)`（`PQexecParams`）とは非対称**: あちらは OID 20 を一緒に送るので assignment cast
-    が効き `Int(5)` が int4 列に入る（T3 (c)-6 の B1）。prepared 経路では効かない。
-    期待値を **`execute([Int32(1), Int32(2), "x"])` → `get[Int32](0) == 3`** に訂正した
-    （`$1::int4` に束縛する値は `Int32` で書く。決めた事項 9 の「execute は個数だけ検査し型強制はしない」の帰結で、
-    要件・決定には反しない）。実測: `scratch/turn-006-probe-int8-int4.mojo`
+- [x] T4: `Date` / `Timestamp` / `TimestampTz`（`types_datetime.mojo` 前半 + 暦算法）+ codec / `Param` + 単体テスト
   - 完了基準:
-    - (a) `src/pq/prepared.mojo` と `Connection.prepare(ref self, var sql: String, param_types: List[UInt32] = List[UInt32]()) raises PgError -> PreparedStatement[origin_of(self)]` を **決めた事項 9 / 10** どおり。
-      `Connection` に `var _stmt_counter: List[Int]`（`__init__` で `[0]`）と `_next_stmt_name(self) -> String`（`pq_stmt_N`。不変 `self` からの更新は `MutUntrackedOrigin` キャスト、plan プローブ (4)）。
-      `src/pq/__init__.mojo` に `from .prepared import PreparedStatement`
-    - (b) `tests/test_prepared.mojo` に少なくとも:
-      1. `prepare("SELECT $1::int4 + $2::int4, $3")` → `name() == "pq_stmt_1"`、`param_count() == 3`、`param_type_oid(0) == 23` / `(1) == 23` / `(2) == OID_TEXT`（`from pq.decode_text import OID_TEXT`。D2 の実測 25）、`param_type_oid(3)` / `(-1)` → `TYPE_MISMATCH`（message `parameter index 3 out of range (0..2)`。P20）；
-         `execute([Int32(1), Int32(2), "x"])` → `get[Int32](0) == 3`、`get[String](1) == "x"`（D7。**`[1, 2, "x"]` は `22P03`** — 上の PLAN 訂正）；同じ接続で 2 本目を `prepare` → `"pq_stmt_2"`；**別の `Connection` を開くと最初が `"pq_stmt_1"`**（接続ごとのカウンタ。P9）
-      2. **個数不一致はローカル検査（D15）**: `execute([1])` → `kind == USAGE`、message に `3` と `1` を含む、sqlstate 空。`execute("BEGIN")` の中で同じことをしても `transaction_status() == PQTRANS_INTRANS` のまま（サーバーに届けば 08P01 で abort する。C1 と対照）→ `ROLLBACK`
-      3. **`__deinit__` の DEALLOCATE と ASAP（P2）**: `var stmt = prepare(...)`; `var name = stmt.name()`; `execute("SELECT count(*) FROM pg_prepared_statements WHERE name = $1", [name])` が **1**（この行より後に `stmt` を使う行を置く）→ `_ = stmt^` → 同じ count が **0**
-      4. **26000 経路（P19 / 決めた事項 14）**: `prepare` → `conn.execute("DEALLOCATE " + stmt.name())` → `stmt.execute([...])` → `kind == SERVER`, sqlstate `"26000"` → `_ = stmt^` が静かに終わる（テスト PASS、トレースバック無し）→ `conn.execute("SELECT 1")` が通る
-      5. **ROLLBACK しても prepared は残る（E1〜E4 / 決めた事項 14）**: `conn.execute("BEGIN")` → `prepare` → `conn.execute("ROLLBACK")` → `stmt.execute(...)` が**成功**
-      6. **aborted tx 内の `__deinit__`（P11）**: `BEGIN` → `prepare` → `conn.execute("SELEC")` 失敗 → `_ = stmt^`（DEALLOCATE は 25P02 で失敗、無視）→ `conn.execute("ROLLBACK")` が通る → `pg_prepared_statements` に名前が **残っている（count 1。E14）** → 手動 `DEALLOCATE` で片付ける
-      7. **prepare の失敗**: `prepare("SELEC 1")` → `42601`；`prepare("SELECT 1; SELECT 2")` → `42601`（D10）；失敗後に `prepare("SELECT 1")` が通る
-      8. **`param_types`（D9）**: `CREATE TEMP TABLE pq_p2_prep(x int4)` → `prepare("INSERT INTO pq_p2_prep VALUES ($1)", [20])` が成功 → `execute([Int(5)])` → `affected_rows() == 1`、`column_count() == 0`（D11 / D12）；`prepare("SELECT $1", [23])` → `param_type_oid(0) == 23` → `execute([Param.null()])` → `is_null(0)`
-      9. **型推論**: `prepare("SELECT $1")` → `param_type_oid(0) == 25` → `execute(["x"])` → `"x"`
-      10. **NUL**: `execute(["a" + chr(0)])` → `USAGE`（個数検査 → NUL 検査の順）
-      11. **100 回の prepare → execute → 破棄**ループ後に `SELECT count(*) FROM pg_prepared_statements` が 0（DEALLOCATE の網羅。10,000 回は T6）
-      12. **接続断（I1〜I5）**: `prepare` → `conn.execute("SELECT pg_terminate_backend(pg_backend_pid())")` が raise → `stmt.execute([...])` → `kind == CONNECTION` → `_ = stmt^` が静かに終わる
-    - (c) `pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ、`pixi run check` 6/6
-  - 対象: `src/pq/prepared.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`, `tests/test_prepared.mojo`
+    - (a) `src/pq/types_datetime.mojo`（新設。T5 が同じファイルに追記する）: private ヘルパ `_days_from_civil(y, m, d) -> Int` / `_civil_from_days(days) -> (Int, Int, Int)`（RESEARCH §2.2.3 のコードそのまま。`//` は床除算、`(y-399)/400` は書かない）/ `_is_leap(y)` / `_days_in_month(y, m)` /
+      `_format_date(y, m, d, mut writer)`（4 桁ゼロ埋め・4 桁超はそのまま・`y <= 0` は `1 - y` + ` BC` を**呼び出し側が付ける**）/ `_format_time_of_day(micros_in_day, mut writer)`（`HH:MM:SS[.f]`、末尾ゼロ削り）/ `_parse_fraction(digits) -> Int`（1〜6 桁、7 桁以上は拒否。P14）/ `_parse_hms(text, start) -> micros`（桁位置で読む。P25）。
+      **決めた事項 7** の `Date` / `Timestamp` / `TimestampTz`
+    - (b) `tests/test_types_datetime.mojo`（サーバー不要。T5 が追記）: RESEARCH §2.2.3 の実測値をそのまま:
+      `Date.from_ymd(2000,1,1).days == 0`、`(1970,1,1)` → -10957、`(2024,2,29)` → 8825、`(1999,12,31)` → -1、`(1,1,1)` → -730119、`(0,1,1)` → -730485（1 BC）、`(-4713,11,24)` → -2451545、`(10000,1,1)` → 2921940、`(5874897,12,31)` → 2145031948；各 `year()/month()/day()` が戻る（9 件）；
+      `String(Date(...))`: `"2000-01-01"`、`"0001-01-01 BC"`（-730485）、`"4714-11-24 BC"`、`"10000-01-01"`、`"5874897-12-31"`、`"0001-01-01"`、`Date.infinity()` → `"infinity"`、`negative_infinity()` → `"-infinity"`（P12）；`Date.parse` が上記すべての逆；
+      `Date.from_ymd` 拒否（P27）: `(2024,2,30)`, `(2023,2,29)`, `(2024,13,1)`, `(2024,0,1)`, `(2024,1,0)`, `(5874898,1,1)`, `(-4714,1,1)` が `USAGE`（`"invalid date"`）；`(2024,2,29)` と `(0,1,1)` は通る；`Date.infinity().year()` が `USAGE`（`"is infinite"`）；
+      `Timestamp`: `from_ymd_hms(2000,1,1,0,0,0).micros == 0`、`(2024,1,2,3,4,5,678901)` → `0x0002b0ec85204f35`、`(1969,12,31,23,59,59,999999)` → -946684800000001、`(0,1,1,0,0,0)` → `-0xE039C2E44EE000`（= `0xff1fc63d1bb12000`）、`(-4712,1,1,0,0,0)` → `-0x2F0804250E82000`、`(294276,12,31,23,59,59,999999)` → `0x7fffff5bb3b29fff`、`(10000,1,1,0,0,0)` → `0x0380e70b913b8000`；分解アクセサ 7 つが元に戻る；
+      `String(Timestamp)`: `"2000-01-01 00:00:00"`、`"2024-01-02 03:04:05.678901"`、`"1969-12-31 23:59:59.999999"`、`"0001-01-01 00:00:00 BC"`、`"294276-12-31 23:59:59.999999"`、`Timestamp(5500000)` → `"2000-01-01 00:00:05.5"`、`Timestamp(1)` → `"2000-01-01 00:00:00.000001"`、`infinity()` → `"infinity"`；`parse` が逆（`.5` → 500000、`.000001` → 1、`.123456` → 123456。P14）；
+      `from_ymd_hms` 拒否: `(2024,1,1,24,0,0)`, `(2024,1,1,0,60,0)`, `(2024,1,1,0,0,60)`, `(2024,1,1,0,0,0,1000000)`, `(294277,1,1,0,0,0)` が `USAGE`；
+      `TimestampTz`（P13）: `parse("2024-01-02 03:04:05.678901+00").micros == 0x0002b0ec85204f35`、`"2024-01-02 12:04:05.678901+09"` / `"2024-01-02 08:34:05.678901+05:30"` / `"2024-01-01 23:34:05.678901-03:30"` / `"2024-01-02 08:57:33.678901+05:53:28"` が全部同じ micros、`"0001-01-01 00:00:00+00 BC"` → `-0xE039C2E44EE000`、`"2024-01-02 06:04:35+00"` と `"2024-01-02 03:04:05-03:00:30"` が同値；`String(TimestampTz(0x0002b0ec85204f35)) == "2024-01-02 03:04:05.678901+00"`、BC は `"0001-01-01 00:00:00+00 BC"`、`infinity()` → `"infinity"`；`from_utc(2024,1,2,3,4,5,678901)` が同値；
+      **非 ISO / 不正の拒否**（P25 / P15）: `Date.parse` に `" 2024-01-02"`, `"+2024-01-02"`, `"2024-1-2"`, `"01/02/2024"`, `"02.01.2024"`, `"2024-01-02 "`, `"2024-01-02T00:00:00"`, `""`, `"Infinity"`（大文字）が `TYPE_MISMATCH`（`cannot decode`）；`Timestamp.parse("2024-01-02 03:04:05.1234567")`（7 桁）/ `"2024-01-02"`（時刻無し）/ `"2024-01-02 25:00:00"` が `TYPE_MISMATCH`；`TimestampTz.parse("2024-01-02 03:04:05")`（オフセット無し）/ `"... +16"`（|offset| ≥ 57600 は `TYPE_MISMATCH`）
+    - (c) codec と結線（親）: `decode_text.mojo` に `OID_DATE = 1082` / `OID_TIMESTAMP = 1114` / `OID_TIMESTAMPTZ = 1184` と 3 分岐；`decode_binary.mojo` に `decode_date`（4 byte → `Date(Int32)`）/ `decode_timestamp` / `decode_timestamptz`（8 byte → `Int64`。番兵はそのまま。範囲検査なし。P21 の長さ検査のみ）と 3 分岐；`encode_binary.mojo` に `encode_date` / `encode_timestamp` / `encode_timestamptz`（`encode_int32` / `encode_int64` の皮）；`params.mojo` に 3 型 × 2 の `@implicit`（OID 1082 / 1114 / 1184）；`__init__.mojo` に再エクスポート
+    - (d) codec の単体テスト: `tests/test_decode_binary.mojo` に RESEARCH D1〜D3 / T1〜T2 の hex（`ffffd533` → -10957、`00002279` → 8825、`fff4da8b` → -730485、`ffda97a7` → -2451545、`7fda970c` → 2145031948、`002c95d4` → 2921940、`7fffffff` → `is_infinite()`、`0002b0ec85204f35` → `"2024-01-02 03:04:05.678901"`、`fffca2fec4c81fff` → `"1969-12-31 23:59:59.999999"`、`ff1fc63d1bb12000` → `"0001-01-01 00:00:00 BC"`、`fd0f7fbdaf17e000` → `"4713-01-01 00:00:00 BC"`、`7fffff5bb3b29fff` → `"294276-12-31 23:59:59.999999"`、`8000000000000000` → `"-infinity"`）と長さ 3 / 5 / 7 / 9 の `TYPE_MISMATCH`；
+      `tests/test_encode_binary.mojo` に `encode_date(Date(8825)) == 00002279`、`encode_timestamp(Timestamp(0x0002b0ec85204f35))`、infinity の 8 byte、encode → decode 往復；`tests/test_params.mojo` に 3 型の oid / `is_binary()` / `Optional` NULL
+    - (e) `pixi run test` 両サーバー PASS、`pixi run check` 6/6
+  - 対象: `src/pq/types_datetime.mojo`, `src/pq/decode_text.mojo`, `src/pq/decode_binary.mojo`, `src/pq/encode_binary.mojo`, `src/pq/params.mojo`, `src/pq/__init__.mojo`, `tests/test_types_datetime.mojo`, `tests/test_decode_binary.mojo`, `tests/test_encode_binary.mojo`, `tests/test_params.mojo`
   - 依存: T3
-  - 並列サブ作業:
-    - A: `prepared.mojo` + `Connection.prepare` / `_stmt_counter` / `_next_stmt_name` + `__init__.mojo` の 1 行（対象: `src/pq/prepared.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`）
-    - B: `tests/test_prepared.mojo` を (b) から独立に書く（対象: `tests/test_prepared.mojo`。契約: `from pq.prepared import PreparedStatement`、`PreparedStatement[origin]` と型パラメータをフルに書く、メソッド名と kind は決めた事項 9）
+  - 並列サブ作業（推奨本数: **2**。契約は決めた事項 7）:
+    - A: `types_datetime.mojo` の `Date` / `Timestamp` / `TimestampTz` + ヘルパ（対象: `src/pq/types_datetime.mojo`）
+    - B: `tests/test_types_datetime.mojo`（対象: その 1 ファイル。A と同時に契約から書く）
+    - 親: (c)(d)(e)
 
-- [x] T5: `transaction.mojo`（`Transaction[origin]`）+ `Connection.transaction` / `set_rollback_failure_handler` + `tests/test_transaction.mojo` / `tests/test_savepoint.mojo`
-  - **PLAN 訂正（turn 7 実測）**: 決めた事項 10 の `Transaction.prepare` を「`self._conn[]` へ委譲」では書けない。
-    `self._conn[].prepare(...)` の戻りは `PreparedStatement[origin_of(origin)]` という**入れ子 origin**になり、
-    署名に書いた `PreparedStatement[Self.origin]` / `PreparedStatement[origin_of(self._conn[])]` はどちらも
-    `[origin]` に畳まれるため、struct の origin パラメータは不変（invariant）で変換できない。
-    「未プローブ」に書いた代替（`rebind`）も不可（`expression does not designate a value with an origin`、
-    `__disable_del` は 1.1.0 に無い）。そこで `Connection.prepare` の本体を
-    **`Connection._prepare_parts(self, var sql, param_types, mut types) raises PgError -> String`**
-    （不変 `self`。`PQprepare` → `PQdescribePrepared` → describe 失敗時 DEALLOCATE → 名前を返す）に切り出し、
-    `Connection.prepare` と `Transaction.prepare` が**それぞれ自分の借用で** `PreparedStatement` を構築する形にした。
-    FFI 呼び出しの順序・後片付け・エラーは無変更で、`tests/test_prepared.mojo` 13/13 が両サーバーで通ることで確認
-    （決めた事項 9 / 10 の API 契約・公開シグネチャは変わらないので要件・決定には反しない）
+- [x] T5: `Time` / `TimeTz` / `Interval`（`types_datetime.mojo` 後半）+ codec / `Param` + 単体テスト
   - 完了基準:
-    - (a) `src/pq/transaction.mojo` と `Connection` 側の追加を **決めた事項 11 / 12** どおり（`transaction(ref self)`、`set_rollback_failure_handler(mut self, handler: def(PgError) thin)`、`var _rollback_failure_handler: def(PgError) thin` を `__init__` で既定にする）。
-      `src/pq/__init__.mojo` に `from .transaction import Transaction`。`Transaction` の docstring に **P1 の規約**（「`Transaction` は最後に使われた文の直後に破棄され、その時点で ROLLBACK が走る。`commit()` / `rollback()` / `_ = tx^` を tx の最後の行に置く。
-      `var tx = conn.transaction(); tx.execute(a); conn.execute(b)` の b は tx の外で実行される」）を負の例つきで書く
-    - (b) `tests/test_transaction.mojo` に少なくとも（`CREATE TEMP TABLE pq_p2_tx(x int)` を各テストで作る）:
-      1. **commit**: `var tx = conn.transaction()` → `transaction_status() == PQTRANS_INTRANS` → `tx.execute("INSERT INTO pq_p2_tx VALUES (1)")` → `tx.commit()` → `IDLE`、count 1 → `tx.commit()` 2 回目 → `USAGE`
-      2. **rollback**: INSERT → `tx.rollback()` → count 0 → `tx.rollback()` 2 回目 → `USAGE`；commit 後の `rollback()` も `USAGE`
-      3. **commit せずに破棄 → ROLLBACK（REQ §5.1 / §5.1a、P1）**: `var tx = conn.transaction(); tx.execute(INSERT); _ = tx^` → `transaction_status() == PQTRANS_IDLE`、count 0
-      4. **ASAP 破棄の固定（P1）**: `var tx = conn.transaction(); tx.execute(INSERT)` の次の行で `conn.execute("SELECT count(*) FROM pq_p2_tx")` が **0** かつ `IDLE`（tx は前の行で破棄済み）。コメントに「Mojo の ASAP 破棄の仕様。docstring の負の例と同じ」
-      5. **委譲（D12）**: `tx.execute("INSERT INTO pq_p2_tx VALUES ($1)", [Int32(2)])` → `tx.prepare("SELECT $1::int4")` が `PreparedStatement[...]` を返し `execute([3])` が 3 → `tx.commit()` → count 1；tx 生存中に `conn.execute("SELECT 1")` も通り `INTRANS` のまま
-      6. **ネスト禁止（D11 / P13）**: tx 生存中に `conn.transaction()` → `USAGE`（stderr に `WARNING:` が出ないことは `check` 6/6 で判定）；`conn.execute("BEGIN")` → `conn.execute("SELEC")` で INERROR にしてから `conn.transaction()` → `USAGE` → `conn.execute("ROLLBACK")`
-      7. **終了後の操作は全部 USAGE**: commit 後に `tx.execute(sql)` / `tx.execute(sql, params)` / `tx.prepare(sql)` / `tx.savepoint("a")` / `tx.rollback_to("a")` / `tx.release("a")` の 6 つ
-      8. **aborted 状態の `commit()`（D10 / P12 / REQ §5.1a）**: INSERT → `tx.execute("SELECT 1/0")` が `22012` → `INERROR` → `tx.commit()` → `kind == SERVER`、`sqlstate == ""`、message に `ROLLBACK` を含む → `IDLE` → `conn.execute("SELECT count(*) ...")` が 0 → `tx.rollback()` → `USAGE`（終了済み）
-      9. **接続断中の破棄でハンドラが呼ばれる（REQ §5.1a-1 / P15 / 決めた事項 13）**: `setenv("PQ_TEST_ROLLBACK_FAILURE", "", True)` → `conn.set_rollback_failure_handler(_record_rollback_failure)` → `var tx = conn.transaction()` → `conn.execute("SELECT pg_terminate_backend(pg_backend_pid())")` が `CONNECTION` で raise → `_ = tx^` →
-         `getenv("PQ_TEST_ROLLBACK_FAILURE")` が `"Connection|"` で始まり `|` の後が非空（I3: `no connection to the server`）
-      10. **ハンドラは生成時コピー（D9）**: `set_rollback_failure_handler(_record_as_first)` → `var tx = conn.transaction()` → `set_rollback_failure_handler(_record_as_second)` → terminate → `_ = tx^` → 環境変数が `"first|Connection|..."` で始まる（2 本目のハンドラは呼ばれない）。ハンドラは非キャプチャの `def(PgError)` 2 本で接頭辞だけ違う
-      11. **接続断後の `transaction()`（P14 / 決めた事項 14-3）**: terminate 後に `conn.transaction()` → `kind == CONNECTION`（`USAGE` ではない）
-      12. 既定ハンドラ: 差し替えない接続で tx を正常に commit / rollback / 破棄しても stderr に何も出ない（`check` 6/6 の `WARNING:` 計数と、`pq: implicit ROLLBACK failed` が `build/final_check.log` に無いこと: `grep -c 'implicit ROLLBACK failed' build/final_check.log` = 0 を T7 で確認）
-    - (c) `tests/test_savepoint.mojo` に少なくとも:
-      1. **部分取り消し（REQ §5.1）**: INSERT 1 → `tx.savepoint("a")` → INSERT 2 → `tx.rollback_to("a")` → `tx.commit()` → count 1
-      2. **識別子エスケープ（G3〜G9）**: `tx.savepoint("sp \"1\"")` → `tx.rollback_to("sp \"1\"")` → `tx.release("sp \"1\"")` が全部通る；大文字混じり `"Sp"` も通る（`escape_identifier` で `"Sp"` が保たれる）
-      3. **aborted からの回復（G15〜G18）**: `tx.savepoint("s1")` → `tx.execute("SELECT 1/0")` が `22012` → `INERROR` → `tx.rollback_to("s1")` → `INTRANS` → `tx.execute("SELECT 1")` が通る → `tx.commit()`
-      4. **存在しない savepoint（G10 / G11 / P16）**: `tx.rollback_to("nope")` → `SERVER` `3B001` → `INERROR` → `tx.execute("SELECT 1")` → `25P02` → `tx.rollback()` が通る → `IDLE`。`release("nope")` も `3B001`
-      5. **空文字（D13）**: `savepoint("")` / `rollback_to("")` / `release("")` → `USAGE`、サーバー状態は `INTRANS` のまま
-      6. `release` 後に同名へ `rollback_to` → `3B001`（RELEASE で消える）
-    - (d) `pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ、`pixi run check` 6/6（`WARNING:` 0 件 = ネスト BEGIN / 二重 COMMIT がサーバーに届いていない証拠）
-  - 対象: `src/pq/transaction.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`, `tests/test_transaction.mojo`, `tests/test_savepoint.mojo`
+    - (a) `src/pq/types_datetime.mojo` に **決めた事項 8** の `Time` / `TimeTz` / `Interval` を追記（T4 の `_format_time_of_day` / `_parse_hms` / `_parse_fraction` を共用）。interval の文字列化は RESEARCH §3-5（`interval2itm` + `AddPostgresIntPart`、`is_before` 1 フラグ）、解釈はその逆 + `infinity` / `-infinity`。timetz のオフセットは §3-6（西が正、秒を保つ、`±HH[:MM[:SS]]` の 3 幅）
+    - (b) `tests/test_types_datetime.mojo` に追記:
+      `Time`: `Time(0)` → `"00:00:00"`、`Time(86400000000)` → `"24:00:00"`（P11）、`Time(86399999999)` → `"23:59:59.999999"`、`Time(0x0000000a8be1bd20)` → `"12:34:56.5"`；`Time.from_hms(12,34,56,500000).micros == 45296500000`、`from_hms(24,0,0)` が通る、`from_hms(24,0,1)` / `(23,60,0)` / `(0,0,60)` / `(0,0,0,1000000)` / `(-1,0,0)` が `USAGE`；`parse` が上記の逆、`"24:00:01"` / `"1:00:00"` / `"12:34"` / `"12:34:56.1234567"` が `TYPE_MISMATCH`；
+      `TimeTz`（P10）: `parse("12:34:56+09") == TimeTz(45296000000, -32400)`、`"12:00:00+05:53:28"` → `(43200000000, -21208)`、`"12:00:00-03:30"` → `(43200000000, 12600)`、`"00:00:00+00:00:01"` → `(0, -1)`、`"12:00:00-15:59"` → `(.., 57540)`、`"12:00:00+15:59:59"` → `(.., -57599)`、`"24:00:00+09"` が通る；`String` が逆（`"+09"` / `"+05:53:28"` / `"-03:30"` / `"+00:00:01"` / `"-15:59"` / `"+15:59:59"`、`TimeTz(0, 0)` → `"00:00:00+00"`）；`from_hms(12,0,0,0,57600)` / `(.., -57600)` が `USAGE`、`parse("12:00:00+16")` が `TYPE_MISMATCH`；
+      `Interval`（P7 / P8）: `String(Interval(7200000000,-1,0)) == "-1 days +02:00:00"`、`(-1000000,0,0)` → `"-00:00:01"`、`(0,-1,0)` → `"-1 days"`、`(0,1,0)` → `"1 day"`、`(14706789000,3,14)` → `"1 year 2 mons 3 days 04:05:06.789"`、`(0,0,-11)` → `"-11 mons"`、`(0,0,25)` → `"2 years 1 mon"`、`(0,0,0)` → `"00:00:00"`、`(360000000000,0,0)` → `"100:00:00"`、`(-500000,0,0)` → `"-00:00:00.5"`、`(0,1,-12)` → `"-1 years +1 day"`、`(1000000,-1,0)` → `"-1 days +00:00:01"`、`(0,0,1)` → `"1 mon"`、`(0,0,12)` → `"1 year"`、`(43200000000,1,0)` → `"1 day 12:00:00"`、`(0,-1,1)` → `"1 mon -1 days"`、`(-14706789000,-3,-14)` → `"-1 years -2 mons -3 days -04:05:06.789"`、`(9223372036854775807,0,0)` → `"2562047788:00:54.775807"`；`Interval.infinity()` → `"infinity"`、`negative_infinity()` → `"-infinity"`、`is_infinite()` は 3 フィールド全 MAX / 全 MIN のときだけ（`Interval(Int64.MAX, 0, 0)` は有限）；`parse` が上記 18 件すべての逆（`==` で比較）；
+      `Interval.parse` 拒否: `""`, `"1 week"`, `"1 day 1 day"`, `"P1D"`, `"1 days 02:00"`, `"+1 day"`（先頭 `+` は前が負のときだけ有効なので単独は拒否）、`"1 year "`（末尾空白）が `TYPE_MISMATCH`
+    - (c) codec と結線（親）: `decode_text.mojo` に `OID_TIME = 1083` / `OID_TIMETZ = 1266` / `OID_INTERVAL = 1186` と 3 分岐；`decode_binary.mojo` に `decode_time`（8 byte、0..86400000000 の範囲外は `TYPE_MISMATCH` `"is out of range"`。P11）/ `decode_timetz`（12 byte、`|zone| < 57600` 以外は `TYPE_MISMATCH`）/ `decode_interval`（16 byte、**micros, days, months の順**。P7。範囲検査なし）と 3 分岐；
+      `encode_binary.mojo` に `encode_time` / `encode_timetz`（8 + 4）/ `encode_interval`（8 + 4 + 4）；`params.mojo` に 3 型 × 2；`__init__.mojo` に再エクスポート。この時点で追従先チェックリストの最終件数（OID 21、`@implicit` 35、`encode_` 14、`decode_` 14、`elif T ==` 16 × 2）を全部確かめ PROGRESS に書く
+    - (d) codec の単体テスト: `tests/test_decode_binary.mojo` に RESEARCH の hex（time `0000000a8be1bd20` → `"12:34:56.5"`、**`000000141dd76000`**（86400000000）→ `"24:00:00"`、86400000001（`000000141dd76001`）の 8 byte → `TYPE_MISMATCH`（**turn 7 訂正**: 元の `0000001406f40000` は 86015737856 で 86400000000 ではない。`86400000000 = 0x141DD76000`。PG17 の `time_send` 実測で確認）；timetz `.. ffff8170` → `(.., -32400)`、`.. 00003138` → 12600、`.. ffffad28` → -21208、`.. 0000e0c4` → 57540、`.. ffff1f01` → -57599、`.. ffffffff` → -1、zone 57600 → `TYPE_MISMATCH`；interval `000000036c97ca88 00000003 0000000e` → `(14706789000, 3, 14)`、`00000001ad274800 ffffffff 00000000` → `(7200000000, -1, 0)`、`7fffffffffffffff 7fffffff 7fffffff` → `is_infinite()`、長さ 15 / 17 → `TYPE_MISMATCH`）；
+      `tests/test_encode_binary.mojo` に `encode_interval(Interval(0,1,0)) == 00..00 00000001 00000000`、`Interval(0,0,1)` → `.. 00000000 00000001`（P7）、`encode_timetz(TimeTz(45296000000, -32400))` 末尾 `ffff8170`、幅 8 / 12 / 16、往復；`tests/test_params.mojo` に 3 型の oid / `is_binary()` / `Optional`
+    - (e) `pixi run test` 両サーバー PASS、`pixi run check` 6/6
+  - 対象: `src/pq/types_datetime.mojo`, `src/pq/decode_text.mojo`, `src/pq/decode_binary.mojo`, `src/pq/encode_binary.mojo`, `src/pq/params.mojo`, `src/pq/__init__.mojo`, `tests/test_types_datetime.mojo`, `tests/test_decode_binary.mojo`, `tests/test_encode_binary.mojo`, `tests/test_params.mojo`
   - 依存: T4
-  - 並列サブ作業:
-    - A: `transaction.mojo` + `Connection.transaction` / `set_rollback_failure_handler` / 既定ハンドラ + `__init__.mojo` の 1 行（対象: `src/pq/transaction.mojo`, `src/pq/connection.mojo`, `src/pq/__init__.mojo`。契約: 決めた事項 11 / 12）
-    - B: `tests/test_transaction.mojo` を (b) から独立に書く（対象: `tests/test_transaction.mojo`。契約: `from pq.transaction import Transaction`、`Transaction[origin]` をフルに書く、ハンドラは非キャプチャ `def(e: PgError)` で `setenv`）
-    - C: `tests/test_savepoint.mojo` を (c) から独立に書く（対象: `tests/test_savepoint.mojo`）
+  - 並列サブ作業（推奨本数: **2**。契約は決めた事項 8）:
+    - A: `types_datetime.mojo` への `Time` / `TimeTz` / `Interval` 追記（対象: `src/pq/types_datetime.mojo`）
+    - B: `tests/test_types_datetime.mojo` への追記（対象: その 1 ファイル）
+    - 親: (c)(d)(e)
 
-- [x] T6: `tests/test_leak.mojo` に Phase 2 の 4 ループ（params / prepared / tx commit / tx 破棄 ROLLBACK）+ 陽性対照 3 本
-  - **PLAN 訂正（turn 8 実測）**: 「所要の目安」の `check` 2〜3 分は過大だった。Phase 2 の 4 ループは
-    接続を 1 本使い回すので 10,000 回でも計 **18 s**（params 3.9 / prepared 5.5 / tx commit 4.4 /
-    tx drop 4.3）にしかならず、`test_leak` は 1 サーバー 40 s → **57〜58 s**、`check` 全体は
-    **82 s**（02:15:36 → 02:16:58）に収まった。`Connection.open` の ~3.5 ms/回が乗る Phase 1 の
-    connect ループ（35 s）が依然この 1 ファイルの大半で、Phase 2 のループは相対的に安い
+- [x] T6: サーバー格子 — 拡張型 8 種 + json / jsonb の text / binary 一致・パラメータ往復・PG17 分岐・非 ISO DateStyle（`tests/test_extended_numeric.mojo` / `tests/test_extended_datetime.mojo`）
   - 完了基準:
-    - (a) 各 10,000 回、`MAIN_WARMUP` 1,000、9 サンプル、tolerance は T1 で決めた `TOLERANCE_PAGES`、接続は 1 本を使い回す（connect ループは Phase 1 が持つ）:
-      `test_execute_params_does_not_leak`: `conn.execute("SELECT $1::bytea, $2::text", [<64 KiB bytea>, <64 KiB text>])` → 結果を破棄（`_ParamBuffers` と `PGresult` の両方が毎回解放されることを RSS で）；
-      `test_prepared_does_not_leak`: `prepare("SELECT repeat('x', 65536) WHERE $1 = 1")` → `execute([Int32(1)])` → 結果と stmt を破棄（prepare / describe / execPrepared / DEALLOCATE の 4 結果）；
-      `test_transaction_commit_does_not_leak`: `conn.transaction()` → `tx.execute("SELECT repeat('x', 65536)")` → `tx.commit()`；
-      `test_transaction_drop_does_not_leak`: `conn.transaction()` → `tx.execute("SELECT repeat('x', 65536)")` → `_ = tx^`（`__deinit__` の ROLLBACK 経路 = 生の `PQexec` + `PQclear`）
-    - (b) 4 ループは成功時もサンプル列を `print`（Phase 1 と同じ `_assert_stable`）。モジュール docstring にループ一覧（12 テスト）と所要の目安を書く
-    - (c) **陽性対照**（同じターン、`scratch/turn-NNN-leaksrc-<name>/` に `src/pq` をコピー → `mojo build -I <copy>`。サンプル列を PROGRESS に貼る。PG17 でよい）:
-      ① `Result.__deinit__` の `PQclear` を消す → `test_execute_params_does_not_leak` が **FAIL**（connect ループも FAIL するが問わない）；
-      ② `PreparedStatement.__deinit__` の DEALLOCATE 結果の `PQclear` を消す → `test_prepared_does_not_leak` が **FAIL**（1 結果 ≈ 数百 B × 10,000 ≈ 数 MB。built binary なら見える）；
-      ③ `Transaction.__deinit__` の ROLLBACK 結果の `PQclear` を消す → `test_transaction_drop_does_not_leak` が **FAIL**。
-      ②③が tolerance 内に収まって FAIL しない場合は、そのループの payload を `repeat('x', 65536)` から増やすのではなく**反復回数はそのまま**で原因（RSS に出ない量）を PROGRESS に書き、verify に申し送る（「未実証」の申し送りは禁止。実測の数値を貼る）
-    - (d) `pixi run test` 両サーバー PASS（test_leak 12 本）、`pixi run check` 6/6。test_leak の所要（1 サーバー）を PROGRESS に書く
-  - 対象: `tests/test_leak.mojo`
+    - (a) `tests/test_extended_numeric.mojo`（numeric / uuid / json / jsonb。両サーバー同一）:
+      ① RESEARCH N1〜N8 の **全値**（`1.50`, `-0.001`, `0`, `0.000001`, `1e130`（SQL は `1e130::numeric`）, `1e-10`, `0.00`, `1000000`, `12345678.9`, `NaN`, `Infinity`, `-Infinity`, `'-0'`, `123456789012345678901234567890.123456789`, `10000`, `9999`, `0.0001`, `1.5::numeric(10,4)`, `100::numeric(10,0)`, `0.5`, `-0.5`, `12.3400`, `+1`）を text / binary で `get[Decimal]` し `==` かつ `String()` 一致、text の `get[String]` とも `String(Decimal)` が一致（**Inf は値比較**。P1）；
+      ② `SELECT $1::numeric` に `[Decimal(...)]` を送り text / binary の両結果形式で同じ値（上記全値 + `nan()` / `infinity()` / `negative_infinity()`）。`Infinity` の binary echo が `dscale 32` で来ても `==` が真（P1）；
+      ③ `SELECT 1.0::numeric = 1.00::numeric, 'NaN'::numeric = 'NaN'::numeric, 'Infinity'::numeric = 'Infinity'::numeric` の 3 真偽が `Decimal` の `==` と一致（P5）；
+      ④ uuid: `'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`、`'00000000-0000-0000-0000-000000000000'`、`'ffffffff-ffff-ffff-ffff-ffffffffffff'`、`upper(...)` の 4 値を text / binary で `get[UUID]` 一致、`$1::uuid` 往復；
+      ⑤ json / jsonb（P22）: `'{"a":1}'::json` は text / binary とも `get[String]` が `{"a":1}`；`'{"b":2,"a":1,"a":3}'::jsonb` は両形式とも `{"a": 3, "b": 2}`（正規化。両形式で同じ）、`'null'::jsonb` → `null`、`'[]'::jsonb` → `[]`、`'"é"'::jsonb` → `"é"`、ネスト `'{"a":{"b":[1,{"c":null}]}}'::jsonb` が両形式一致；`$1::json` / `$1::jsonb` に `String` を送って返る（REQ §4.4）；
+      ⑥ 異常系: `'1.5'::numeric` を binary で `get[Int32]` → `TYPE_MISMATCH` + `"oid 1700"`、`'{"a":1}'::jsonb` を binary で `get[List[UInt8]]` → `TYPE_MISMATCH` + `"oid 3802"`、`gen_random_uuid()` を text で `get[UUID]` → 成功かつ binary と `==`（**turn 8 訂正**: `gen_random_uuid()` は呼ぶたび別値なので 2 クエリでは原理的に比較不能。`CREATE TEMP TABLE pq_t6_uuid AS SELECT gen_random_uuid() AS u` で 1 値を固定し、その列を text / binary で 2 回読んで比較する）。
+      不正なバイナリをサーバーに**送る**側のテストは作らない: `Decimal` / `UUID` は構築時の検査（P6）で RESEARCH §2.2.5 の `22P03` / `08P01` を出し得ない（docstring にその旨）
+    - (b) `tests/test_extended_datetime.mojo`（6 型）:
+      ① date D1〜D3、timestamp T1〜T2（RESEARCH §2.2.3 の SQL と値）、timestamptz Z 系（`'2024-01-02 03:04:05.678901+00'::timestamptz` と `'2024-01-02 12:04:05.678901+09'::timestamptz` が両形式とも同じ micros）、time（`'00:00:00'`, `'24:00:00'`, `'23:59:59.999999'`, `'12:34:56.5'`）、timetz（`'12:34:56+09'`, `'12:00:00+05:53:28'`, `'12:00:00-03:30'`, `'00:00:00+00:00:01'`, `'24:00:00+09'`）、interval（P8 の 11 値 + `'1 day'`, `'1 mon'`, `'1 year'`, `'-1 day 2 hours'`, `'36 hours'`, `'1.5 days'`）を text / binary で `get[T]` し `==`、`String(T)` が text の `get[String]` と一致（timestamptz は `+00` 付きの text と一致: コンテナの TimeZone は `Etc/UTC`。TimeZone が UTC でない環境では `String()` 比較だけ skip して値一致は見る — `SHOW TimeZone` を先に読む）；
+      ② `infinity` / `-infinity` の date / timestamp / timestamptz が両形式で `is_infinite()`、`String()` が `infinity` / `-infinity`；
+      ③ パラメータ往復: `Date(8825)` → `'2024-02-29'`、`Timestamp(762525296789000)` → `'2024-02-29 12:34:56.789'`、`TimestampTz(同値)` → `'... +00'`（UTC 設定下）、`Time(45296789000)` → `'12:34:56.789'`、`TimeTz(45296000000, -32400)` → `'12:34:56+09'`、`Interval(10800000000, 2, 1)` → `'1 mon 2 days 03:00:00'`（RESEARCH §2.2.4）を `SELECT $1::<type>` で text / binary の両結果形式、`Date.infinity()` / `Timestamp.negative_infinity()` の往復；
+      ④ **PG17 分岐**（P9）: `conn.server_version() >= 170000` のとき `'infinity'::interval` / `'-infinity'::interval` を両形式で取り `is_infinite()`、`[Interval.infinity()]` を `$1::interval` で送ると `'infinity'` が返る。**PG14 では** `[Interval.negative_infinity()]` を送ると `PgError(kind=SERVER, sqlstate='22008')`、`'infinity'::interval` の SQL は `22007`；
+      ⑤ **非 ISO**（P15）: `conn.execute("SET DateStyle TO 'German'")` 後に `SELECT '2024-01-02'::date` を text で `get[Date]` → `TYPE_MISMATCH`（メッセージに `02.01.2024`）、同じ列を binary で `get[Date]` → 8767 で成功（binary は GUC 非依存）、`SET DateStyle TO 'ISO, YMD'` で戻す。`SET IntervalStyle TO 'iso_8601'` 後の `'1 day'::interval` text も `TYPE_MISMATCH`（`P1D`）；
+      ⑥ 境界: `'4714-11-24 BC'::date`、`'5874897-12-31'::date`、`'294276-12-31 23:59:59.999999'::timestamp`、`'4714-11-24 00:00:00 BC'::timestamp` が両形式一致（RESEARCH §2.2.3 の値）
+    - (c) 期待メッセージは 2 語以上の部分文字列（REQ §9）。全テストが PG17 / PG14 で PASS（`pixi run test`）、`pixi run check` 6/6。両ファイルの所要（s）を PROGRESS に
+  - 対象: `tests/test_extended_numeric.mojo`, `tests/test_extended_datetime.mojo`
   - 依存: T5
-  - 並列サブ作業: なし（1 ファイル。陽性対照の 3 ビルドは親が順に回す。各ビルド cached 0.9 s）
+  - 並列サブ作業（推奨本数: **2**。対象ファイルが分かれる）:
+    - A: `tests/test_extended_numeric.mojo`
+    - B: `tests/test_extended_datetime.mojo`
+    - 親: 両サーバーで実行・`fmt`・コミット
 
-- [x] T7: `examples/params.mojo` + `pixi.toml` / `final_check.sh` 4/6 + `src/pq/__init__.mojo` の文書 + 品質仕上げ（docstring 診断 0 / fmt 差分 0 / 警告 0 / `fn` 0 / `check` 6/6 / 追従先チェックリスト照合）
+- [x] T7: zero-copy `Row.get_text` / `get_bytes`（REQ §4.5）+ `tests/test_zero_copy.mojo` + コンパイルエラーの陽性対照
   - 完了基準:
-    - (a) `examples/params.mojo`: `from pq import Connection, Param, PgError` のみ（`Transaction` / `PreparedStatement` は `conn.transaction()` / `conn.prepare()` の戻りとして使う。型名を書くなら `from pq import Transaction` を足してよい）。
-      `PQ_TEST_CONNINFO`（無ければ 54317 既定）で接続 → `CREATE TEMP TABLE` → `conn.execute(INSERT, [Int32(1), "one"])` → `conn.execute("SELECT ... WHERE id = $1", [Int32(1)])` を `for row in res` で表示 →
-      `var tx = conn.transaction()` → `tx.execute(INSERT, params)` → `tx.savepoint("sp")` → `tx.execute(INSERT, params)` → `tx.rollback_to("sp")` → `tx.commit()` → 件数表示（1 行だけ増えている）。
-      **P1 の規約どおり tx の最後の行が `tx.commit()`**。`PgError` を `except e` で `print` し `exit(1)`。`pixi.toml` に `example-params = "mojo run -I src examples/params.mojo"`、`tests/final_check.sh` 4/6 段を `examples/basic.mojo` と `examples/params.mojo` の 2 本に（見出し `4/6 examples`）
-    - (b) `src/pq/__init__.mojo` docstring: 「Phase 2 adds `params`, `prepared`, `transaction`」、再エクスポート一覧に `Param` / `PreparedStatement` / `Transaction`、`## Parameters` 節に REQ §4.1 の送信形式表（Mojo 型 / 送信形式 / OID / 備考）と `conn.execute(sql, [1, "a", Param.null()])` の例、
-      `## Transactions` 節に P1 の規約 1 段落、`## PgErrorKind` に `USAGE`。`pixi run package` 警告ゼロ
-    - (c) 文書照合（`grep` で確認して PROGRESS に書く）: `Transaction` docstring に「last use」または「ASAP」と負の例（`grep -c 'conn.execute(b)' src/pq/transaction.mojo` ≥ 1 相当）、`execute(sql, params)` docstring に「single statement」（D13）、`set_rollback_failure_handler` docstring に「copied when `transaction()`」（D9）、
-      `PreparedStatement` docstring に「ROLLBACK しても文は残るが、tx 内 DDL の巻き戻し後の `execute` はサーバーエラーになり得る」（RESEARCH §3-8）、`commit()` docstring に「`ROLLBACK` command tag → `PgError`」（D10）、`__deinit__` の docstring に `__deinit__` と書き `__del__` と書かない（`grep -rn '__del__' src/pq` = 0）
-    - (d) 品質（Phase 1 T8 と同じ）: docstring 診断 0（追従先チェックリスト 3 行目のコマンド）、`pixi run fmt` 後に差分なし（T1 の 1/6 段が判定）、`grep -rnE '^[[:space:]]*fn ' src tests examples hello.mojo` が 0 件、`grep -c 'implicit ROLLBACK failed' build/final_check.log` = 0、
-      `pixi run check` 6/6 PASS（`warning:` / `WARNING:` 0 件）。各段の所要を PROGRESS に
-    - (e) 追従先チェックリストの全行を素のシェルで実行し、コマンドと結果を PROGRESS に書く（53 本 / `five` 0 件 / 再エクスポート 3 型 / examples 2 本 / `PQfreemem` 2 行・`PQexec(` 4 行 / `_reject_nul` / `PQ_TEST_LEAK_SERVERS` / leak 12 本）
-    - (f) `HANDOFF.md` と REQUIREMENTS / DECISIONS / RESEARCH は触らない（PLAN 訂正は本 PLAN の該当タスクに「PLAN 訂正（turn N 実測）」で追記する。Phase 1 の流儀）
-  - 対象: `examples/params.mojo`, `pixi.toml`, `tests/final_check.sh`, `src/pq/__init__.mojo`、docstring のみの修正は `src/pq/*.mojo` 任意（挙動変更なし）
+    - (a) `src/pq/result.mojo` に **決めた事項 9** の `Row.get_text(self, col: Int) raises PgError -> StringSlice[Self.origin]` / `Row.get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]`（T2 の `_raw` を使う。NULL は `NULL_VALUE`、範囲外は `TYPE_MISMATCH`。`get_text` は text 形式なら任意 OID、binary 形式なら文字列系 6 OID のみで jsonb は version byte を 1 つ飛ばす、それ以外は決めた事項 4 の OID 不一致メッセージ）。
+      docstring に (1) `Result` の `PQgetvalue` 領域を指し `PQclear` まで有効、(2) **消費する移動（`var r2 = res^` / 関数へ `res^`）の後の使用はコンパイルエラー `use of uninitialized value`、`_ = res^` は生存延長で安全**（P18）、(3) UTF-8 は検証しない（client_encoding UTF8 前提。P20）、(4) `ref` は返さない（P19）
+    - (b) `tests/test_zero_copy.mojo`（サーバー）: `get_text(i)` の `String()` が `get[String](i)` と一致（text 形式: int4 / text / bpchar / numeric の 4 列。binary 形式: text / varchar / bpchar / name / json / jsonb の 6 列）、`get_bytes(i)` が binary bytea の `get[List[UInt8]]` と一致（`'\x00ff00'::bytea` と `''::bytea`）、text 形式 bytea の `get_bytes` は `\x00ff00` の 8 byte（生の text バイト）、`byte_length()` が `PQgetlength` と同じ（`'héllo'` → 6、NUL を含むなら長さどおり）、NULL → `NULL_VALUE`、binary の int4 列 `get_text` → `TYPE_MISMATCH` + `"ResultFormat.TEXT"`、範囲外 → `TYPE_MISMATCH`；
+      `var s = res[0].get_text(0); _ = res^; assert s == ...` が**コンパイルも実行も通る**こと（生存延長の正例）を 1 件（docstring の主張の裏付け）
+    - (c) **陽性対照**（REQ §4.5 / §5.1 / P18。同じターンで実測し PROGRESS にエラーメッセージを貼る）: `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-zerocopy-neg.mojo` に実物の `pq.Result` で `var s = res[0].get_text(0); var r2 = res^; print(s)` を書き、`pixi run mojo run -I src <file>` が `error: use of uninitialized value 'res'` で止まることを確認。`get_bytes` 版と、既存 `Row`（`var row = res[0]; var r2 = res^; row.get[Int32](0)`）版の計 3 本。
+      あわせて `grep -rn -- '-> ref' src/pq/*.mojo` = 0 件を PROGRESS に（P19）
+    - (d) `src/pq/__init__.mojo` に `## Zero-copy access` 節（2 メソッド、生存規則、UTF8 前提）。`pixi run test` 両サーバー PASS、`pixi run check` 6/6
+  - 対象: `src/pq/result.mojo`, `src/pq/__init__.mojo`, `tests/test_zero_copy.mojo`
   - 依存: T6
-  - 並列サブ作業:
-    - A: `examples/params.mojo` + `pixi.toml` + `final_check.sh` 4/6（対象: `examples/params.mojo`, `pixi.toml`, `tests/final_check.sh`）
-    - B: `src/pq/__init__.mojo` の docstring + (c) の docstring 照合と不足分の追記（対象: `src/pq/__init__.mojo`, 必要なら `src/pq/{transaction,prepared,connection}.mojo` の docstring 行のみ）
-    - 親: (d) / (e) の機械判定（`fmt` は親が統合後に 1 回だけ）
-  - **PLAN 訂正（turn 9 実測）**: (c) の残り項目は申し送りの「4 番だけ」ではなく **2 番（`execute(sql, params)` の
-    「single statement」）も欠けていた**（docstring が "Exactly one statement" で D13 の文言と一致していなかった）。
-    2 件とも turn 9 で追記した。(e) の `grep -n '50 本' .gsd-lite/PLAN.md .gsd-lite/PROGRESS.md` は **0 件ではなく 2 件**
-    だが、どちらもチェックリスト自身の行（PLAN:41「50 → 53 本」）と turn 3 の履歴記述（PROGRESS:52）で、
-    現在のコードについての陳腐化した主張ではない。チェックリストの「= 0 件」はこの 2 行を除いた意味と読む
+  - 並列サブ作業: なし（推奨本数: **0**。1 ファイル中心で実行待ちが支配）
+
+- [x] T8: `test_leak` に Phase 3 ループ 2 本 + 陽性対照、`examples/binary.mojo`、`examples/bench_formats.mojo`、`pixi.toml` / `final_check.sh` の追従
+  - 完了基準:
+    - (a) `tests/test_leak.mojo`（P28）: `test_binary_execute_does_not_leak`（`MAIN_ITERATIONS` 回、1 接続を使い回し、
+      `SELECT repeat('x', 65536)::text, 1.5::numeric, '2024-01-02'::date, '2024-01-02 03:04:05.678901'::timestamp, '2024-01-02 03:04:05+09'::timestamptz, '12:34:56'::time, '12:34:56+09'::timetz, '1 year 2 mons 3 days 04:05:06.789'::interval, gen_random_uuid(), '{"a":1}'::jsonb` を
+      `execute(sql, [Decimal("1.50"), Date(8825)], result_format=BINARY)`（`WHERE $1 = 1.5 AND $2 = '2024-02-29'` を付けて拡張型パラメータの encode 経路も通す）し、10 列全部を `get[T]` で読む）と
+      `test_zero_copy_does_not_leak`（同 SQL を text で、各行 `get_text(0).byte_length()` を足すだけ）。`_assert_stable` で判定（`TOLERANCE_PAGES` 256 のまま）。
+      docstring `:33`「Twelve tests」→「Fourteen tests」+ Phase 3 の段 2 行、`:47-51` の所要見積もりに実測を足す
+    - (b) **陽性対照**（REQ §5.3。`archive/phase2-params-prepared-tx/PLAN.md` T1 (g) と同じ手順）: `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-leaksrc/` に `src/pq` をコピーし `Result.__deinit__` の `PQclear`（`result.mojo:98-99`）を `pass` にして `mojo build -I <copy> tests/test_leak.mojo -o <scratch>/turn-NNN-test_leak_noclear` → `test_binary_execute_does_not_leak` が **FAIL**（`ABORT_PAGES` 超過か `is_leaking`）。サンプル列を PROGRESS に貼る（PG17 でよい）
+    - (c) `examples/binary.mojo`（REQ §5.4）: `from pq import Connection, PgError, ResultFormat, Decimal, Date, Timestamp, TimestampTz, Time, TimeTz, Interval, UUID` だけで、接続 → `execute(SQL, [], result_format=ResultFormat.BINARY)`（17 型: bool / int2 / int4 / int8 / float4 / float8 / text / bytea / numeric / date / timestamp / timestamptz / time / timetz / interval / uuid / jsonb を 1 行）→ 各列を `get[T]` して `print` → `column_format(0) == BINARY` を確かめ、違えば `exit(1)`。
+      `examples/basic.mojo` と同じ `_conninfo()` / `try` / `exit(1)` の形。`pixi.toml:18` の次に `example-binary = "mojo run -I src examples/binary.mojo"`、`tests/final_check.sh:120` の次に `run_logged mojo run -I src examples/binary.mojo || examples_failed=1`（4/6 段のコメント「Both examples」→「All examples」。P29）
+    - (d) `examples/bench_formats.mojo`（REQ §4.6 / P30）: `probe-bench.mojo` の SQL（`SELECT i::int4, i::int8, i::float8 / 3, 'row ' || i::text, timestamp '2000-01-01' + i * interval '1 second' FROM generate_series(1, 100000) AS g(i)`）を text / binary で `execute(sql, [], result_format=)` し、全行 `get[Int32](0)` / `get[Int64](1)` / `get[Float64](2)` / `get[String](3)` / `get[Timestamp](4)` を読む。
+      `std.time.perf_counter_ns()` で exec と decode を分けて計り、ウォームアップ 1 回 + 計測 3 回、`text  : exec N ms, decode N ms, total N ms` / `binary: ...` の形で 6 行出す。**合否判定はしない**。`pixi.toml` に `bench = "mojo run -I src examples/bench_formats.mojo"`（`final_check.sh` には足さない）。
+      `pixi run bench` を PG17 で 1 回回し 6 行を PROGRESS に貼る（単位 ms）
+    - (e) `pixi run test` 両サーバー PASS（test_leak 14 件、54314 側も leak を回す）、`pixi run check` 6/6（ログに `examples/binary.mojo` の行、`skipped (PQ_TEST_LEAK_SERVERS=1)` が 54314 側）。`check` / `test` / test_leak 1 サーバーの所要（s）を PROGRESS に
+  - 対象: `tests/test_leak.mojo`, `examples/binary.mojo`, `examples/bench_formats.mojo`, `pixi.toml`, `tests/final_check.sh`
+  - 依存: T7
+  - 並列サブ作業（推奨本数: **1**。leak の実行待ちが支配するので example / bench を 1 本に出す）:
+    - A: `examples/binary.mojo` + `examples/bench_formats.mojo` + `pixi.toml` + `final_check.sh` 4/6（対象: その 4 ファイル）
+    - 親: (a)(b)(e)
+
+- [x] T9: 文書の最終整備（`__init__.mojo` 型マッピング / Parameters 表）+ 受け入れ基準の総点検 + 最終判定
+  - 完了基準:
+    - (a) `src/pq/__init__.mojo:13-34` の型マッピング表を REQ §4.2 / §4.3 の 17 行（+ json / jsonb）に拡張し「text form」「binary form」の 2 列、「anything else」行を「`String` in text format only; `TYPE_MISMATCH` in binary」に。`:36-63` の Parameters 表に 8 型（OID / binary / 幅）。`:3-4` の「Phase 2 adds ...」に「Phase 3 adds `decode_binary`, `types_numeric`, `types_datetime`, `types_uuid`」。
+      `## Result format` / `## Zero-copy access` 節（T2 / T7）の内容と矛盾が無いことを読み合わせる
+    - (b) 追従先チェックリストの**全行**のコマンドを実行し、結果を PROGRESS の「追従先チェックリスト ✓」に素のシェルで再現できる形で書く（Phase 1 reflect 提案）
+    - (c) REQ §5.1 / §5.2 / §5.4 の各項目に対応するテスト名（ファイル名 + 関数名）を PROGRESS に 1 行ずつ対応づける（verify が格子を作る材料）。対応先の無い項目が残っていれば**このタスクでテストを足す**
+    - (d) `pixi run check` 6/6 PASS、`pixi run test` 両サーバー PASS、`pixi run package` 警告ゼロ、`pixi run example-binary` / `pixi run bench` が単体で動く。所要（s）を PROGRESS に
+  - 対象: `src/pq/__init__.mojo`（+ (c) で足すテスト）
+  - 依存: T8
+  - 並列サブ作業: なし（推奨本数: **0**）
+
+- [x] F1: `decode_numeric` の正規化後 weight 範囲検査（verify round 1 の指摘 1）+ docstring / コメントの字句 3 件
+  - 背景: `Decimal._from_parts`（`src/pq/types_numeric.mojo:253-264`）は先頭ゼログループを落とすたびに `stripped -= 1` し、最後に `Int16(stripped)` で狭める。
+    wire `0002 8000 0000 0000 0000 0001`（ndigits 2 / weight -32768 / digits [0, 1]）は `decode_numeric` の全検査を通り、`stripped = -32769` が `32767` に wrap して 1e131068 相当の値が**エラー無しで**返る
+    （verify turn 12 のファズ `turn-012-fuzz.mojo` の crafted ケース・コードレビュー・セキュリティチェックの 3 経路で一致。PG の `make_result` は同じ入力を `value overflows numeric format` で拒否する）。REQ §5.2「範囲外 weight → PgError」の取りこぼし。
+    サーバーは正規化済みの値しか送らないので実害は malformed wire に限るが、D3 の「不正値は PgError」の契約内
+  - 期待結果（**唯一の表**。完了基準とテストはこれを参照し、他所に重複して書かない）:
+    | wire（hex、空白は読みやすさのため） | 結果 |
+    |---|---|
+    | `0001 8000 0000 0000 0001`（既存 `test_numeric_minimum_weight_decodes`） | 成功のまま。`String()` は `0`（dscale 0） |
+    | `0002 8001 0000 0000 0000 0001`（先頭ゼロ 1 群、stripped weight = -32768） | 成功。1 行目の値と `==` |
+    | `0002 8000 0000 0000 0000 0001`（stripped weight = -32769） | `PgError(kind=TYPE_MISMATCH)`。message に `cannot decode binary numeric` と `weight` を含む |
+    | `0003 8000 0000 0000 0000 0000 0001`（14 byte、stripped weight = -32770） | 同上 |
+  - 完了基準:
+    - (a) `src/pq/decode_binary.mojo` `decode_numeric`: digits を読み終えた後・`_from_parts` を呼ぶ**前**に先頭ゼログループ数 `lead` を数え、`Int(weight) - lead < -32768` なら
+      `_binary_value_error("numeric", "weight <stripped> out of range after stripping <lead> leading zero groups")` を raise（表の 3・4 行目）。docstring の Raises に 1 行。
+      `Decimal._from_parts` の docstring に「stripped weight が `Int16` に収まることは呼び出し側が保証する。`_parse_opt` は先頭ゼロ群を作らないので検査不要、`decode_numeric` は検査してから渡す」を書く（コードは `_from_parts` を触らない）
+    - (b) `tests/test_decode_binary.mojo` に `test_numeric_rejects_weight_underflow_after_strip` を 1 件（表の 2〜4 行目を 1 関数で。既存の `_assert_numeric_rejected` / `_error_message` / `_ok[Decimal]` を使う。
+      message の部分文字列は `"cannot decode binary numeric"` と `"weight"`）。`grep -c '^def test_' tests/test_decode_binary.mojo` = **78**（現 77）
+    - (c) 字句 3 件（コードは触らない）:
+      `src/pq/params.mojo:655-657` のコメント「`paramLengths` is a C `int`, so a longer buffer would reach the server with a wrapped … length」→ 根拠を「PostgreSQL のメッセージ長 / `MaxAllocSize` の上限 1 GB（0x3FFFFFFF）に合わせた保守的な値。`c_int` 自体は 0x7FFFFFFF まで wrap しない」に；
+      `src/pq/result.mojo` `get_text` docstring の (3)「`Connection.open` leaves `client_encoding` at the `UTF8` the container and libpq default to」→「`pq` は `client_encoding` を触らない。libpq の既定はデータベースの `server_encoding`（または `PGCLIENTENCODING`）で、テストはテスト用コンテナで `UTF8` であることだけを確かめている。UTF-8 は検証しない」の趣旨；
+      `src/pq/__init__.mojo` `## Zero-copy access` 2 つ目の箇条書き末尾「`client_encoding` is `UTF8` and that is the guarantee」→ 同趣旨
+    - (d) `pixi run test` 両サーバー PASS、`pixi run check` 6/6 PASS（作業木のまま）。所要を PROGRESS に
+  - 対象: `src/pq/decode_binary.mojo`, `src/pq/types_numeric.mojo`（docstring のみ）, `src/pq/params.mojo`（コメントのみ）, `src/pq/result.mojo`（docstring のみ）, `src/pq/__init__.mojo`（docstring のみ）, `tests/test_decode_binary.mojo`
+  - 依存: T9
+  - 並列サブ作業: なし（推奨本数: **0**。実行待ちが支配）
 
 ## 決めた事項
 
-1. **ファイル構成**（REQ §2、HANDOFF.md:96-108 の `params.mojo`）: 新規 `src/pq/{encode_binary,params,prepared,transaction}.mojo`、変更 `src/pq/{connection,result,errors,__init__}.mojo` と `src/pq/_ffi/functions.mojo`。
-   `Connection.transaction()` / `prepare()` は `connection.mojo` 内（Mojo 1.1.0 に `extension` は無く、他ファイルからメソッドを足せない — Phase 1 PLAN 決めた事項 5）。`transaction.mojo` / `prepared.mojo` は `from .connection import Connection` し、`connection.mojo` は
-   `from .transaction import Transaction, _default_rollback_failure_handler` / `from .prepared import PreparedStatement` する**循環 import**（plan プローブ (1) で動作確認。`scratch/turn-002-cyc/`）。
-   テスト新規 `tests/{test_encode_binary,test_params,test_prepared,test_transaction,test_savepoint}.mojo`、変更 `tests/{test_ffi,test_errors,test_result,test_leak}.mojo`、`tests/{run_tests,final_check}.sh`、`examples/params.mojo`、`pixi.toml`
-2. **`_ffi` 追加 3 本**（REQ §4.6、RESEARCH §7。ヘッダ `.pixi/envs/default/include/libpq-fe.h` の行は plan 時に `grep -n` で再確認: 600 / 607 / 608）。`functions.mojo` の「result inspection」節（`:80-115`）に追加、`_dl_sym` も同節の末尾（`PQclear` の後）:
-
-   | 関数 | C プロトタイプ（libpq-fe.h 行） | Mojo thin 型 | 備考 |
-   |---|---|---|---|
-   | `PQcmdStatus` | `char *PQcmdStatus(PGresult *res);`（600） | `def(PGresultPtr) thin abi("C") -> CStr` | NULL にならない（`PQcmdTuples` と同じ扱い）。空文字はあり得る（prepare / describe の結果、D1） |
-   | `PQnparams` | `int PQnparams(const PGresult *res);`（607） | `def(PGresultPtr) thin abi("C") -> c_int` | `PQdescribePrepared` の結果以外では 0（P20） |
-   | `PQparamtype` | `Oid PQparamtype(const PGresult *res, int param_num);`（608） | `def(PGresultPtr, c_int) thin abi("C") -> UInt32` | `PQftype` と同じ `UInt32` 戻り |
-
-   合計 **53 本**（`grep -c '^    var PQ' src/pq/_ffi/functions.mojo` が plan 時 50）。`tests/test_ffi.mojo:97-102` の関数名を `test_all_symbols_present` に
-3. **`PgErrorKind.USAGE = Self(5)`**（REQ §4.5、D11。`errors.mojo:20-37` の並びの末尾）。`write_to` は `"Usage"`。使う場所（この一覧以外で USAGE を投げない。サーバーに**送る前**に検出し、`sqlstate` 等は空）:
-   `_ParamBuffers`（String パラメータの埋め込み NUL）/ `PreparedStatement.execute`（個数不一致）/ `Connection.transaction()`（`PQTRANS_IDLE` 以外。ただし 14-3 の例外）/ `Transaction` の終了後の全操作（`commit` / `rollback` / `savepoint` / `rollback_to` / `release` / `execute` ×2 / `prepare`）/ 空の savepoint 名
-4. **`Param`**（D5 / D6 / D14、REQ §4.1。雛形 `scratch/turn-001-probe-implicit.mojo:10-120`）: `struct Param(Copyable, Movable)`（`List[Param]` の要素に必要。冗長警告が出るなら `(Copyable)` に落として PROGRESS に書く）。
-   値は構築時にエンコード済みで持つ: `var _oid: UInt32`, `var _binary: Bool`, `var _null: Bool`, `var _data: List[UInt8]`（テキストは NUL 無しの生バイト、バイナリは BE バイト列、NULL は空）。
-   - `@implicit def __init__(out self, v: Bool)` → OID 16 / `encode_bool`；`Int16` → 21 / `encode_int16`；`Int32` → 23 / `encode_int32`；`Int64` → 20 / `encode_int64`；`Int` → 20 / `encode_int64(Int64(v))`；
-     `Float32` → 700 / `encode_float32`；`Float64` → 701 / `encode_float64`；`var v: String` → OID **0**、テキスト、`v.as_bytes()` のコピー；`v: StringLiteral` → 同（`String(v)` 経由）；`var v: List[UInt8]` → 17 / バイナリそのまま（空・NUL 含み可）
-   - `@implicit def __init__(out self, v: Optional[T])` を T = Bool / Int16 / Int32 / Int64 / Int / Float32 / Float64 / String / List[UInt8] の **9 本**: Some なら上の経路、None なら `Param.null(<T の OID>)`（String は 0、List[UInt8] は 17）。
-     素の `None` リテラルは変換されない（RESEARCH §0.5）ので `Optional[Int](None)` / `var x: Optional[Int] = None` を docstring の例にする。合計 `@implicit` **19 本**（probe は 14 本まで曖昧なしを確認。残り 6 本の Optional は未プローブ — メモ参照）
-   - `@staticmethod def null() -> Param`（OID 0）/ `@staticmethod def null(oid: UInt32) -> Param`（型付き NULL）
-   - 公開アクセサ: `oid(self) -> UInt32` / `is_null(self) -> Bool` / `is_binary(self) -> Bool`（テストと docstring 用。値を返すアクセサは作らない — 資格情報が入り得る値を外に出さない）
-   - OID 定数は `from pq.decode_text import OID_BOOL, OID_BYTEA, OID_INT8, OID_INT2, OID_INT4, OID_FLOAT4, OID_FLOAT8` を使う（REQ §6-4。`OID_TEXT` は T4 テスト、`OID_VARCHAR` / `OID_BPCHAR` / `OID_NAME` は宣言のまま残す — 「削除しない」が §6-4 の主旨で、verify は未使用を差し戻さない）
-5. **`_ParamBuffers(Movable)`**（RESEARCH §3-6、雛形 `scratch/turn-001-probe-libpq.mojo:142-223` の `Params` / `exec_params`）: `def __init__(out self, params: List[Param]) raises PgError` で
-   `types: List[UInt32]`（OID）、`bufs: List[List[UInt8]]`（テキストは **末尾に NUL を 1 byte 足したコピー**、バイナリはそのまま、NULL は空）、`lengths: List[c_int]`（バイナリは byte 長、テキスト / NULL は 0）、`formats: List[c_int]`（1 / 0）、
-   最後に `values: List[Int]`（`bufs[i].unsafe_ptr()` のアドレス、NULL は 0。**bufs を全部作り終えてから**取る — 再確保でアドレスが変わらないように）。各 List に**末尾ダミー 1 要素**（空 params でも非 NULL の有効ポインタ。RESEARCH §2.2）。
-   String パラメータの `_data` に 0 があれば `PgError(USAGE, "embedded NUL byte in parameter $N")`（N は 1 始まり、値は入れない。P4 / K1）。
-   アクセサ: `count() -> Int`、`types_ptr() -> OidPtr`、`values_ptr() -> CStrArray`、`lengths_ptr() -> IntPtr`、`formats_ptr() -> IntPtr`（`unsafe_from_address=Int(list.unsafe_ptr())`。`_ffi/types.mojo:10-16` のエイリアス）。
-   呼び出し側は libpq 呼び出しの**後**に `_ = buffers^` を置く（P5。Phase 1 PLAN 決めた事項 13 と同じ流儀）
-6. **`Connection.execute(self, var sql: String, params: List[Param]) raises PgError -> Result`**（REQ §4.2、D13）: `_reject_nul(sql, "sql")`（TYPE_MISMATCH。Phase 1 E10 の規則）→ `var buffers = _ParamBuffers(params)`（USAGE はここ）→
-   `PQexecParams(self._conn, CStr(sql), c_int(buffers.count()), buffers.types_ptr(), buffers.values_ptr(), buffers.lengths_ptr(), buffers.formats_ptr(), c_int(0))` → `_ = buffers^` → `_ = sql^` → `return self._take_result(res)`。`resultFormat` は定数 0（REQ §4.1）
-7. **`Connection._take_result(self, res: PGresultPtr) raises PgError -> Result`**（REQ §4.2「経路を共有」、P8）: 現 `connection.mojo:251-304` を無変更で移す（Phase 1 PLAN 決めた事項 6 の表がそのまま仕様）。
-   呼ぶ場所: `execute(sql)` / `execute(sql, params)` / `prepare`（PQprepare と PQdescribePrepared の 2 結果）/ `PreparedStatement.execute` / `Transaction` の BEGIN・COMMIT・ROLLBACK・SAVEPOINT 系（すべて `conn.execute(sql)` 経由）。
-   **`Result.command_tag(self) -> String`** を公開メソッドとして追加（`PQcmdStatus` を `String(unsafe_from_utf8_ptr=...)` で即コピー。`affected_rows` の隣。`Transaction.commit()` の判定に使う。REQ にない公開 API だが `affected_rows()` と対で自然、D10 の実装に必要）
-8. **`encode_binary.mojo`**（REQ §4.1 末尾、D6 付随、RESEARCH §3-7）: `encode_bool(v: Bool) -> List[UInt8]` / `encode_int16(v: Int16)` / `encode_int32(v: Int32)` / `encode_int64(v: Int64)` / `encode_float32(v: Float32)` / `encode_float64(v: Float64)`、すべて `-> List[UInt8]`（長さ 1 / 2 / 4 / 8 / 4 / 8、network byte order）。
-   `Int` 用は作らない（`Param` が `Int64(v)` にして `encode_int64`）。`bitcast` は `from std.memory import bitcast`（probe-encode:9）
-9. **`PreparedStatement[origin: ImmOrigin](Movable)`**（REQ §4.3、D7 / D15、雛形 `probe-libpq.mojo:225-287` の `exec_prepared` / `prepare` / `describe`）:
-   フィールド `_conn: Pointer[Connection, Self.origin]`, `_name: String`, `_param_types: List[UInt32]`。`Copyable` にしない（`__deinit__` の DEALLOCATE が二重に走る）。
-   - `Connection.prepare(ref self, var sql: String, param_types: List[UInt32] = List[UInt32]()) raises PgError -> PreparedStatement[origin_of(self)]`:
-     `_reject_nul(sql, "sql")` → `var name = self._next_stmt_name()` → `PQprepare(conn, CStr(name), CStr(sql), c_int(len(param_types)), OidPtr(types のコピー + 末尾ダミー))` → `_ = self._take_result(res)`（失敗はそのまま raise。この時点で文はサーバーに無い）→
-     `PQdescribePrepared(conn, CStr(name))` → `var desc = self._take_result(res2)`（**失敗したら `DEALLOCATE <name>` を生の `PQexec` で試み、結果は `PQclear` して無視し、元のエラーを raise**。P10）→ `PQnparams(desc._res)` / `PQparamtype(desc._res, c_int(i))` を `List[UInt32]` に読む → `desc` は `Result` なので自動 `PQclear`
-   - `_next_stmt_name(self) -> String`: `var _stmt_counter: List[Int]`（`Connection.__init__` で `[0]`）を `Pointer[Int, MutUntrackedOrigin](unsafe_from_address=Int(self._stmt_counter.unsafe_ptr()))[] += 1` で進めて `String("pq_stmt_", n)`（P9 案 A、plan プローブ (4)。`loader.libpq_ptr` と同じキャスト。規約外の書き込みなのでコメントに理由を書く）。
-     失敗した `prepare` でも番号は消費する（単純。名前の再利用で 42P05 を踏まない）
-   - `execute(self, params: List[Param]) raises PgError -> Result`: `len(params) != len(self._param_types)` → `PgError(USAGE, 'prepared statement "pq_stmt_N" takes K parameters, got M')` → `_ParamBuffers(params)`（NUL は USAGE）→
-     `PQexecPrepared(conn, CStr(name), c_int(n), values, lengths, formats, c_int(0))` → `_ = buffers^` → `self._conn[]._take_result(res)`
-   - `param_count(self) -> Int` / `param_type_oid(self, i: Int) raises PgError -> UInt32`（範囲外は `PgError(TYPE_MISMATCH, "parameter index i out of range (0..n-1)")`。`result.mojo:31-44` の `_row_range_error` と同じ文体）/ `name(self) -> String`
-   - `__deinit__(deinit self)`: `var sql = "DEALLOCATE " + self._name`（名前は `[a-z0-9_]` のみなのでエスケープ不要）→ 生の `self._conn[]._pq[].PQexec` → 非 NULL なら `PQclear`。状態も結果も見ない（25P02 / 26000 / 接続断すべて無視。D13。フックは呼ばない）。
-     `_conn[]._pq` / `_conn[]._conn` を読むため `Connection` のフィールドはパッケージ内から見える前提（Phase 1 の `Row` が `Result._res` を読むのと同じ）
-10. **`Transaction[origin: ImmOrigin](Movable)`**（REQ §4.4、D8〜D12、雛形 `scratch/turn-001-probe-tx.mojo:59-84` と plan プローブ `turn-002-cyc/cycpkg/b.mojo`）: フィールド `_conn: Pointer[Connection, Self.origin]`, `_done: Bool`, `_handler: def(PgError) thin`
-    - `Connection.transaction(ref self) raises PgError -> Transaction[origin_of(self)]`: ① `PQstatus(conn) == CONNECTION_BAD` → `PgError(CONNECTION, PQerrorMessage)`（14-3）；② `PQtransactionStatus(conn) != PQTRANS_IDLE` → `PgError(USAGE, "transaction() requires an idle connection (transaction status N)")`；
-      ③ `_ = self.execute("BEGIN")` → `Transaction[origin_of(self)](Pointer(to=self), self._rollback_failure_handler)`
-    - `_check_open(self) raises PgError`: `_done` なら `PgError(USAGE, "transaction already ended")`。`commit` / `rollback` / savepoint 系 / `execute` ×2 / `prepare` の先頭で呼ぶ
-    - `commit(mut self) raises PgError`: `_check_open()` → **`self._done = True` を先に**（送信失敗でも二重送信しない。RESEARCH §3-1）→ `var res = self._conn[].execute("COMMIT")` → `res.command_tag() == "ROLLBACK"` なら `PgError(SERVER, "COMMIT resulted in ROLLBACK: the transaction was aborted", sqlstate="")`（D10 / P12 / E12）
-    - `rollback(mut self) raises PgError`: `_check_open()` → `_done = True` → `_ = self._conn[].execute("ROLLBACK")`
-    - `savepoint(self, var name: String)` / `rollback_to(self, var name: String)` / `release(self, var name: String)`（すべて `raises PgError`）: `_check_open()` → `name == ""` → `PgError(USAGE, "savepoint name must not be empty")` → `var ident = self._conn[].escape_identifier(name^)`（NUL は TYPE_MISMATCH のまま）→
-      `"SAVEPOINT " + ident` / `"ROLLBACK TO SAVEPOINT " + ident` / `"RELEASE SAVEPOINT " + ident` を `self._conn[].execute(...)`。cmd tag は見ない（P24）。存在しない名前の 3B001 はサーバー任せ（P16。docstring に「以降は `rollback()` だけが通る」）
-    - `execute(self, var sql: String) raises PgError -> Result` / `execute(self, var sql: String, params: List[Param]) raises PgError -> Result` / `prepare(self, var sql: String, param_types: List[UInt32] = List[UInt32]()) raises PgError -> PreparedStatement[Self.origin]`: `_check_open()` → `self._conn[]` へ委譲（D12）
-    - `__deinit__(deinit self)`: `_done` なら何もしない。そうでなければ生の `PQexec(conn, "ROLLBACK")`: NULL → `PgError(CONNECTION, PQerrorMessage(conn))`；`PQresultStatus != PGRES_COMMAND_OK` → 診断を `_error_field` でコピー（`connection.mojo:46-64`）→ `PQclear` → `sqlstate == ""` かつ `CONNECTION_BAD` なら CONNECTION、それ以外 SERVER；COMMAND_OK → `PQclear` のみ。
-      エラーがあれば `self._handler(err)`。**`__deinit__` から投げない**（P15、I3）
-11. **ハンドラ**（D8 / D9、REQ §4.4 末尾）: 型 `def(PgError) thin`。既定 `_default_rollback_failure_handler(e: PgError)` は `transaction.mojo` のモジュール関数で `print("pq: implicit ROLLBACK failed: ", e.message, sep="", file=stderr)`（`from std.sys import stderr`。plan プローブ (2)）。
-    `Connection` に `var _rollback_failure_handler: def(PgError) thin`（`__init__` で既定を代入）と `set_rollback_failure_handler(mut self, handler: def(PgError) thin)`（docstring: 「`transaction()` 生成時にコピーされる。生成後の差し替えは既存の `Transaction` に反映されない」）
-12. **テストがハンドラ呼び出しを観測する手段**（P15、RESEARCH §5-4）: 非キャプチャ `def _record_rollback_failure(e: PgError)` が `_ = setenv("PQ_TEST_ROLLBACK_FAILURE", String(e.kind) + "|" + e.message, True)` を実行（`from std.os import setenv, getenv`。`tests/test_loader_fail.mojo:14,59` と plan プローブ (3) で動作確認）。
-    テストは事前に空文字を `setenv` し、破棄後に `getenv` を読む。`_Global` セルは使わない（1 行で済む `setenv` を優先。子プロセスは無いので漏れない）
-13. **ASAP 破棄の規約**（P1 / P2、RESEARCH §0 結論 4）: `Transaction` / `PreparedStatement` を使うテスト・example・docstring は「最後に使う行」を明示する — `commit()` / `rollback()` / `_ = tx^` / `_ = stmt^` を最後に置き、その**後**に `conn.execute` で状態を確認する。
-    `_ = x^` は破棄ではなく「ここまで生かす」マーカー（RESEARCH §0.5）。T5 (b)-4 がこの挙動自体をテストで固定する
-14. **REQ の読み替え（RESEARCH §5。REQ 本文は変更しない。verify はこの項を正として判定する）**:
-    - 14-1 **prepared × ROLLBACK**（REQ §4.3 末尾 / §5.1a 4 項目目）: PG14 / PG17 とも PREPARE は非トランザクショナルで、tx 内で `prepare` して `ROLLBACK` しても文は残り `execute` は**成功する**（E1〜E4、公式 ML）。
-      テストはこの成功を固定し（T4 (b)-5）、REQ が求める「26000 → `kind=Server`、破棄時の DEALLOCATE 失敗は無視されトレースバックを出さない」は**ユーザーが `DEALLOCATE <stmt.name()>` を手で送った後の `stmt.execute()`**で固定する（T4 (b)-4）。D16 の意図（その状況での堅牢性）はこれで満たす
-    - 14-2 **型不一致の題材**（REQ §4.2 / §5.1a 3 項目目）: 「int4 列に `Int`（int8）→ 42804 等」は不成立（B1: assignment cast で成功）。題材を **`Bool` → int4 列（42804、L1）** と **`Int(3000000000)` → int4 列（22003、L4）** に差し替え、`Int(5)` → int4 列の成功も固定する（T3 (c)-6）。「sqlstate 非空を assert」の方針は維持
-    - 14-3 **接続断中の `transaction()`**（REQ §4.4「IDLE でなければ USAGE」）: `PQstatus == CONNECTION_BAD`（`PQtransactionStatus` は `PQTRANS_UNKNOWN`）を先に見て `kind=CONNECTION` にする（P14、I5）。REQ §4.5 の `USAGE` は「クライアント側で検出した **API 誤用**」であり、死んだ接続は誤用ではないので定義に沿った解釈。それ以外の非 IDLE（INTRANS / INERROR / ACTIVE）は USAGE
-    - 14-4 **`__del__`** は Mojo 1.1.0 の `__deinit__(deinit self)` と読む。docstring では `__deinit__` と書く
-    - 14-5 **型付き NULL が要る文脈**: `SELECT $1` は OID 0 の NULL でも通る（A3）。`Param.null(oid)` の docstring の例は `SELECT $1 + 1` / `INSERT ... VALUES ($1)` ではなく `SELECT $1::int4` との OID 一致（A4）で示す
-15. **リーク測定**（D4、REQ §5.3、RESEARCH §2.3）: `tests/run_tests.sh` が `mojo build -I src tests/test_leak.mojo -o build/test_leak` を 1 回行い、各サーバーで `build/test_leak` を実行。環境変数 **`PQ_TEST_LEAK_SERVERS`**（leak を回すサーバー数。未設定 = 全部、`final_check.sh` は `1` = 54317 のみ）。
-    `TOLERANCE_PAGES` は T1 (f) の手順で 16 か 256 に確定（研究時の built binary は 4 ループとも ±2 ページ、ベースライン 4,084 ページ）。陽性対照は T1 (g)（PQclear / PQfreemem）と T6 (c)（Phase 2 の 3 経路）
-16. **fmt 判定**（REQ §6-3、P23）: `build/fmtcheck/` にコピー → `mojo format --quiet` → `diff -r -q`。`git` を使わないので作業木の状態に依存しない。`build/` は gitignore 済み
-17. **`final_check.sh` 6/6 は `warning:` と `WARNING:` の両方を数える**（P13）。libpq の既定 notice processor はサーバーの WARNING / NOTICE を stderr に印字するので、USAGE 検査が効いていれば 0 件になる。`PQsetNoticeProcessor` はバインドしない（Phase 2 対象外）
-18. **テスト用テーブル**（REQ §7）: すべて `CREATE TEMP TABLE pq_p2_<name>`（セッション限定、両サーバー・並行プロセスで衝突しない）。`tests/fixtures/schema.sql` は変更しない。prepared 名は自動（`pq_stmt_N`）で接続ごとなので衝突しない
-19. **メッセージ文言**（USAGE 系。テストが `find` で部分一致を見るので固定）: `embedded NUL byte in parameter $N` / `prepared statement "pq_stmt_N" takes K parameters, got M` / `transaction() requires an idle connection (transaction status N)` / `transaction already ended` / `savepoint name must not be empty` / `COMMIT resulted in ROLLBACK: the transaction was aborted` / `parameter index i out of range (0..n-1)`
-20. **NUL の非対称**: `sql` 引数は Phase 1 どおり `_reject_nul(sql, "sql")` → `TYPE_MISMATCH`（E10 の規則を変えない）。`String` パラメータの NUL は REQ §4.1 どおり `USAGE`（「libpq に渡せない引数」ではなく「値として送れないものを送ろうとした API 誤用」）。両方を `__init__.mojo` の `## PgErrorKind` に書く
-21. **`List[c_int]`**（P3）: `lengths` / `formats` は `List[c_int]`、`types` は `List[UInt32]`、`values` は `List[Int]`（アドレス）。`List[Int]` を `IntPtr` に渡すと 8 byte ストライドで壊れる
-22. **T4 (b)-6 の期待値**（P11 で plan が決めるとされた点）: aborted tx 内で破棄された `PreparedStatement` の文は**サーバーに残る**（DEALLOCATE が 25P02 で無視される。E10 / E14）。テストは `pg_prepared_statements` で count 1 を確認し、手動 `DEALLOCATE` で片付ける
-23. **`Connection` の新フィールド**: `_stmt_counter: List[Int]`（9）と `_rollback_failure_handler: def(PgError) thin`（11）。`Connection(Movable)` のまま。`__init__(out self, conn, pq)` の docstring に両方を書く
+1. **`ResultFormat`**（REQ §4.1 / D14）: `src/pq/result.mojo` に `@fieldwise_init struct ResultFormat(Equatable, TrivialRegisterPassable, Writable)`、`var value: Int`、`comptime TEXT = Self(0)` / `comptime BINARY = Self(1)`、`__eq__` / `__ne__` / `write_to`（`"Text"` / `"Binary"`）。`PgErrorKind`（`src/pq/errors.mojo:9-86`）と同形。`pq` 直下で再エクスポート。
+   `Result.column_format(i) raises PgError -> ResultFormat` は `ResultFormat(Int(PQfformat(res, i)))`（`_ffi/functions.mojo:101-103`）。追加の `_ffi` バインドは無し（REQ §4.8。`PQfformat` / `PQgetlength` / `PQftype` は `functions.mojo:98-111` に済み）
+2. **`result_format` キーワード引数**: `Connection.execute(self, var sql: String, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT)`（`connection.mojo:286-288`、`:362` の `c_int(0)` → `c_int(result_format.value)`）、`PreparedStatement.execute(self, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT)`（`prepared.mojo:127`、`:188`）。
+   **`Transaction.execute(sql, params)`（`transaction.mojo:393`）にも同じ引数を足して passthrough する**（REQ §4.1 には無いが、`Transaction.execute` は `Connection.execute` の委譲で 1 引数足すだけ。無いとブロック内で binary を使う経路が `conn.execute` 直呼びに限られる）。`execute(sql)` 単体は `PQexec` でテキスト固定のまま
+3. **`decode_binary` のシグネチャ**: `def decode_binary[origin: ImmOrigin, //, T: Copyable](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> T`（`src/pq/decode_binary.mojo`）。生ポインタ + 長さではなく **`Span`** を取る（単体テストが `Span[UInt8](list)` で呼べる。`Row._raw(col) -> Span[UInt8, Self.origin]` が `PQgetvalue` / `PQgetlength` から作る）。
+   **turn 4 訂正**: 元の `bytes: Span[UInt8]`（origin 無し）は `error: 'Span' failed to infer parameter 'origin'` でコンパイルできない。`origin: ImmOrigin, //` を先頭に置く形が**必須**で、`Span` を取る全関数（個別 decoder 6 本 + `_be_bits` / `_check_length`）に同じ前置が要る。呼び出しは `decode_binary[T](span, oid)` のままで変わらない（T3〜T5 の新 decoder も同じ前置で書く）。
+   `T` の対応（REQ §4.2 / §4.3 の表のとおり厳密）: `Bool`→16 / `Int16`→21 / `Int32`→23 / `Int64`・`Int`→20 / `Float32`→700 / `Float64`→701 / `String`→25・1043・1042・19・114・3802（3802 は先頭 1 byte = 1 を剥がす）/ `List[UInt8]`→17 / `Decimal`→1700 / `Date`→1082 / `Timestamp`→1114 / `TimestampTz`→1184 / `Time`→1083 / `TimeTz`→1266 / `Interval`→1186 / `UUID`→2950。他の `T` は `comptime assert False`。
+   個別関数は `decode_bool / decode_int16 / decode_int32 / decode_int64 / decode_float32 / decode_float64 / decode_numeric / decode_date / decode_timestamp / decode_timestamptz / decode_time / decode_timetz / decode_interval / decode_uuid`（`encode_binary.mojo:16-18` の対の約束。text 系 / bytea / jsonb は `decode_binary[T]` の分岐内で直接）。
+   長さ検査（P21）: bool 1 / int2 2 / int4 4 / int8 8 / float4 4 / float8 8 / numeric `8 + 2*ndigits`（かつ ≥ 8）/ date 4 / timestamp・timestamptz・time 8 / timetz 12 / interval 16 / uuid 16 / jsonb ≥ 1。
+   値検査: bool は 0 / 1 のみ（P24。サーバーは 2 を受理するがクライアントは厳格）、numeric は sign ∈ {0x0000, 0x4000, 0xC000, 0xD000, 0xF000}・dscale ≤ 0x3FFF・digit ≤ 9999（special は sign だけ見て weight / dscale を捨てる。P1）、time は 0..86400000000（上限含む。P11）、timetz は |zone| < 57600、jsonb version = 1。date / timestamp / timestamptz / interval は範囲検査しない（番兵を含めサーバーが出す値は全部有効。rust-postgres の "not drained" 相当は長さ検査で担保）。
+   読み出しは `bitcast[DType.int16, 1](UInt16)` / `bitcast[DType.int32, 1](UInt32)` / `bitcast[DType.float32, 1](UInt32)` / `bitcast[DType.float64, 1](UInt64)`（RESEARCH §0.5）。binary の `String` は `String(unsafe_from_utf8=span)`（UTF-8 検証なし。text 経路 `result.mojo:331-333` と同じ前提。P20）
+4. **binary の `TYPE_MISMATCH` メッセージ**（テストは 2 語以上の部分文字列で確かめる）:
+   - OID 不一致（`get[String]` の非文字列 OID と未対応 OID を含む。REQ §4.1 / D9）: `column is oid <oid> but <T の名前> was requested in binary format; request a matching type or re-run with ResultFormat.TEXT`（`<T の名前>` は `String` / `List[UInt8]` / `Int32` のような Mojo 型名。期待部分文字列 `"oid <n>"` と `"ResultFormat.TEXT"`）
+   - 長さ不一致: `binary <pgtype> value has <actual> bytes, expected <expected>`（期待部分文字列 `"bytes, expected <n>"`）。
+     **turn 5 訂正**: **numeric だけは長さ誤りも値エラー側の文面**にした（`cannot decode binary numeric: has <actual> bytes, expected 8 + 2*ndigits = <n>` / `... expected at least 8`）。
+     T3 (f) が numeric の不正 5 ケース**全部**に部分文字列 `"cannot decode binary numeric"` を要求しており、`_binary_length_error` の文面ではそれを満たせないため（可変長型なので「期待長」が単一の定数でないことにも合う）
+   - 値の不正: `cannot decode binary <pgtype>: <reason>`（bool `byte is 2, expected 0 or 1`／jsonb `version byte is 2, expected 1`／numeric `invalid sign 0x1234`・`digit 10000 out of range`・`dscale 16384 out of range`／time `86400000001 is out of range`／timetz `zone 57600 is out of range`）
+   - text 形式の parse 失敗は既存の `_decode_error`（`decode_text.mojo:76-81`）と同形 `cannot decode "<text>" as <pgtype>`（型モジュール側に同じ文面の private ビルダーを置く。`decode_text` を import すると循環するため）
+5. **`Decimal`**（`src/pq/types_numeric.mojo`。D10）: `struct Decimal(Copyable, Movable, Equatable, Writable)`、フィールドは **private**（`_sign: UInt16` / `_weight: Int16` / `_dscale: UInt16` / `_digits: List[Int16]`。sign 定数 `_SIGN_POS = 0x0000` / `_SIGN_NEG = 0x4000` / `_SIGN_NAN = 0xC000` / `_SIGN_PINF = 0xD000` / `_SIGN_NINF = 0xF000`）。
+   公開: `__init__(out self, text: String) raises PgError`（失敗は **`USAGE`** `invalid numeric literal "<text>"`）/ `@staticmethod parse(text: String) raises PgError -> Self`（失敗は **`TYPE_MISMATCH`** `cannot decode "<text>" as numeric`。`decode_text` が呼ぶ）/ `nan()` / `infinity()` / `negative_infinity()` / `dscale() -> Int` / `is_nan()` / `is_infinite()` / `is_finite()` / `__eq__` / `__ne__` / `write_to`。
+   package 内部用 `_from_parts(sign: UInt16, weight: Int16, dscale: UInt16, var digits: List[Int16]) -> Self`（`decode_numeric` が呼ぶ。**正規化**: 先頭・末尾のゼログループを落として weight を調整、全ゼロは `ndigits 0, weight 0, sign POS`、special は weight 0 / dscale 0 / digits 空。PG `make_result`）。parse も同じ正規化を通す。
+   `__eq__` は `(_sign, _weight, _digits)` の一致（dscale は見ない → `1.0 == 1.00`。NaN == NaN、Inf == Inf。PG `numeric_eq` と同じ。P5）。文字列化は RESEARCH §3-1、解釈は §3-2。受ける文法は `[+-]?(\d+(\.\d*)?|\.\d+)` と `NaN` / `[+-]?Infinity`（これ以外は拒否。D14 / P26）。dscale ≤ 16383、weight は Int16 に収まること（P6）。`Param` ctor は OID 1700 の binary（`encode_numeric`。special は `0000 0000 <sign> 0000`）
+6. **`UUID`**（`src/pq/types_uuid.mojo`）: `struct UUID(Copyable, Movable, Equatable, Writable)`、`var bytes: Array[UInt8, 16]`（公開。`InlineArray` は無い。RESEARCH §0.5）。`__init__(out self, bytes: Array[UInt8, 16])` / `__init__(out self, text: String) raises PgError`（`USAGE` `invalid uuid literal "<text>"`）/ `parse(text)`（`TYPE_MISMATCH`）/ `write_to`（小文字 `8-4-4-4-12`）/ `__eq__` / `__ne__`。受ける文法は 36 文字の `8-4-4-4-12`（16 進は大文字小文字どちらも）だけ。`Param` ctor は OID 2950 の 16 byte
+7. **`Date` / `Timestamp` / `TimestampTz`**（`src/pq/types_datetime.mojo`。D11）: いずれも `@fieldwise_init struct X(Copyable, Movable, Equatable, Writable)` で生フィールド公開（`Date.days: Int32`、`Timestamp.micros: Int64`、`TimestampTz.micros: Int64`（UTC））。生 ctor は**検査しない**（PG 内部表現をそのまま持つ）。
+   共通: `@staticmethod infinity() -> Self` / `negative_infinity() -> Self`（`Int32.MAX` / `Int32.MIN` / `Int64.MAX` / `Int64.MIN`。struct 型の `comptime` 定数は使わない）、`is_infinite()` / `is_finite()`、`@staticmethod parse(text: String) raises PgError -> Self`（`TYPE_MISMATCH`）、`write_to`（PG の text 形式と同じ。`infinity` / `-infinity`）、`__eq__` / `__ne__`（内部整数の比較）。
+   検査付き構築子（REQ §4.3。失敗は **`USAGE`** `invalid <pgtype>: <成分>`）: `Date.from_ymd(y, m, d)`（天文年: 1 BC = 0。`1 <= m <= 12`、`1 <= d <= days_in_month`、結果が `-2451545..2145031948`）、`Timestamp.from_ymd_hms(y, m, d, h, mi, s, us = 0)`（`0 <= h <= 23`、`0 <= mi, s <= 59`、`0 <= us <= 999999`、結果が `-211813488000000000..9223371331199999999`）、`TimestampTz.from_utc(...)`（同じ検査。UTC として解釈）。
+   分解アクセサ `year() / month() / day()`（Date）、`+ hour() / minute() / second() / microsecond()`（Timestamp / TimestampTz は UTC で）は **`raises PgError`** で、無限値では `USAGE` `<pgtype> is infinite; <accessor>() is undefined`（RESEARCH §3-7 の推奨どおり番兵値を返さない）。
+   text: `Date` は `YYYY-MM-DD( BC)?`（年は 4 桁ゼロ埋め・4 桁超はそのまま。`y <= 0` は `1 - y` + ` BC`）、`Timestamp` は `YYYY-MM-DD HH:MM:SS(.f{1,6})?( BC)?`、`TimestampTz` は `YYYY-MM-DD HH:MM:SS(.f{1,6})?[+-]HH(:MM(:SS)?)?( BC)?`（**` BC` はオフセットの後**。P13。解釈は末尾 ` BC` を剥がしてから時刻部の後ろで `[+-]` を探す。`utc = local - offset`。|offset| ≥ 57600 は拒否）。`String(TimestampTz)` は UTC で `+00` 付き（コンテナの TimeZone が `Etc/UTC` なので往復テストは文字列一致になる）。
+   `atol` は使わず桁位置で読む（P25。先頭 `+` / 空白 / 桁数違いを拒否）。小数秒は読んだ桁数 n で `10^(6-n)` 倍、7 桁以上は拒否（P14）。暦算法は RESEARCH §2.2.3 のコード（Hinnant、Mojo 床除算、`y // 400`）
+8. **`Time` / `TimeTz` / `Interval`**（同じ `types_datetime.mojo`）: `Time(micros: Int64)`（0..86400000000。生 ctor 無検査）、`TimeTz(micros: Int64, offset_secs: Int32)`（**PG と同じ西が正**: `+09` は -32400。P10）、`Interval(micros: Int64, days: Int32, months: Int32)`（フィールド順もこの順。P7。正規化しない: `months / days / micros` をそのまま保持）。
+   `Time.from_hms(h, mi, s, us = 0)` / `TimeTz.from_hms(h, mi, s, us, offset_secs)`（`USAGE`。`h == 24` は `mi = s = us = 0` のときだけ可。`|offset_secs| < 57600`）、アクセサ `hour() / minute() / second() / microsecond()`（無限値が無いので `raises` しない）、`TimeTz.offset_secs` はフィールドをそのまま読む。
+   `Interval` は `infinity()` / `negative_infinity()`（3 フィールド全 MAX / 全 MIN。PG17 の番兵）と `is_infinite()`（**3 つ全部**が MAX か全部 MIN のときだけ）/ `is_finite()`。分解アクセサは作らない（フィールド直読み）。
+   text: `Time` は `HH:MM:SS(.f{1,6})?`（HH は 2 桁、`24:00:00` 可）、`TimeTz` は `+ [+-]HH(:MM(:SS)?)?`（出力は `-offset_secs` を `EncodeTimezone` の規則で: 分・秒が 0 なら省略。`offset_secs <= 0` → `+`）、`Interval` は IntervalStyle `postgres` の出力文法（RESEARCH §2.2.3: `year = months // 12`（**C の切り捨て除算**。Mojo の `//` は床なので負値は `-(abs // 12)` で書く）、`mon = months % 12`（同じく符号は months に合わせる）、複数形は値 ≠ 1、`+` 接頭辞は「前に出した成分が負で、この成分が正」、時刻部は `[-]H+:MM:SS(.f)?` で H は 2 桁以上上限なし、全部 0 は `00:00:00`、`infinity` / `-infinity`）。解釈はその逆のみ（`1 week` / ISO 8601 / `1.5 days` 等サーバー入力専用の形は拒否）
+9. **zero-copy**（REQ §4.5 / RESEARCH §2.3.1）: `Row.get_text(self, col: Int) raises PgError -> StringSlice[Self.origin]` と `Row.get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]`。`Int` 添字のみ（名前版は作らない。YAGNI）。
+   `get_bytes` は **形式・OID を問わず** `PQgetvalue` 領域の `PQgetlength` バイト（REQ §4.5 の文言どおり。text 形式なら text のバイト列、binary なら wire バイト列。これは `get[List[UInt8]]` の OID 規則とは別の「生の領域を見る」API で、D9 が却下したのは `get[T]` の例外である）。
+   `get_text` は text 形式なら任意 OID、binary 形式なら文字列系 6 OID のみ（jsonb は version byte を 1 つ飛ばす）、他は決めた事項 4 の OID 不一致。NULL は `NULL_VALUE`。実装は `Pointer[UInt8, Self.origin](unsafe_from_address=Int(ptr))` → `Span[UInt8, Self.origin](unsafe_ptr=p, length=n)` → `StringSlice[Self.origin](unsafe_from_utf8=span)`（`Span(ptr=)` ではない）。`ref` は返さない（P19）
+10. **接続直後の GUC 固定**（REQ §4.7 / D12）: `comptime _SESSION_SETUP_SQL = "SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'"`（`connection.mojo`）。`_adopt` が `Connection` を組み立てた直後に `execute(sql)` で 1 回送る。失敗時の `PQfinish` は `Connection.__deinit__`（`:121-124`）に任せ、kind は `_take_result` の分類（`SERVER` / `CONNECTION`）。`TimeZone` は触らない。`client_encoding` も触らない（`SHOW client_encoding` が `UTF8` であることをテストで確かめるだけ）
+11. **モジュール配置**: `src/pq/types_numeric.mojo` / `src/pq/types_datetime.mojo` / `src/pq/types_uuid.mojo` の 3 ファイル（HANDOFF §4 の案は `value.mojo` 1 本だが、RESEARCH §6 の 1,500 行見積もりとサブエージェント並列の単位を優先して分けた）。OID 定数は従来どおり `decode_text.mojo:18-49` が唯一の置き場（`decode_binary.mojo` / `params.mojo` はそこから import）。
+   import の向き: `types_*` → `errors` のみ；`decode_text` / `decode_binary` / `encode_binary` → `types_*`；`params` → `encode_binary` + `decode_text`（OID）；`result` → `decode_text` + `decode_binary`。循環なし
+12. **テストファイル**: サーバー不要 — `tests/test_decode_binary.mojo`（T2〜T5）、`tests/test_types_numeric.mojo`（T3）、`tests/test_types_uuid.mojo`（T3）、`tests/test_types_datetime.mojo`（T4〜T5）、既存 `test_encode_binary.mojo` / `test_params.mojo` への追記；サーバー — `tests/test_binary.mojo`（T2）、`tests/test_extended_numeric.mojo` / `tests/test_extended_datetime.mojo`（T6）、`tests/test_zero_copy.mojo`（T7）、`test_connection.mojo`（T1）/ `test_leak.mojo`（T8）への追記。
+   期待値は RESEARCH §2.2 の hex / 文字列を**そのまま**写す（PG17 / PG14 実測）。期待メッセージは 2 語以上の部分文字列
+13. **`Param` の拡張型 ctor**（REQ §4.4 / D14）: 8 型 × （値 / `Optional`）= 16 本の `@implicit`、すべて binary で OID は決めた事項 3 の値。json / jsonb は専用型を作らず `String`（OID 0、text）のまま。`_ParamBuffers` は変更なし（`_ = buffers^` の並びも変えない。RESEARCH §0.5 末尾）
+14. **ベンチ**（REQ §4.6）: `examples/bench_formats.mojo`、SQL は probe-bench のもの（決めた事項 — T8 (d)）、`pixi run bench`。`final_check.sh` には入れない。数値は PROGRESS / VERIFICATION に単位付きで記録、合否なし
 
 ## メモ
 
-### reflect（`.gsd-lite/reflect/20261015-2308-phase1-sync-text-basic.md`「次回への提案」）の反映
-
-| # | 提案 | 反映 | どこで / 理由 |
-|---|---|---|---|
-| 1 | 検出力を主張するテストの完了基準に陽性対照を最初から書く | **採用** | T1 (g)、T6 (c)。「未実証」の申し送りを禁止と明記 |
-| 2 | `final_check.sh` 1/6 を `git diff` からフォーマッタ自身の差分判定に | **採用** | T1 (d)。直すまで「`check` はコミット後」を検証コマンド節に書いた |
-| 3 | RESEARCH 冒頭に Mojo 1.1.0 既知の落とし穴 | 採用済み（research） | RESEARCH §0.5。plan はそこから `List[UInt8](1,2,3)` 不可・`s[i]` 不可・`UnsafePointer` 非推奨を impl 申し送りに転記 |
-| 4 | research スキルに stdlib シンボル確定手順 | 対象外（D18） | スキル側の変更は今回しない。代替として plan が循環 import / stderr / setenv を**実測**してから PLAN に書いた |
-| 5 | impl のサブエージェント依頼文テンプレ 3 行 | **採用（申し送り）** | 下の「impl への申し送り」に (a)(b)(c) を固定で書いた（D18 によりスキルは変えない） |
-| 6 | PROGRESS の追従先チェックリスト ✓ は素のシェルで再現できる形で | **採用** | 追従先チェックリストの「確かめ方」を全部 `grep` 系で書き、T7 (e) で実行結果を書くことを完了基準にした |
-| 7 | リーク測定を `mojo build` バイナリに切り替えるか discuss で聞く | 採用済み（D4） | T1 (e)(f) |
-| 8 | `check` の待ち時間削減（leak を 1 サーバー） | **採用** | T1 (e)、`PQ_TEST_LEAK_SERVERS=1` |
-| 9 | verify round 2 を「格子の再確認 + 回帰のみ」に | 対象外（verify の運用。REQ §9 で申し送り済み） | — |
-| 10 | 冒頭 1 コミットで小物（docstring 3 件 / REQ 文言 / OID 定数） | **採用** | T1 (a)(b)(c)。REQ §6 と同じ 1 タスク |
-| 11 | `gsd-lite-loop.sh` の `ended_at` / research 対象に compose | 対象外（ツール側）/ 採用済み（research） | — |
-
 ### RESEARCH §3「盗める点」の採否
 
-| # | 項目 | 採否 | 理由 / どこで |
+| # | 内容 | 採否 | 理由 |
 |---|---|---|---|
-| 1 | `done` フラグ + 破棄時 ROLLBACK + 結果無視（rust-postgres） | 採用（改良） | 決めた事項 10。結果は無視せず `def(PgError) thin` フックへ（D8）。`commit` / `rollback` は `done = True` を先に |
-| 2 | COMMIT のコマンドタグ検査（PG 公式 E12 / F10） | 採用 | 決めた事項 10 `commit()`。`Result.command_tag()` を足す（決めた事項 7）。rust-postgres / psycopg より厳しい本プロジェクト独自 |
-| 3 | prepared 名 `pq_stmt_N`（psycopg `_pg3_N`）+ describe で型保持 | 採用 | 決めた事項 9。describe 失敗時は DEALLOCATE を試みてから raise（P10） |
-| 4 | savepoint 名は `escape_identifier`（psycopg `sql.Identifier`）、空文字は先に弾く | 採用 | 決めた事項 10。G3〜G9 で `"sp ""1"""` が動作確認済み |
-| 5 | 外側 tx 判定は `PQtransactionStatus == IDLE`、UNKNOWN（接続断）は CONNECTION | 採用 | 決めた事項 10 / 14-3 |
-| 6 | `PQexecParams` のバッファ組み立て（probe-libpq `Params`） | 採用 | 決めた事項 5 `_ParamBuffers`。末尾ダミー・`List[c_int]`・`_ = x^` の並び |
-| 7 | `encode_binary.mojo` を `decode_binary` の逆として同名規則で | 採用 | 決めた事項 8、T2 (e) |
-| 8 | psycopg「ROLLBACK で prepared キャッシュを捨てる」 | 却下 | `PreparedStatement` はユーザー所有で ROLLBACK 後も有効（E4）。tx 内 DDL 巻き戻し後のサーバーエラーは docstring に書く（T7 (c)） |
-| 9 | `_ffi` 追加 3 本の照合元（psycopg `_pq_ctypes.py:417-431`、ヘッダ 600 / 607 / 608） | 採用 | 決めた事項 2 |
-| — | `std.utils.Variant` で `Param` を作る | 却下 | RESEARCH §2.2: `v[T]` に mut が要り Copyable / Writable の条件付き準拠が面倒。手書き variant（構築時エンコード）で足りる |
-| — | `Params` ビルダー / ヘテロ可変長引数 | 却下（D5） | — |
+| 1 | `Decimal` の文字列化 = asyncpg / `get_str_from_var`（bignum 不要） | 採用 | T3。P2〜P4 の検証がそのまま付く |
+| 2 | 解釈 = `set_var_from_str` の式 + `make_result` 正規化、`==` は正規化後の比較 | 採用 | T3 / 決めた事項 5 |
+| 3 | Hinnant 暦算法（komira の床除算版） | 採用 | T4。probe-civil で 9 日付 + 5 timestamp 照合済み |
+| 4 | timestamp の分解は `days = us // 86400000000` + 余り | 採用 | T4 |
+| 5 | interval 文字列化 = `interval2itm` + `AddPostgresIntPart`、months を日に畳まない | 採用 | T5。psycopg / asyncpg の非可逆化は踏まない |
+| 6 | timetz は符号反転 + 秒保持 | 採用 | T5 / 決めた事項 8 |
+| 7 | 番兵を第一級の値に、無限値でのアクセサは `USAGE` | 採用 | T4 / 決めた事項 7 |
+| 8 | 固定長の厳密検査（"not drained"） | 採用 | T2 / 決めた事項 3 |
+| 9 | 未対応 OID を binary で生バイトにフォールバック（psycopg） | **却下** | D9。`TYPE_MISMATCH` + `ResultFormat.TEXT` の案内 |
+| 10 | `_ParamBuffers` / `exec_fmt` の雛形、`ResultFormat` は `PgErrorKind` と同形 | 採用 | T2 / 決めた事項 1 |
+| 11 | zero-copy の 3 行 | 採用 | T7 / 決めた事項 9 |
 
-### 落とし穴（RESEARCH §4）→ タスク対応
+### RESEARCH §4「落とし穴」とタスクの対応
 
-P1→T5 (a)(b)-3,4 / T7 (a)(c)、P2→T4 (b)-3、P3→T3 (c)-10 / 決めた事項 21、P4→T3 (c)-9 / T4 (b)-10、P5→T3 (c)-3（64 KiB ×2）/ T6 (a)、P6→T1 (f)(g)、P7→T1 (e)(h)、P8→T2 (d) / T3 (c)-8、P9→T4 (b)-1 / 決めた事項 9、P10→決めた事項 9（コードレビュー。T6 の prepared ループで `PQclear` 漏れ）、
-P11→T4 (b)-6 / 決めた事項 22、P12→T5 (b)-8、P13→T1 (d) 6/6 段 / T5 (b)-6,12、P14→T5 (b)-11 / 決めた事項 14-3、P15→T5 (b)-9 / 決めた事項 12、P16→T5 (c)-4、P17→T3 (c)-3、P18→T3 (c)-6 / 決めた事項 14-2、P19→T4 (b)-4,5 / 決めた事項 14-1、
-P20→T4 (b)-1、P21→決めた事項 9（名前は常に `pq_stmt_N`。レビュー: `grep -n '""' src/pq/prepared.mojo` に無名文を渡す経路が無い）、P22→T3 (c)-5、P23→T1 (d)、P24→T5 (c)-2。
-**対応先の無い落とし穴: なし**。
+P1〜P6 → T3（単体）+ T6 (a)（サーバー）／P7〜P11 → T5（単体）+ T6 (b)／P12〜P14 → T4（単体）+ T6 (b)／P15 → T6 (b) ⑤（+ T1 の SET）／P16・P17 → T1 (k)(l)／P18〜P20 → T7／P21〜P24 → T2 (d)(e)（numeric / jsonb / time / timetz の長さ・値は T3〜T5 で追加）／P25 → T4 (b)・T5 (b)・T3 (b)／P26 → T3 (b)／P27 → T4 (b)／P28 → T8 (a)(b)／P29 → T8 (c)／P30 → T8 (d)。対応先の無い落とし穴は無い
 
-観点の担当: **並行性** — libpq 接続はスレッド非安全、`Connection` / `Transaction` / `PreparedStatement` はすべて `Movable` のみで origin により `Connection` より長生きしない（REQ §5.2。T4 / T5 の struct 宣言。負のコンパイル確認は Phase 1 T5 で `Row[origin]` の同型を実測済みなので再実測は任意）。
-複数プロセスからの同時テストは TEMP テーブル + 接続ごとの prepared 名で衝突しない（決めた事項 18）。**境界値** — T2 (f)（エンコード単体）/ T3 (c)-3,10（DB 往復）。**異常系** — T3 (c)-6〜9,11 / T4 (b)-2,4,6,7,12 / T5 (b)-6〜11, (c)-4,5 / T6（リーク）。
+### 観点の担当
 
-### REQ §5.2 の各項目 → 担当
+- 境界値: T3〜T5 の単体（RESEARCH の実測値）+ T6 のサーバー格子（REQ §5.1 の列挙 + RESEARCH §5-7 の追加 4 件: `24:00:00`、`+05:53:28`、`-1 years +1 day`、`0.00`）
+- 異常系: T2 (d)(e)（長さ・OID 格子）、T3〜T5 の拒否ケース、T6 (b) ④⑤（PG14 の 22008、非 ISO）、T1 (k)（SET 失敗は所有権で `PQfinish`。再現困難なのでコードレビュー）
+- 並行性: 同期クライアントなので無い。代わりに「10,000 回連続 execute」の資源回収を T8 の leak ループが担う
+- 陽性対照（必ず同じターンで実測して PROGRESS に貼る）: T1 (b)（6/6 段の grep）、T7 (c)（コンパイルエラー 3 本）、T8 (b)（`PQclear` 除去で leak FAIL）
 
-| REQ §5.2 | 担当 |
-|---|---|
-| 未接続 / 接続失敗後 / サーバー停止後でもクラッシュしない | T4 (b)-12、T5 (b)-9,11（`pg_terminate_backend`）。「未接続」は `Connection` が構築できない（Phase 1 `_adopt`）ので対象外 |
-| 空 SQL / NULL パラメータ / 個数不一致 / 存在しない prepared 名 | T3 (c)-4,7,8、T4 (b)-2,4 |
-| 二重 commit / rollback、破棄後の savepoint | T5 (b)-1,2,7 |
-| `PQclear` / `PQfinish` / `PQfreemem` が正常・異常の両方で呼ばれ二重解放しない | T6（RSS）+ 型（`Result` / `Connection` が Movable のみ）+ 陽性対照 T1 (g) / T6 (c) |
-| バッファが呼び出し中生存し呼び出し後に解放 | 決めた事項 5 / 6（`_ = buffers^` の位置）、T3 (c)-3 の 64 KiB ×2、T6 (a) params ループ |
-| 解放済みポインタへのアクセスが型・所有権で起こらない | `PreparedStatement[origin]` / `Transaction[origin]` の `Pointer[Connection, origin]`（Phase 1 `Row` と同型） |
-| 10,000 回ループで RSS 単調増加しない | T6 (a) 4 ループ |
+### reflect 提案の反映（直近 2 件）
+
+- Phase 2 reflect: 持ち越し整理を T1 に（反映）／REQ §5.1a の訂正は discuss が REQ §7 で実施（済）／「要実測」印は research が実施（済）／`grep -c X = 0` の機械化 → `|implicit ROLLBACK failed` を T1 で 6/6 段に（反映）。「`is Phase 3`」「`-> ref`」の grep は 1 回きりなので機械化しない（P19 の plan 判断）／期待メッセージ 2 語以上（全タスクに反映）／PROGRESS「確認済み / 未確認」の分離（下の impl への申し送りに）／RESEARCH §0.5 の転記（research が実施）／非対称を突くプローブ（research が実施）／**サブエージェント推奨本数を各タスクに明記**（反映。T7 / T9 は 0 本）／最初の 1 本をコンパイルしてから（impl にも適用: 型モジュールは `Decimal` 1 struct をコンパイルしてから残りを書く）／ツール側（ユーザー）／+83 ページは D4 で (a) に決定 → T1 (h)（反映）
+- Phase 1 reflect: 陽性対照を plan が最初から書く（反映: T1 / T7 / T8）／1/6 段の fmt 判定（Phase 2 で済）／`check` の待ち時間（済）／verify round 2 の限定運用（REQ §9 に記載済み）／「追従先チェックリスト ✓」は素のシェルで再現できる形（T9 (b) に反映）
 
 ### impl への申し送り
 
-- **1 ターン 1 タスク**（T1〜T7）。サブエージェントを使う場合、依頼文に次の 3 行を**必ず**入れる（REQ §9 / reflect 提案 5）:
-  (a) 型パラメータを持つ型は `Transaction[origin]` / `PreparedStatement[origin]` / `Row[origin]` のようにフルに書く（`Transaction` だけ書くと別の型に読まれる）；
-  (b) `mojo format`（`pixi run fmt`）は**親が統合後に 1 回だけ**。サブエージェントは実行禁止（他方の編集中ファイルを書き換える）；
-  (c) scratch ファイルは `.gsd-lite/logs/phase2-params-prepared-tx/scratch/turn-NNN-<name>` 固定（`/tmp` は権限拒否。前ターンのファイルを使い回さない）
-- 無人シェル: `/home/parallels/.pixi/bin/pixi run ...` フルパス。1 Bash 1 コマンド、`&&` / `;` / `$(...)` / 先頭変数代入を使わない（`pixi.toml` / `*.sh` の中では使ってよい）。コミットは `git commit -F <scratch>/turn-NNN-commit-msg.txt`
-- `check` は T1 完了までコミット後にだけ回す。T1 以降は作業木のままで回せる（1/6 段が `build/fmtcheck/` 比較）
-- **Mojo 1.1.0 の罠**（RESEARCH §0.5 から。プローブ・実装で踏まないこと）: `List[UInt8](1, 2, 3)` の位置引数 ctor は無い → `var b: List[UInt8] = [1, 2, 3]`；`s[i]` 不可 → `s.as_bytes()[i]` / `s[byte=i]`；`len(String)` 不可 → `byte_length()`；`UnsafePointer` は非推奨 → `Pointer[T, origin]`；
-  `size_t` 引数は `c_size_t(s.byte_length())`；`from std.math import isnan, isinf`；`from std.memory import bitcast`；`from std.sys import stderr`；`from std.os import setenv, getenv`；素の `None` は `Param` / `Variant` に変換されない；`_ = x^` は生存マーカー（破棄ではない）；
-  `::` は単項マイナスより強い（`(-1)::int4`）；`with` 内の `var` は外から見えない；デストラクタは `__deinit__(deinit self)`；`def(T) thin` でないと関数型をフィールドに置けない；`T: Copyable & Movable` は冗長警告
-- **型名の確定手順**（REQ §9。stdlib ソースは pixi env に無い）: (1) https://mojolang.org/docs/std/ 、(2) コンパイルエラーの note に出る候補シグネチャ。記憶で書かない
-- `PQexecParams` / `PQexecPrepared` / `PQprepare` / `PQdescribePrepared` の呼び方は `scratch/turn-001-probe-libpq.mojo:189-287` をそのまま流用できる（`OidPtr` / `CStrArray` / `IntPtr` の `unsafe_from_address` キャスト、末尾ダミー、`_ = x^` の並び）
-- 警告ゼロは `tests/` と `examples/` も対象。未使用変数は `_ = x`。`raises PgError` の中で `raises Error` の関数（`setenv` 等）を呼ぶなら `try/except` で包む
-- テストの `raises PgError` → `raises` 変換ヘルパーは `tests/test_connection.mojo:141-510` の `_connect` / `_execute` / `_execute_error` の流儀（成功は `Error` に変換、失敗は `PgError` を返す）
-- PROGRESS の「追従先チェックリスト ✓」は実行した `grep` コマンドと出力をそのまま書く（MCP 検索の結果を `rg` として書かない）
-- PLAN の訂正は該当タスクに「**PLAN 訂正（turn N 実測）**」で追記し、REQ / DECISIONS / RESEARCH は触らない（Phase 1 の流儀）
-
-### 未プローブ（impl が最初に踏む。コンパイルが通らなければ代替へ）
-
-- `Param` の `@implicit __init__` 19 本（probe は 14 本: Optional は Int / String / Bool の 3 本）。**残り 6 本の `Optional[Int16/Int32/Int64/Float32/Float64/List[UInt8]]`** を足してもリスト literal `[1, "a", 1.5, True, Param.null()]` が曖昧にならないかは未確認。曖昧になれば Optional 群を `Param.of[T](v: Optional[T])` 的な静的関数に落とし PROGRESS に書く（REQ §4.1 の `@implicit` 要件からの逸脱なので PLAN 訂正に理由）
-- `Transaction.prepare` の戻り `PreparedStatement[Self.origin]` と `self._conn[].prepare(...)` の戻り `PreparedStatement[origin_of(self._conn[])]` の origin 一致。合わなければ `rebind` か `Transaction.prepare` を `-> PreparedStatement[origin_of(self._conn[])]` に
-- `param_types: List[UInt32] = List[UInt32]()` の既定引数（Mojo 1.1.0 で非 trivial 型の既定値が通るか）。通らなければ `prepare(sql)` と `prepare(sql, param_types)` の 2 オーバーロード
-- `conn.execute("...", [1, "a"])` で 2 引数オーバーロードのリスト literal が `List[Param]` に解決されるか（probe は単独関数 `use(params: List[Param])`）
-- PG14 側の built binary のリーク系列（PG17 のみ実測）→ T1 (f) で決める
-- `Transaction.__deinit__` 内で `_error_field`（`connection.mojo:46`）を呼ぶための import 循環は plan プローブで同型（関数 import）を確認済み
-
-### タスク数について
-
-7 タスク（目安 8〜15 の下限未満）。REQ の機能単位（基盤 / params / prepared / transaction）にテストを同梱し、持ち越し整理（T1）と仕上げ（T7）を前後に置いた形で、各タスクは並列サブ作業 2〜4 本で 1 ターンに収まる見込み。
-T5 が最大（struct 1 本 + テスト 2 ファイル 18 ケース）で、サブエージェントが使えない場合は A → B → C を同一ターン内で直列に進める。T6 は実行待ち（10,000 回 × 4 ループ × 2 サーバー + 陽性対照 3 ビルド）が支配的で、実装量は小さい。
+- **型モジュールの書き始め**: `Decimal` または `Date` の struct 1 つ + `write_to` + テスト 1 件をまずコンパイルして通し（`pixi run mojo run -I src tests/test_types_*.mojo`）、それから残りを書く（Phase 2 reflect Minus 3）。`comptime if T == Decimal` の分岐は `rebind[T](v).copy()` で通る（RESEARCH §2.3.2）
+- **サブエージェント依頼文に必ず入れる 3 行**（REQ §9）: (a) 型パラメータを持つ型は `Row[origin]` / `Span[UInt8, origin]` / `StringSlice[origin]` のようにフルに書く、(b) `fmt` は親が統合後に 1 回だけ（サブエージェントは `mojo format` を走らせない）、(c) scratch は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-<name>` 固定（`/tmp` は権限拒否）。加えて本 PLAN の該当「決めた事項」の番号を貼る（契約）
+- **PROGRESS「次への注意」は「確認済み:」と「未確認:」を分けて書く**。所要の数値には単位（ms / s）を書き、TestSuite の `Summary [ N ]` は **ms**
+- Mojo 1.1.0 の落とし穴は RESEARCH §0.5 を最初に読む。特に: `_ = x^` は生存マーカー／`Span(unsafe_ptr=, length=)`／`Array[UInt8, 16](fill=0)`／`//` と `%` は床（interval の `year = months // 12` は**符号を合わせて自前で切り捨てる**）／`atol` は `+` と空白を通すので日時・uuid・numeric の parse には使わない／`String.as_bytes()` は `Span`／ローカル `List` は `return out^`／`-Int64.MIN` は wrap する（`Interval` 文字列化で `abs(micros)` を取るとき `Int64.MIN` は番兵なので先に `is_infinite()` で分岐し、有限値の時刻部は `Int64.MIN + 1` 以上）
+- **ASAP 破棄**: `_ParamBuffers` の `_ = buffers^` は呼び出しの**後**（`params.mojo:34-46`）。新しい encode 経路を足しても並びを変えない。zero-copy の slice を返す関数内で `Result` を動かさない
+- `Decimal` の private フィールドはアンダースコア慣習（Mojo に可視性制御は無い）。`decode_numeric` / `encode_numeric` は同じパッケージ内なので `_from_parts` / `_digits` に触ってよいが、テストからは公開 API（`parse` / `String()` / `==` / `dscale()`）だけで検証する
+- T6 の timestamptz 文字列比較はコンテナの `TimeZone = Etc/UTC` 前提。`SHOW TimeZone` を最初に読み、`UTC` / `Etc/UTC` 以外なら `String()` 比較だけを skip してログに 1 行出す（値一致は常に見る）
+- `check` の時間が 3 分を超えたら PROGRESS に書く（verify の計画に使う）。超える要因は test_leak の +15 s と新テスト 7 本 × 2 サーバーの見込み

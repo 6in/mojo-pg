@@ -30,7 +30,7 @@ by its own unit tests there.
 The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
 `postgres://` URI: these tests append ` password=...` to it).
 
-Twelve tests, in the order they run:
+Fourteen tests, in the order they run:
 
 - Four `is_leaking` unit tests. They need no database and are declared first
   so a broken verdict fails before any loop runs.
@@ -43,12 +43,21 @@ Twelve tests, in the order they run:
   `Transaction` own on top of the ones `Result` owns -- including the two
   `__deinit__` paths that call `PQexec` directly (`DEALLOCATE` and the
   implicit `ROLLBACK`) and so have to `PQclear` without a `Result` to do it.
+- Two Phase 3 loops: `binary-execute` and `zero-copy`. The first asks for
+  binary results and decodes all ten columns of `PHASE3_SQL` through
+  `Row.get[T]`, with a `Decimal` and a `Date` bound as parameters so the
+  binary *encode* path runs too; the second reads the same statement in text
+  and takes only a borrowed slice per row with `Row.get_text`. Neither adds a
+  free of its own -- the point is the opposite: a decoder or a slice that
+  retained the `PGresult`, or a `_ParamBuffers` the new encoders kept alive,
+  would show up here and nowhere else.
 
 This file is slow by design: measured per server once the binary is built, the
-Phase 1 connect loop alone is ~35 s, the other three Phase 1 loops ~4 s, and
-the four Phase 2 loops ~18 s, for ~57 s in total on top of the one-off
-`mojo build`. The Phase 2 loops are cheap next to the connect loop because
-they reuse one connection; `Connection.open` is what costs ~3.5 ms a time.
+Phase 1 connect loop alone is ~35 s, the other three Phase 1 loops ~4 s, the
+four Phase 2 loops ~18 s, and the two Phase 3 loops ~6 s, for ~65 s in total
+on top of the one-off `mojo build`. The Phase 2 and Phase 3 loops are cheap
+next to the connect loop because they reuse one connection; `Connection.open`
+is what costs ~3.5 ms a time.
 """
 
 from std.os import getenv
@@ -59,8 +68,18 @@ from pq.connection import Connection
 from pq.errors import PgError
 from pq.params import Param
 from pq.prepared import PreparedStatement
-from pq.result import Result
+from pq.result import Result, ResultFormat
 from pq.transaction import Transaction
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 comptime DEFAULT_CONNINFO = (
     "host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test"
@@ -115,16 +134,19 @@ machine.
 comptime TOLERANCE_PAGES = 256
 """How much total RSS growth (in pages) a non-leaking loop may show.
 
+256 is a **permanent specification**, not a number to be tuned down later.
+
 Measured on PG14 and PG17, with this file run as the binary `mojo build`
 produces (the only way `tests/run_tests.sh` runs it): a non-leaking loop is
-stable to within 2 pages, except for a *single* one-off step of exactly 83
-pages (~332 KiB) that lands at an arbitrary iteration of an arbitrary loop — a
-lazy first-use allocation somewhere under libpq, not per-iteration growth. 256
-pages (1 MiB) clears two such steps.
+stable to within 2 pages, except for a *single* one-off step of 83-85 pages
+(~332 KiB) that lands at an arbitrary iteration of an arbitrary loop, not
+per-iteration growth. The cause is **unidentified**; an expansion of a glibc
+arena is the guess, and nothing has been measured that confirms it. 256 pages
+(1 MiB) clears two such steps.
 
 The step is why the tolerance is not tightened to 16 pages: over 16 built-binary
 series (4 loops x 2 servers x 2 runs) 14 came in at 0-2 pages of total growth
-and 2 showed the 83-page step, once at the 4th sample and once at the 9th.
+and 2 showed the step, once at the 4th sample and once at the 9th.
 
 Total growth, not monotonicity, is the signal that actually fires here: a real
 leak moves thousands of pages per sampling interval, far past this tolerance.
@@ -150,6 +172,32 @@ comptime ERROR_WARMUP = 200
 
 comptime ERROR_SAMPLES = 4
 """RSS samples taken after a failure-path loop's warmup."""
+
+comptime PHASE3_SQL = (
+    "SELECT repeat('x', "
+    + String(PAYLOAD_BYTES)
+    + ")::text,"
+    + " 1.5::numeric,"
+    + " '2024-01-02'::date,"
+    + " '2024-01-02 03:04:05.678901'::timestamp,"
+    + " '2024-01-02 03:04:05+09'::timestamptz,"
+    + " '12:34:56'::time,"
+    + " '12:34:56+09'::timetz,"
+    + " '1 year 2 mons 3 days 04:05:06.789'::interval,"
+    + " gen_random_uuid(),"
+    + " '{\"a\":1}'::jsonb"
+    + " WHERE $1 = 1.5 AND $2 = '2024-02-29'"
+)
+"""The ten-column statement both Phase 3 loops run.
+
+Column 0 is `PAYLOAD_BYTES` wide for the same reason as everywhere else in
+this file; the nine columns after it are one of each type Phase 3 decodes, so
+a decoder that retained its input would be caught whichever one it was. The
+two placeholders are matched by `Decimal("1.50")` and `Date(8825)`, which puts
+`encode_numeric` and `encode_date` -- and the `_ParamBuffers` holding their
+output -- in the loop as well. The `WHERE` is true, so the row is always
+there to read.
+"""
 
 
 # --- RSS sampling and the leak verdict ---------------------------------------
@@ -440,6 +488,77 @@ def _escape_literal(conn: Connection, var s: String) raises -> String:
     """
     try:
         return conn.escape_literal(s^)
+    except e:
+        raise Error(String(e))
+
+
+def _phase3_params() raises -> List[Param]:
+    """Build the two parameters `PHASE3_SQL` binds, in binary.
+
+    Returns:
+        A `numeric` and a `date` parameter, matching `$1` and `$2`.
+
+    Raises:
+        Error: If the `Decimal` literal was rejected.
+    """
+    try:
+        return [Decimal("1.50"), Date(8825)]
+    except e:
+        raise Error(String(e))
+
+
+def _read_binary_row(conn: Connection, params: List[Param]) raises -> Int:
+    """Run `PHASE3_SQL` with binary results and decode all ten columns.
+
+    Args:
+        conn: An open connection.
+        params: The parameters from `_phase3_params`.
+
+    Returns:
+        A checksum over all ten cells, so none of the reads can be dropped.
+
+    Raises:
+        Error: If the query or any of the decoding raised a `PgError`.
+    """
+    try:
+        var result = conn.execute(
+            String(PHASE3_SQL), params, result_format=ResultFormat.BINARY
+        )
+        var row = result[0]
+        var total = row.get[String](0).byte_length()
+        total += row.get[Decimal](1).dscale()
+        total += Int(row.get[Date](2).days)
+        total += Int(row.get[Timestamp](3).micros % 1000)
+        total += Int(row.get[TimestampTz](4).micros % 1000)
+        total += Int(row.get[Time](5).micros % 1000)
+        total += Int(row.get[TimeTz](6).micros % 1000)
+        total += Int(row.get[Interval](7).micros % 1000)
+        total += Int(row.get[UUID](8).bytes[0])
+        total += row.get[String](9).byte_length()
+        _ = result^
+        return total
+    except e:
+        raise Error(String(e))
+
+
+def _read_text_slice(conn: Connection, params: List[Param]) raises -> Int:
+    """Run `PHASE3_SQL` in text and borrow column 0 without copying it.
+
+    Args:
+        conn: An open connection.
+        params: The parameters from `_phase3_params`.
+
+    Returns:
+        The byte length of column 0, read straight off the `PGresult`.
+
+    Raises:
+        Error: If the query or `get_text` raised a `PgError`.
+    """
+    try:
+        var result = conn.execute(String(PHASE3_SQL), params)
+        var total = result[0].get_text(0).byte_length()
+        _ = result^
+        return total
     except e:
         raise Error(String(e))
 
@@ -772,6 +891,55 @@ def test_transaction_drop_does_not_leak() raises:
         if _is_sample_due(i, MAIN_WARMUP, every):
             _sample("transaction/drop", samples)
     _assert_stable("transaction/drop", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+# --- the Phase 3 loops -------------------------------------------------------
+#
+# Both reuse one connection, like the Phase 2 loops, and run the same
+# statement: `PHASE3_SQL`. What differs is what the client does with the
+# answer -- decode every column, or borrow one of them -- which is exactly the
+# pair of paths Phase 3 added.
+
+
+def test_binary_execute_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    # Three owners per iteration: the `_ParamBuffers` holding the encoded
+    # numeric and date, the `PGresult` holding the binary row, and the
+    # `String`s and `List`s the decoders build out of it. Only the first two
+    # are libpq's, and only they would show up as a leak here.
+    var params = _phase3_params()
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var checksum = _read_binary_row(conn, params)
+        _ = checksum
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("binary-execute", samples)
+    _assert_stable("binary-execute", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+def test_zero_copy_does_not_leak() raises:
+    if _skip_on_macos():
+        return
+    var conn = _connect(_conninfo())
+    # `get_text` hands back a slice of the `PGresult`'s own storage, so the
+    # iteration allocates nothing of its own and the `PGresult` is the only
+    # thing that has to go. A slice that kept the result alive past the end of
+    # the iteration -- the one way this API could leak -- grows RSS by
+    # PAYLOAD_BYTES a time.
+    var params = _phase3_params()
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var length = _read_text_slice(conn, params)
+        _ = length
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("zero-copy", samples)
+    _assert_stable("zero-copy", samples, MAIN_SAMPLES)
     _ = conn^
 
 

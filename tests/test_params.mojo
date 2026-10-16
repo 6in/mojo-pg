@@ -34,6 +34,16 @@ from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.params import Param
 from pq.result import Result, Row
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 comptime DEFAULT_CONNINFO = (
     "host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test"
@@ -519,6 +529,84 @@ def test_param_oids_and_formats() raises:
     assert_equal(as_bytes.oid(), UInt32(17))
     assert_true(as_bytes.is_binary())
     assert_false(as_bytes.is_null())
+
+
+def test_param_oids_of_the_extended_types() raises:
+    # `Decimal` and `UUID` go out in binary with the OID of the PostgreSQL
+    # type they stand for, unlike `String`, which leaves the OID unspecified.
+    var as_numeric = Param(Decimal(String("1")))
+    assert_equal(as_numeric.oid(), UInt32(1700))
+    assert_true(as_numeric.is_binary())
+    assert_false(as_numeric.is_null())
+
+    var as_uuid = Param(UUID(String("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")))
+    assert_equal(as_uuid.oid(), UInt32(2950))
+    assert_true(as_uuid.is_binary())
+    assert_false(as_uuid.is_null())
+
+    var as_date = Param(Date(8825))
+    assert_equal(as_date.oid(), UInt32(1082))
+    assert_true(as_date.is_binary())
+    assert_false(as_date.is_null())
+
+    var as_timestamp = Param(Timestamp(762525296789000))
+    assert_equal(as_timestamp.oid(), UInt32(1114))
+    assert_true(as_timestamp.is_binary())
+    assert_false(as_timestamp.is_null())
+
+    var as_timestamptz = Param(TimestampTz(762525296789000))
+    assert_equal(as_timestamptz.oid(), UInt32(1184))
+    assert_true(as_timestamptz.is_binary())
+    assert_false(as_timestamptz.is_null())
+
+    var as_time = Param(Time(45296789000))
+    assert_equal(as_time.oid(), UInt32(1083))
+    assert_true(as_time.is_binary())
+    assert_false(as_time.is_null())
+
+    var as_timetz = Param(TimeTz(45296000000, -32400))
+    assert_equal(as_timetz.oid(), UInt32(1266))
+    assert_true(as_timetz.is_binary())
+    assert_false(as_timetz.is_null())
+
+    var as_interval = Param(Interval(10800000000, 2, 1))
+    assert_equal(as_interval.oid(), UInt32(1186))
+    assert_true(as_interval.is_binary())
+    assert_false(as_interval.is_null())
+
+
+def test_param_from_empty_optional_of_an_extended_type() raises:
+    var no_numeric = Param(Optional[Decimal](None))
+    assert_equal(no_numeric.oid(), UInt32(1700))
+    assert_true(no_numeric.is_null())
+
+    var no_uuid = Param(Optional[UUID](None))
+    assert_equal(no_uuid.oid(), UInt32(2950))
+    assert_true(no_uuid.is_null())
+
+    var no_date = Param(Optional[Date](None))
+    assert_equal(no_date.oid(), UInt32(1082))
+    assert_true(no_date.is_null())
+
+    var no_timestamp = Param(Optional[Timestamp](None))
+    assert_equal(no_timestamp.oid(), UInt32(1114))
+    assert_true(no_timestamp.is_null())
+
+    var no_timestamptz = Param(Optional[TimestampTz](None))
+    assert_equal(no_timestamptz.oid(), UInt32(1184))
+    assert_true(no_timestamptz.is_null())
+
+    var no_time = Param(Optional[Time](None))
+    assert_equal(no_time.oid(), UInt32(1083))
+    assert_true(no_time.is_null())
+
+    var no_timetz = Param(Optional[TimeTz](None))
+    assert_equal(no_timetz.oid(), UInt32(1266))
+    assert_true(no_timetz.is_null())
+
+    var no_interval = Param(Optional[Interval](None))
+    assert_equal(no_interval.oid(), UInt32(1186))
+    assert_true(no_interval.is_null())
 
 
 def test_param_from_empty_optional_keeps_the_oid() raises:

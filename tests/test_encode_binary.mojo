@@ -1,14 +1,42 @@
 """Tests for `pq.encode_binary`: fixed widths and network byte order."""
 
+from pq.decode_binary import (
+    decode_date,
+    decode_interval,
+    decode_numeric,
+    decode_time,
+    decode_timestamp,
+    decode_timestamptz,
+    decode_timetz,
+)
+from pq.decode_text import parse_bytea_hex
 from pq.encode_binary import (
     encode_bool,
+    encode_date,
     encode_float32,
     encode_float64,
     encode_int16,
     encode_int32,
     encode_int64,
+    encode_interval,
+    encode_numeric,
+    encode_time,
+    encode_timestamp,
+    encode_timestamptz,
+    encode_timetz,
+    encode_uuid,
 )
-from std.testing import TestSuite, assert_equal
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
+from std.testing import TestSuite, assert_equal, assert_true
 
 
 def _assert_bytes(
@@ -123,6 +151,331 @@ def test_encoded_widths_are_fixed() raises:
     assert_equal(len(encode_int64(0)), 8)
     assert_equal(len(encode_float32(0.0)), 4)
     assert_equal(len(encode_float64(0.0)), 8)
+    assert_equal(len(encode_uuid(_uuid())), 16)
+    assert_equal(len(encode_date(Date(0))), 4)
+    assert_equal(len(encode_timestamp(Timestamp(0))), 8)
+    assert_equal(len(encode_timestamptz(TimestampTz(0))), 8)
+    assert_equal(len(encode_time(Time(0))), 8)
+    assert_equal(len(encode_timetz(TimeTz(0, 0))), 12)
+    assert_equal(len(encode_interval(Interval(0, 0, 0))), 16)
+
+
+def _hex(digits: String) raises -> List[UInt8]:
+    """Turn a hex string into the bytes it spells.
+
+    Reuses `parse_bytea_hex` by prefixing the `\\x` marker it expects.
+
+    Args:
+        digits: An even number of hex digits, in either case.
+
+    Returns:
+        One byte per pair of digits.
+
+    Raises:
+        Error: If `digits` is not valid hex.
+    """
+    try:
+        return parse_bytea_hex(String("\\x", digits))
+    except e:
+        raise Error(String(e))
+
+
+def _uuid() raises -> UUID:
+    """Return the sample UUID used by the encoder tests.
+
+    Returns:
+        The value spelled `a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11`.
+
+    Raises:
+        Error: Never; the literal is well-formed.
+    """
+    try:
+        return UUID(String("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"))
+    except e:
+        raise Error(String(e))
+
+
+def _decimal(text: String) raises -> Decimal:
+    """Build a `Decimal` from `text`, turning a `PgError` into an `Error`.
+
+    Args:
+        text: A numeric literal `Decimal` accepts.
+
+    Returns:
+        The parsed value.
+
+    Raises:
+        Error: If `text` is not a valid numeric literal.
+    """
+    try:
+        return Decimal(text)
+    except e:
+        raise Error(String(e))
+
+
+def _assert_numeric_wire(text: String, digits: String) raises:
+    """Assert `Decimal(text)` encodes to the bytes PostgreSQL sends for it.
+
+    Args:
+        text: A numeric literal.
+        digits: The `numeric_send` output for the same value, as hex.
+
+    Raises:
+        Error: If the encoder produced different bytes.
+    """
+    _assert_bytes(encode_numeric(_decimal(text)), _hex(digits), "numeric")
+
+
+def _assert_numeric_round_trip(text: String) raises:
+    """Assert encoding then decoding `Decimal(text)` returns the same value.
+
+    Args:
+        text: A numeric literal.
+
+    Raises:
+        Error: If the round trip changed the value or its printed form.
+    """
+    var value = _decimal(text)
+    var bytes = encode_numeric(value)
+    var back: Decimal
+    try:
+        back = decode_numeric(Span[UInt8](bytes))
+    except e:
+        raise Error(String(e))
+    assert_true(back == value, String("numeric round trip ", text))
+    assert_equal(String(back), String(value), String("numeric text ", text))
+
+
+def test_numeric_wire_matches_the_server() raises:
+    _assert_numeric_wire("1.50", "000200000000000200011388")
+    _assert_numeric_wire("-0.001", "0001ffff40000003000a")
+    _assert_numeric_wire("0.00", "0000000000000002")
+    _assert_numeric_wire("0", "0000000000000000")
+    _assert_numeric_wire("12345678.9", "000300010000000104d2162e2328")
+    _assert_numeric_wire(
+        "123456789012345678901234567890.123456789",
+        "000b000700000009000c0d801ed204d2162e23340d801ed204d2162e2328",
+    )
+
+
+def test_numeric_specials_encode_without_a_dscale() raises:
+    _assert_bytes(
+        encode_numeric(Decimal.nan()), _hex("00000000c0000000"), "numeric NaN"
+    )
+    _assert_bytes(
+        encode_numeric(Decimal.infinity()),
+        _hex("00000000d0000000"),
+        "numeric Infinity",
+    )
+    _assert_bytes(
+        encode_numeric(Decimal.negative_infinity()),
+        _hex("00000000f0000000"),
+        "numeric -Infinity",
+    )
+
+
+def test_numeric_round_trips_every_table_row() raises:
+    _assert_numeric_round_trip("1.50")
+    _assert_numeric_round_trip("-0.001")
+    _assert_numeric_round_trip("0")
+    _assert_numeric_round_trip("0.00")
+    _assert_numeric_round_trip("0.000001")
+    _assert_numeric_round_trip("0.0000000001")
+    _assert_numeric_round_trip("1000000")
+    _assert_numeric_round_trip("10000")
+    _assert_numeric_round_trip("9999")
+    _assert_numeric_round_trip("12345678.9")
+    _assert_numeric_round_trip("123456789012345678901234567890.123456789")
+    _assert_numeric_round_trip("12.3400")
+    _assert_numeric_round_trip("0.0001")
+    _assert_numeric_round_trip("0.5")
+    _assert_numeric_round_trip("-0.5")
+    _assert_numeric_round_trip("1")
+    _assert_numeric_round_trip("1.5000")
+    _assert_numeric_round_trip("100")
+    _assert_numeric_round_trip("NaN")
+    _assert_numeric_round_trip("Infinity")
+    _assert_numeric_round_trip("-Infinity")
+
+
+def test_uuid_wire_matches_the_server() raises:
+    _assert_bytes(
+        encode_uuid(_uuid()),
+        _hex("a0eebc999c0b4ef8bb6d6bb9bd380a11"),
+        "uuid",
+    )
+
+
+def test_date_wire_matches_the_server() raises:
+    _assert_bytes(encode_date(Date(8825)), _hex("00002279"), "date 8825")
+    _assert_bytes(encode_date(Date(-10957)), _hex("ffffd533"), "date -10957")
+    _assert_bytes(encode_date(Date(0)), _hex("00000000"), "date 0")
+
+
+def test_timestamp_wire_matches_the_server() raises:
+    _assert_bytes(
+        encode_timestamp(Timestamp(0x0002B0EC85204F35)),
+        _hex("0002b0ec85204f35"),
+        "timestamp 2024-01-02 03:04:05.678901",
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp(-946684800000001)),
+        _hex("fffca2fec4c81fff"),
+        "timestamp 1969-12-31 23:59:59.999999",
+    )
+    _assert_bytes(
+        encode_timestamptz(TimestampTz(0x0002B0EC85204F35)),
+        _hex("0002b0ec85204f35"),
+        "timestamptz 2024-01-02 03:04:05.678901+00",
+    )
+
+
+def test_datetime_sentinels_encode_to_the_wire_sentinels() raises:
+    _assert_bytes(encode_date(Date.infinity()), _hex("7fffffff"), "date inf")
+    _assert_bytes(
+        encode_date(Date.negative_infinity()), _hex("80000000"), "date -inf"
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp.infinity()),
+        _hex("7fffffffffffffff"),
+        "timestamp inf",
+    )
+    _assert_bytes(
+        encode_timestamp(Timestamp.negative_infinity()),
+        _hex("8000000000000000"),
+        "timestamp -inf",
+    )
+    _assert_bytes(
+        encode_timestamptz(TimestampTz.negative_infinity()),
+        _hex("8000000000000000"),
+        "timestamptz -inf",
+    )
+
+
+def test_datetime_round_trips_through_the_decoders() raises:
+    var days: List[Int32] = [0, 8825, -10957, -730485, -2451545, 2145031948]
+    for i in range(len(days)):
+        var value = Date(days[i])
+        var back: Date
+        try:
+            back = decode_date(Span[UInt8](encode_date(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("date round trip ", days[i]))
+
+    var micros: List[Int64] = [
+        0,
+        1,
+        0x0002B0EC85204F35,
+        -946684800000001,
+        0x7FFFFF5BB3B29FFF,
+    ]
+    for i in range(len(micros)):
+        var value = Timestamp(micros[i])
+        var back: Timestamp
+        var back_tz: TimestampTz
+        try:
+            back = decode_timestamp(Span[UInt8](encode_timestamp(value)))
+            back_tz = decode_timestamptz(
+                Span[UInt8](encode_timestamptz(TimestampTz(micros[i])))
+            )
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("timestamp round trip ", micros[i]))
+        assert_true(
+            back_tz == TimestampTz(micros[i]),
+            String("timestamptz round trip ", micros[i]),
+        )
+
+
+def test_time_matches_the_measured_wire_bytes() raises:
+    _assert_bytes(
+        encode_time(Time(45296500000)),
+        _hex("0000000a8be1bd20"),
+        "time 12:34:56.5",
+    )
+    _assert_bytes(
+        encode_time(Time(86400000000)),
+        _hex("000000141dd76000"),
+        "time 24:00:00",
+    )
+
+
+def test_timetz_appends_the_zone_after_the_time() raises:
+    _assert_bytes(
+        encode_timetz(TimeTz(45296000000, -32400)),
+        _hex("0000000a8bda1c00" + "ffff8170"),
+        "timetz 12:34:56+09",
+    )
+    _assert_bytes(
+        encode_timetz(TimeTz(43200000000, 12600)),
+        _hex("0000000a0eebb000" + "00003138"),
+        "timetz 12:00:00-03:30",
+    )
+
+
+def test_interval_puts_micros_days_months_in_that_order() raises:
+    _assert_bytes(
+        encode_interval(Interval(0, 1, 0)),
+        _hex("0000000000000000" + "00000001" + "00000000"),
+        "interval 1 day",
+    )
+    _assert_bytes(
+        encode_interval(Interval(0, 0, 1)),
+        _hex("0000000000000000" + "00000000" + "00000001"),
+        "interval 1 mon",
+    )
+    _assert_bytes(
+        encode_interval(Interval(14706789000, 3, 14)),
+        _hex("000000036c97ca88" + "00000003" + "0000000e"),
+        "interval 1 year 2 mons 3 days 04:05:06.789",
+    )
+    _assert_bytes(
+        encode_interval(Interval.infinity()),
+        _hex("7fffffffffffffff" + "7fffffff" + "7fffffff"),
+        "interval infinity",
+    )
+
+
+def test_time_types_round_trip_through_the_decoders() raises:
+    var times: List[Int64] = [0, 1, 45296500000, 86399999999, 86400000000]
+    for i in range(len(times)):
+        var value = Time(times[i])
+        var back: Time
+        try:
+            back = decode_time(Span[UInt8](encode_time(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("time round trip ", times[i]))
+
+    var zones: List[Int32] = [0, -1, -32400, 12600, 57540, -57599]
+    for i in range(len(zones)):
+        var value = TimeTz(43200000000, zones[i])
+        var back: TimeTz
+        try:
+            back = decode_timetz(Span[UInt8](encode_timetz(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("timetz round trip ", zones[i]))
+
+    var intervals: List[Interval] = [
+        Interval(0, 0, 0),
+        Interval(0, 1, 0),
+        Interval(0, 0, 1),
+        Interval(14706789000, 3, 14),
+        Interval(7200000000, -1, 0),
+        Interval(-14706789000, -3, -14),
+        Interval.infinity(),
+        Interval.negative_infinity(),
+    ]
+    for i in range(len(intervals)):
+        var value = intervals[i].copy()
+        var back: Interval
+        try:
+            back = decode_interval(Span[UInt8](encode_interval(value)))
+        except e:
+            raise Error(String(e))
+        assert_true(back == value, String("interval round trip ", i))
 
 
 def main() raises:

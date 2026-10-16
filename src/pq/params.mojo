@@ -1,7 +1,7 @@
 """Query parameters and the libpq argument arrays built from them.
 
 `Param` is the single value type accepted by the parameterised execute
-APIs. Nineteen `@implicit` constructors make a plain list literal --
+APIs. Thirty-five `@implicit` constructors make a plain list literal --
 `[1, "a", 1.5, True, Param.null()]` -- convert to `List[Param]`, so the
 caller never names the type. Each constructor **encodes at construction
 time**: the Mojo value is turned into its PostgreSQL wire bytes right
@@ -51,21 +51,47 @@ from pq._ffi.types import CStrArray, IntPtr, OidPtr
 from pq.decode_text import (
     OID_BOOL,
     OID_BYTEA,
+    OID_DATE,
     OID_FLOAT4,
     OID_FLOAT8,
     OID_INT2,
     OID_INT4,
     OID_INT8,
+    OID_INTERVAL,
+    OID_NUMERIC,
+    OID_TIME,
+    OID_TIMESTAMP,
+    OID_TIMESTAMPTZ,
+    OID_TIMETZ,
+    OID_UUID,
 )
 from pq.encode_binary import (
     encode_bool,
+    encode_date,
     encode_float32,
     encode_float64,
     encode_int16,
     encode_int32,
     encode_int64,
+    encode_interval,
+    encode_numeric,
+    encode_time,
+    encode_timestamp,
+    encode_timestamptz,
+    encode_timetz,
+    encode_uuid,
 )
 from pq.errors import PgError, PgErrorKind
+from pq.types_datetime import (
+    Date,
+    Interval,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
+)
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 
 def _text_bytes(s: String) -> List[UInt8]:
@@ -88,9 +114,11 @@ struct Param(Copyable, Movable):
     """One already-encoded query parameter.
 
     Holds the PostgreSQL type OID, the wire format flag and the encoded
-    bytes: big-endian binary for `Bool`, the integers and the floats, raw
-    bytes for `bytea`, and NUL-free text bytes for `String`. A SQL NULL
-    carries no bytes at all.
+    bytes: big-endian binary for `Bool`, the integers, the floats,
+    `Decimal` (`numeric`), `UUID`, `Date`, `Timestamp`, `TimestampTz`,
+    `Time`, `TimeTz` and `Interval`,
+    raw bytes for `bytea`, and NUL-free text bytes for `String`. A SQL
+    NULL carries no bytes at all.
 
     Construction is implicit from any of the supported Mojo types and
     from `Optional` of each of them, so `List[Param]` accepts a plain
@@ -245,6 +273,85 @@ struct Param(Copyable, Movable):
         self = Param(UInt32(0), False, False, _text_bytes(String(v)))
 
     @implicit
+    def __init__(out self, v: Decimal):
+        """Encode `v` as a binary `numeric` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_NUMERIC, True, False, encode_numeric(v))
+
+    @implicit
+    def __init__(out self, v: UUID):
+        """Encode `v` as a binary `uuid` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_UUID, True, False, encode_uuid(v))
+
+    @implicit
+    def __init__(out self, v: Date):
+        """Encode `v` as a binary `date` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_DATE, True, False, encode_date(v))
+
+    @implicit
+    def __init__(out self, v: Timestamp):
+        """Encode `v` as a binary `timestamp` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMESTAMP, True, False, encode_timestamp(v))
+
+    @implicit
+    def __init__(out self, v: TimestampTz):
+        """Encode `v` as a binary `timestamptz` parameter.
+
+        The value travels as the UTC microsecond count it holds, so the
+        server's session `TimeZone` affects only how it prints the result
+        back.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMESTAMPTZ, True, False, encode_timestamptz(v))
+
+    @implicit
+    def __init__(out self, v: Time):
+        """Encode `v` as a binary `time` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIME, True, False, encode_time(v))
+
+    @implicit
+    def __init__(out self, v: TimeTz):
+        """Encode `v` as a binary `timetz` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_TIMETZ, True, False, encode_timetz(v))
+
+    @implicit
+    def __init__(out self, v: Interval):
+        """Encode `v` as a binary `interval` parameter.
+
+        The three fields travel as they are, so a value carrying months
+        arrives as months rather than as some fixed number of days.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_INTERVAL, True, False, encode_interval(v))
+
+    @implicit
     def __init__(out self, var v: List[UInt8]):
         """Send `v` as a binary `bytea` parameter.
 
@@ -365,6 +472,103 @@ struct Param(Copyable, Movable):
         else:
             self = Param.null(OID_BYTEA)
 
+    @implicit
+    def __init__(out self, var v: Optional[Decimal]):
+        """Encode `v` as a binary `numeric` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `numeric`.
+        """
+        if v:
+            self = Param(v.take())
+        else:
+            self = Param.null(OID_NUMERIC)
+
+    @implicit
+    def __init__(out self, v: Optional[UUID]):
+        """Encode `v` as a binary `uuid` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `uuid`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_UUID)
+
+    @implicit
+    def __init__(out self, v: Optional[Date]):
+        """Encode `v` as a binary `date` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `date`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_DATE)
+
+    @implicit
+    def __init__(out self, v: Optional[Timestamp]):
+        """Encode `v` as a binary `timestamp` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `timestamp`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMESTAMP)
+
+    @implicit
+    def __init__(out self, v: Optional[TimestampTz]):
+        """Encode `v` as a binary `timestamptz` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of
+                `timestamptz`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMESTAMPTZ)
+
+    @implicit
+    def __init__(out self, v: Optional[Time]):
+        """Encode `v` as a binary `time` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `time`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIME)
+
+    @implicit
+    def __init__(out self, v: Optional[TimeTz]):
+        """Encode `v` as a binary `timetz` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `timetz`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_TIMETZ)
+
+    @implicit
+    def __init__(out self, v: Optional[Interval]):
+        """Encode `v` as a binary `interval` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `interval`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_INTERVAL)
+
     def oid(self) -> UInt32:
         """Return the PostgreSQL type OID this parameter is sent as.
 
@@ -435,8 +639,10 @@ struct _ParamBuffers(Movable):
 
         Raises:
             PgError: `PgErrorKind.USAGE` when a text parameter contains
-                an embedded NUL byte, naming the one-based position as
-                `$N`. The value itself is never put in the message.
+                an embedded NUL byte, or when any parameter is longer
+                than libpq's `paramLengths` can carry (1073741823
+                bytes). Both name the one-based position as `$N`; the
+                value itself is never put in the message.
         """
         var size = len(params)
         self.types = List[UInt32](capacity=size + 1)
@@ -447,6 +653,23 @@ struct _ParamBuffers(Movable):
 
         for i in range(size):
             self.types.append(params[i]._oid)
+            # 0x3FFFFFFF is the 1 GB ceiling PostgreSQL itself works to --
+            # both the protocol message length and `MaxAllocSize` -- so a
+            # larger parameter could not be sent whatever libpq did with it.
+            # `paramLengths` is a C `int` and does not wrap until 0x7FFFFFFF;
+            # this is the conservative limit, not the wrapping one. Refused
+            # here for the binary and the text branch alike.
+            if len(params[i]._data) > 0x3FFFFFFF:
+                raise PgError(
+                    PgErrorKind.USAGE,
+                    String(
+                        "parameter $",
+                        i + 1,
+                        " is too large (",
+                        len(params[i]._data),
+                        " bytes; libpq takes at most 1073741823)",
+                    ),
+                )
             if params[i]._null:
                 self.bufs.append(List[UInt8]())
                 self.lengths.append(c_int(0))

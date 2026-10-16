@@ -9,8 +9,12 @@ cannot leave the block open.
 
 The transaction is a *borrowed view* of its `Connection`, exactly as
 `PreparedStatement` is: it carries a `Pointer[Connection, origin]` rather
-than a copy, so `origin` makes a transaction that outlives its connection a
-compile error. It is `Movable` but deliberately **not** `Copyable`: a copy
+than a copy. A `Transaction` is bound to the `Connection`'s origin, so using
+it after the connection has been **moved away** (`var c2 = conn^`, or passing
+`conn^` to a function) is a compile error (`use of uninitialized value`).
+`_ = conn^` is **not** a destroy: it is a keep-alive marker, and `PQfinish`
+runs after the last use of any transaction borrowed from the connection. It
+is `Movable` but deliberately **not** `Copyable`: a copy
 would hand the same open block to two destructors, and the second `ROLLBACK`
 would be sent for a block the first one already closed.
 
@@ -69,10 +73,10 @@ from pq._ffi.types import (
     PGRES_COMMAND_OK,
 )
 from pq.connection import Connection, _error_field
-from pq.errors import PgError, PgErrorKind
+from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param
 from pq.prepared import PreparedStatement
-from pq.result import Result
+from pq.result import Result, ResultFormat
 
 
 def _default_rollback_failure_handler(e: PgError):
@@ -117,6 +121,11 @@ struct Transaction[origin: ImmOrigin](Movable):
     Both statements compile, and `a` is rolled back while `b` is not. Mixing
     `tx.execute` and `conn.execute` is fine as long as the transaction is the
     one used last; `_ = tx^` is a "keep it alive until here" marker for that.
+
+    Sending `COMMIT` / `ROLLBACK` by hand through `conn.execute` ends the
+    block on the server; the implicit `ROLLBACK` at destruction then draws a
+    server `WARNING: there is no transaction in progress`, and the data stays
+    as the manual command left it.
 
     Parameters:
         origin: Immutable origin of the borrowed `Connection`.
@@ -299,11 +308,15 @@ struct Transaction[origin: ImmOrigin](Movable):
         Raises:
             PgError: `PgErrorKind.USAGE` when the block was already ended or
                 `name` is empty (`savepoint name must not be empty`),
-                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte,
-                or `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under
-                exactly the classification `Connection._take_result` applies.
+                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte
+                (`embedded NUL byte in name`), or `PgErrorKind.CONNECTION` /
+                `PgErrorKind.SERVER` under exactly the classification
+                `Connection._take_result` applies.
         """
         self._check_open()
+        # Checked here rather than left to `escape_identifier`, whose own
+        # `_reject_nul` would name its parameter instead of this one.
+        _reject_nul(name, "name")
         if name == "":
             raise PgError(PgErrorKind.USAGE, "savepoint name must not be empty")
         var ident = self._conn[].escape_identifier(name^)
@@ -328,12 +341,16 @@ struct Transaction[origin: ImmOrigin](Movable):
         Raises:
             PgError: `PgErrorKind.USAGE` when the block was already ended or
                 `name` is empty (`savepoint name must not be empty`),
-                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte,
-                or `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under
-                exactly the classification `Connection._take_result` applies,
-                including `3B001` for a savepoint that does not exist.
+                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte
+                (`embedded NUL byte in name`), or `PgErrorKind.CONNECTION` /
+                `PgErrorKind.SERVER` under exactly the classification
+                `Connection._take_result` applies, including `3B001` for a
+                savepoint that does not exist.
         """
         self._check_open()
+        # See `savepoint` for why the NUL check is not left to
+        # `escape_identifier`.
+        _reject_nul(name, "name")
         if name == "":
             raise PgError(PgErrorKind.USAGE, "savepoint name must not be empty")
         var ident = self._conn[].escape_identifier(name^)
@@ -354,12 +371,16 @@ struct Transaction[origin: ImmOrigin](Movable):
         Raises:
             PgError: `PgErrorKind.USAGE` when the block was already ended or
                 `name` is empty (`savepoint name must not be empty`),
-                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte,
-                or `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under
-                exactly the classification `Connection._take_result` applies,
-                including `3B001` for a savepoint that does not exist.
+                `PgErrorKind.TYPE_MISMATCH` when `name` contains a NUL byte
+                (`embedded NUL byte in name`), or `PgErrorKind.CONNECTION` /
+                `PgErrorKind.SERVER` under exactly the classification
+                `Connection._take_result` applies, including `3B001` for a
+                savepoint that does not exist.
         """
         self._check_open()
+        # See `savepoint` for why the NUL check is not left to
+        # `escape_identifier`.
+        _reject_nul(name, "name")
         if name == "":
             raise PgError(PgErrorKind.USAGE, "savepoint name must not be empty")
         var ident = self._conn[].escape_identifier(name^)
@@ -391,7 +412,10 @@ struct Transaction[origin: ImmOrigin](Movable):
         return self._conn[].execute(sql^)
 
     def execute(
-        self, var sql: String, params: List[Param]
+        self,
+        var sql: String,
+        params: List[Param],
+        result_format: ResultFormat = ResultFormat.TEXT,
     ) raises PgError -> Result:
         """Run one parameterised statement inside the block.
 
@@ -400,9 +424,15 @@ struct Transaction[origin: ImmOrigin](Movable):
         and the same `Param` type table; `SELECT 1; SELECT 2` is rejected by
         the server with `42601` exactly as it is there.
 
+        `result_format` is passed straight through, so it selects text (the
+        default) or binary results for **every** column exactly as it does on
+        `Connection.execute(sql, params)`.
+
         Args:
             sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
             params: The values to bind, `params[0]` binding `$1`.
+            result_format: Wire format for every column of the result,
+                `ResultFormat.TEXT` by default.
 
         Returns:
             The `Result` of the statement, owning the `PGresult*`.
@@ -414,7 +444,7 @@ struct Transaction[origin: ImmOrigin](Movable):
                 command needs `rollback()` or `rollback_to()`.
         """
         self._check_open()
-        return self._conn[].execute(sql^, params)
+        return self._conn[].execute(sql^, params, result_format)
 
     def prepare(
         self,
