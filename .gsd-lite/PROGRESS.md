@@ -24,3 +24,21 @@
   - 未確認: `types.mojo` を 3 分割する案（RESEARCH §6）の行数見積もり（1,500 行規模は推測）
   - 未確認: `Interval` の無限値で分解アクセサを呼んだときの kind（`USAGE` 推奨、plan が決める）
   - 所要（単位 ms）: probe-bench の libpq 素の所要は text 41〜45 ms / binary 36〜39 ms（10 万行 × 5 列）。ベンチ task は 1 s 未満で終わる見込み
+
+## turn 2 — plan — 9 タスク（T1 持ち越し + GUC / T2 ResultFormat + decode_binary 8 型 / T3 Decimal + UUID + jsonb / T4 Date 系 3 型 / T5 Time 系 + Interval / T6 サーバー格子 / T7 zero-copy / T8 leak + examples + bench / T9 文書 + 最終判定）
+- やったこと: REQ / DECISIONS / RESEARCH / 直近 2 件の reflect / Phase 2 PLAN / `src/pq/*.mojo` / `tests/*` / research のプローブ 5 本を読み、PLAN.md を作成。
+  決めた事項 14 件（`ResultFormat` の形、`decode_binary[T](bytes: Span[UInt8], oid)` のシグネチャと長さ・値検査、`TYPE_MISMATCH` の 4 系統のメッセージ、`Decimal` の private フィールド + ctor は `USAGE` / `parse` は `TYPE_MISMATCH`、
+  日時 6 型の API（生 ctor 無検査・`from_*` は `USAGE`・無限値のアクセサは `USAGE`）、zero-copy の 2 メソッド（`get_bytes` は形式・OID 不問、`get_text` は文字列系のみ）、GUC の `SET` は `_adopt` 内で `execute` 経由、
+  型モジュール 3 分割、`Transaction.execute` への `result_format` passthrough）。RESEARCH §3 の採否表（11 件中 10 採用・1 却下）、§4 の落とし穴 30 件の対応表、reflect 提案の反映表、各タスクのサブエージェント推奨本数（T7 / T9 は 0）を PLAN に載せた
+- 想定外:
+  (1) REQ §4.5 の `get_bytes` は OID 制限が無く、D9 の「生バイトの逃げ道にしない」と読み方が衝突し得る。REQ の文言どおり「`PQgetvalue` 領域を見る別 API」として形式・OID 不問にし、根拠を決めた事項 9 に書いた（verify が D9 違反と読むなら T7 で bytea 限定に狭める 1 行の変更で済む）
+  (2) `Time(86400000001)` の拒否を REQ P11 は ctor `USAGE` と decode `TYPE_MISMATCH` のどちらでもよいとしていた。生 ctor は全型で無検査（PG 内部表現の器）に統一し、`from_hms` で `USAGE`、decode で `TYPE_MISMATCH` に決めた
+  (3) `tests/test_leak.mojo:115-134` の `TOLERANCE_PAGES` docstring は既に 83 ページの一段を書いているが、原因の主語が「libpq の lazy first-use allocation」で REQ §6-8 / D4 の「glibc arena の拡張と推測、未特定」と違う。T1 (h) で書き換える
+- やり直し: 0 回（PLAN の T2 (e) ⑦ と T6 (a) ⑥ の文面を書いた直後に 1 回ずつ直したが、ファイルの作り直しではない）
+- 次への注意:
+  - 確認済み: `c_int(0)` の置き換え位置は `connection.mojo:362` / `prepared.mojo:188`。`PQfformat` / `PQgetlength` / `PQserverVersion` は `_ffi/functions.mojo:101-103` / `:108-110` / `:50` にバインド済み。`Connection.server_version()` は `connection.mojo:712-719`
+  - 確認済み: docker の PG17 / PG14 は healthy（Up 24 hours）。`mojo` / `pixi` は `/home/parallels/.pixi/bin/pixi run ...`。lean-ctx MCP は未接続
+  - 確認済み: research のプローブ（`scratch/turn-001-*`）は雛形として使ってよい（`probe-civil.mojo` の暦算法はそのまま写せる、`probe-zerocopy-neg6.mojo` が陽性対照の形）
+  - 未確認: `check` の所要見込み 2〜3 分 / `pixi run test` 7〜8 分（Phase 2 末の 80〜115 s / 5〜6 分 + SET 1 往復 × 10,000 + leak 2 本 + 新テスト 7 本の積み上げ）。T1 で `check` を回したら実測を PLAN「検証コマンド」節に訂正として書く
+  - 未確認: `types_datetime.mojo` が T4 + T5 で 1,000 行を超える見込み。超えても分割しない（T5 は追記）
+  - 未確認: `String(unsafe_from_utf8=span)` の正確な ctor 名（RESEARCH §0.5 は `String(from_utf8=span)` が検証あり、`String(unsafe_from_utf8=span)` が検証なしと記す。T2 の最初のコンパイルで確定し、違えば決めた事項 3 の末尾を訂正する）
