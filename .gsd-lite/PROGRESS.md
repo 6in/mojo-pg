@@ -196,3 +196,25 @@
   - 未確認（B が契約外として報告）: `test_timestamp_params_round_trip` の**非 UTC 分岐は CI で一度も走らない**（コンテナが `Etc/UTC` 固定で `_is_utc()` が常に真）。`options='-c TimeZone=Asia/Tokyo'` 付きの接続で 1 ケース回せば分岐自体を検証できる
   - 未確認（A が契約外として報告）: NULL の binary（`SELECT NULL::numeric / ::uuid / ::jsonb` の `NULL_VALUE` / `get_optional` / `is_null`）と、`PreparedStatement` / `Transaction` 経由の binary を**拡張型で**は見ていない（既存 8 型は `test_binary.mojo` が押さえている）
   - 未確認: T7（zero-copy）の `get_text` / `get_bytes` はまだ無い。T7 (c) の陽性対照は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-zerocopy-neg.mojo` に置き、`grep -rn -- '-> ref' src/pq/*.mojo` = 0 を PROGRESS に書くところまでが T7 の仕事
+## turn 9 — impl — T7 zero-copy `Row.get_text` / `get_bytes` + `tests/test_zero_copy.mojo` + 陽性対照
+- やったこと: `src/pq/result.mojo` に `Row.get_text(col) -> StringSlice[Self.origin]` と `Row.get_bytes(col) -> Span[UInt8, Self.origin]` を追加（T2 の `_raw` をそのまま使い、`get_text` は binary のとき 6 OID 検査 + jsonb version byte 剥がしを `decode_binary` の `_binary_oid_error` / `_binary_length_error` / `_binary_value_error` を import して共用。メッセージが `get[String]` と同一になる）、
+  `src/pq/__init__.mojo` に `## Zero-copy access` 節、`tests/test_zero_copy.mojo` 11 件（サーバー）を新設。陽性対照 3 本を scratch で実測。サブエージェントは使わず（PLAN の推奨本数 0）
+- 想定外:
+  (1) `_ = result^` の生存延長は**実測で確認できた**（`.gsd-lite/logs/phase3-binary-all-types/scratch/turn-009-probe-keepalive.mojo` → `slice after keep-alive: héllo 6 6`）。`_ = row^; _ = result^` を slice 取得の後に置き、assert をその後に書く順序で問題なく動く
+  (2) テスト内の `List[Int](-1, a, b)` / `List[UInt8](0, 255, 0)` は Mojo 1.1.0 ではコンパイルできない（可変長 ctor が `__list_literal__` を要求する）。角括弧リテラル（`var expected: List[UInt8] = [0, 255, 0]`、`for col in [-1, ncols, ncols + 7]`）に直した。`List` 同士の `assert_equal` も避け、`_assert_same_bytes(Span, Span)` ヘルパで比較（`test_decode_binary.mojo:124` の `_assert_bytes` と同じ流儀）
+  (3) `String("...").as_bytes()` を関数呼び出しの実引数に直接書くと一時オブジェクト由来の span になるので、期待値は `var hex_text = String(...)` に束ねてから渡した（コンパイルは通るが寿命が読みにくいため）
+- やり直し: 1 回（想定外 (2) のリスト構築。`src/` 側は初回で precompile まで警告ゼロ）
+- PLAN 訂正: なし
+- 既存テストの期待値を変えた箇所: **なし**（既存 20 ファイルは無変更で PASS。新規 1 ファイルと `src/pq/result.mojo` / `__init__.mojo` への追加のみで、既存の関数・docstring の主張は書き換えていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-009-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 126 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-009-check.log`）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 s と同水準
+  - 確認済み（所要）: `test_zero_copy` 11 件 = **42〜44 s**（1 テスト 1 接続で 3.4〜7.0 s / 件。接続あたりのコストが支配的で、`test_binary` 14 件 = 59 s と同じ比率）。PG14 側も同じ
+  - 確認済み（T7 (c) 陽性対照。3 本すべて `error: use of uninitialized value 'result'` で停止。`pixi run mojo run -I src <file>` で再現可）:
+    - `turn-009-zerocopy-neg.mojo`（`get_text` の slice を `var moved = result^` の後で使用）→ `turn-009-zerocopy-neg.mojo:21:14: error: use of uninitialized value 'result'` + `note: 'result' declared here`
+    - `turn-009-zerocopy-neg2.mojo`（`get_bytes` の span 版）→ `:21:42: error: use of uninitialized value 'result'`
+    - `turn-009-zerocopy-neg3.mojo`（既存 `Row` の `get[Int32]` 版）→ `:21:52: error: use of uninitialized value 'result'`
+    - いずれも最後に `mojo: error: failed to run the pass manager`。**コンパイルエラーなのでテストスイートには置けない**ため、生存規則の静的な半分は scratch の 3 本が唯一の証跡（verify はここを見る）
+  - 確認済み（P19）: `grep -rn -- '-> ref' src/pq/*.mojo` = **0 件**
+  - 未確認: T7 (b) の「NUL を含むなら長さどおり」は**サーバーで作れない**（`chr(0)` が 54000）ため `test_zero_copy` には入れていない。`_raw` が `PQgetlength` を使う（NUL 走査しない）ことは `test_decode_binary` の NUL 入り text ケースが単体で担保している
+  - 未確認: `get_bytes` は OID も形式も問わない仕様（決めた事項 9）なので、text 形式の `bytea` は `\x00ff00` の 8 byte を返す。これは `get[List[UInt8]]` の hex デコードと**意図的に違う**。T9 の `__init__.mojo` 型マッピング表に 1 行欲しい（`## Zero-copy access` 節には書いた）
+  - 未確認: T8 の `test_zero_copy_does_not_leak` は `get_text(0).byte_length()` を足すだけのループで、`src/pq` 側に新しい解放経路は無い（`_raw` は読み出しのみ）。陽性対照（`PQclear` を `pass` に）は T8 (b) の手順どおり
