@@ -42,3 +42,29 @@
   - 未確認: `check` の所要見込み 2〜3 分 / `pixi run test` 7〜8 分（Phase 2 末の 80〜115 s / 5〜6 分 + SET 1 往復 × 10,000 + leak 2 本 + 新テスト 7 本の積み上げ）。T1 で `check` を回したら実測を PLAN「検証コマンド」節に訂正として書く
   - 未確認: `types_datetime.mojo` が T4 + T5 で 1,000 行を超える見込み。超えても分割しない（T5 は追記）
   - 未確認: `String(unsafe_from_utf8=span)` の正確な ctor 名（RESEARCH §0.5 は `String(from_utf8=span)` が検証あり、`String(unsafe_from_utf8=span)` が検証なしと記す。T2 の最初のコンパイルで確定し、違えば決めた事項 3 の末尾を訂正する）
+
+## turn 3 — impl — T1 持ち越し整理 10 件 + 接続時の GUC 固定 + test_connection 3 件
+- やったこと: REQ §6 の 10 件（docstring 6 件 + コード 4 件: 6/6 段の grep パターン、`param_type_oid` の 0 パラメータ文言、savepoint 名の `_reject_nul(name, "name")`、
+  `_ParamBuffers` の 1 GiB 超 USAGE）と REQ §4.7 の `_SESSION_SETUP_SQL`（`_adopt` が 1 つの `PQexec` で `SET DateStyle` + `SET IntervalStyle`）を実装。
+  テストは test_connection 3 件（28 → 31）、test_prepared 1 件（0 パラメータ文の `takes no parameters`）、test_savepoint 1 件（NUL 名の 3 メソッド）を追加。サブエージェントは使わず順に実装（並列サブ作業は A の 1 本だけで、A と親の対象ファイル（connection / transaction）が重なるため）
+- 想定外:
+  (1) T1 (f) の「NUL テストの期待を直す」は**直す対象が無かった**（`grep -rn 'nul\|NUL' tests/test_savepoint.mojo` が 0 件）。メッセージが `in name` であることを担保するテストが存在しないので新規に 1 件書いた（`test_savepoint_name_with_a_nul_byte_is_rejected`。3 メソッド全部 + `PQTRANS_INTRANS` 不変 + マーカー非エコー）
+  (2) T2 の追従先チェックリストの検査コマンド `grep -rn 'is Phase 3' src/pq` は**変更前から 0 件**だった（該当文が `is` と `Phase 3.` の間で行送りされている）。検査にならないので PLAN を訂正した
+  (3) `check` / `pixi run test` の所要は見込み（2〜3 分 / 7〜8 分）より短く、Phase 2 末とほぼ同じだった。GUC の SET 1 往復 × connect ループ 10,000 回の +10 s は体感できる差にならなかった
+- やり直し: 0 回（新規テスト 5 件とも初回のコンパイル・実行で通った）
+- PLAN 訂正: 2 件
+  - 検証コマンド節に T1 実測（`check` 113 s / `pixi run test` 約 200 s / test_leak 74 s・サーバー）を追記（根拠: turn 3 の実測。見込み欄は残した）
+  - 追従先チェックリスト「`execute` に `result_format` 引数を足す（T2）」の検査を `grep -rn 'is Phase 3' src/pq` → `grep -rn 'Phase 3' src/pq --include='*.mojo'` が `encode_binary.mojo:16` の 1 行だけ、に（根拠: 元の grep は変更前でも 0 件で検査にならない）
+- 既存テストの期待値を変えた箇所: 1 件のみ
+  - `tests/test_prepared.mojo:543-544` の `find("3")` / `find("1")` → `find("takes 3 parameters, got 1") >= 0`（REQ §6-3。`"1"` はメッセージ中の `pq_stmt_1` にも当たるため検査が緩かった。意味は同じで厳しくなった）
+  - それ以外は無変更で PASS（test_result / test_params / test_transaction / test_decode_text / test_encode_binary / test_errors / test_ffi / test_leak / test_smoke / test_loader_fail）
+- 陽性対照（T1 (b)。実測）: `printf 'pq: implicit ROLLBACK failed: x\n' >> build/final_check.log` の後
+  `grep -cE 'warning:|WARNING:|implicit ROLLBACK failed' build/final_check.log` → **1**、
+  `grep -cE 'warning:|WARNING:' build/final_check.log` → **0**（旧パターンは取り逃がす）。確認後 `rm -f build/final_check.log`
+- 次への注意:
+  - 確認済み: `pixi run check` 6/6 PASS = **113 s**（1/6 fmt 1 s・2〜4/6 計 7 s・5/6 tests 105 s・6/6 grep 0 s、`matched lines: 0`）。`pixi run test` 両サーバー 13 ファイル全 PASS = **約 200 s**（test_leak は 12 件 74 s / サーバー）。`pixi run fmt` は差分ゼロ
+  - 確認済み: `_adopt` の `SET` は `Connection` を組み立てた後に `_ = connection.execute(String(_SESSION_SETUP_SQL))` → `return connection^` の形で通る（失敗時の `PQfinish` は `__deinit__` 任せ、別に書かない）。`SHOW DateStyle` は `open(String)` / `open(Dict)` の両方で `ISO, YMD`、`SHOW IntervalStyle` は `postgres`、`SHOW client_encoding` は `UTF8`（PG17 / PG14 とも）
+  - 確認済み: 追従先チェックリストの T1 関連行 — `grep -c '^def test_' tests/test_connection.mojo` = **31**、`grep -rn 'PQexec(' src/pq --include='*.mojo' | wc -l` = **4**、`grep -rn 'PQfreemem(' src/pq --include='*.mojo' | wc -l` = **2**（GUC の SET は `execute` 経由なので増えていない）
+  - 確認済み: `_reject_nul(name, "name")` は `self._check_open()` の**後**・`escape_identifier` の前に置いた（「先頭」を厳密に取ると閉じたブロックでの NUL が USAGE → TYPE_MISMATCH に変わるため、既存の優先順位を保った。REQ §6-6 の目的「メッセージが `in s` でなく `in name`」は満たす）
+  - 未確認: T2 で `String(unsafe_from_utf8=span)` の ctor 名（turn 2 の申し送りのまま。最初のコンパイルで確定する）
+  - 未確認: `_SESSION_SETUP_SQL` の失敗経路（`SET` が拒否される状況）は再現手段が無く未実測。コードレビューのみ（PLAN「観点の担当」の異常系どおり）
