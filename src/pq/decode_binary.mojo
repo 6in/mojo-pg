@@ -1,8 +1,9 @@
 """Binary-format decoding of PostgreSQL wire bytes into Mojo types.
 
-Holds six fixed-width decoders -- `decode_bool`, `decode_int16`,
-`decode_int32`, `decode_int64`, `decode_float32` and `decode_float64` -- and
-the `comptime if` type switch `decode_binary[T]` that turns one libpq
+Holds eight decoders -- the fixed-width `decode_bool`, `decode_int16`,
+`decode_int32`, `decode_int64`, `decode_float32`, `decode_float64` and
+`decode_uuid`, plus the variable-length `decode_numeric` -- and the
+`comptime if` type switch `decode_binary[T]` that turns one libpq
 binary-format cell into a Mojo value. Each decoder is the inverse of the
 `encode_<pgtype>` function of the same suffix in `pq.encode_binary`, reading
 network byte order (big-endian) by shifting bytes together rather than by
@@ -20,9 +21,12 @@ number:
   non-string type is not its printed form.
 - A fixed-width type's cell must be exactly as wide as the type. One byte
   short, one byte long and zero bytes are all rejected rather than
-  zero-padded.
+  zero-padded. `numeric` is variable-length, so there the header's
+  `ndigits` and the cell length must agree.
 - Values outside the type's wire domain are rejected: a `bool` byte must be
-  0 or 1, and a `jsonb` cell must open with version byte 1.
+  0 or 1, a `jsonb` cell must open with version byte 1, and a `numeric`
+  header must carry one of the five defined signs, a `dscale` of at most
+  16383 and digit groups in `0..9999`.
 
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
@@ -43,18 +47,43 @@ from pq.decode_text import (
     OID_INT2,
     OID_INT4,
     OID_INT8,
+    OID_JSON,
+    OID_JSONB,
     OID_NAME,
+    OID_NUMERIC,
     OID_TEXT,
+    OID_UUID,
     OID_VARCHAR,
 )
 from pq.errors import PgError, PgErrorKind
-
-# Replace these two with imports from `pq.decode_text` once T3 adds
-# `OID_JSON` / `OID_JSONB` there; that module is the only home for OIDs.
-comptime _OID_JSON = UInt32(114)
-comptime _OID_JSONB = UInt32(3802)
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 comptime _JSONB_VERSION = UInt8(1)
+
+comptime _NUMERIC_HEADER = 8
+"""Bytes of `numeric` header before the base-10000 digit groups."""
+
+comptime _NUMERIC_POS = UInt16(0x0000)
+comptime _NUMERIC_NEG = UInt16(0x4000)
+comptime _NUMERIC_NAN = UInt16(0xC000)
+comptime _NUMERIC_PINF = UInt16(0xD000)
+comptime _NUMERIC_NINF = UInt16(0xF000)
+
+comptime _NUMERIC_DSCALE_MAX = UInt16(0x3FFF)
+comptime _NUMERIC_DIGIT_MAX = Int16(9999)
+
+comptime _UUID_BYTES = 16
+
+
+def _hex4(v: UInt16) -> String:
+    """Render `v` as exactly four lowercase hex digits with an `0x` prefix."""
+    comptime DIGITS = "0123456789abcdef"
+    var out = String("0x")
+    for i in range(4):
+        var nibble = Int((v >> UInt16(4 * (3 - i))) & 0xF)
+        out += DIGITS[byte = nibble : nibble + 1]
+    return out^
 
 
 def _binary_oid_error(oid: UInt32, type_name: String) -> PgError:
@@ -264,6 +293,114 @@ def decode_float64[
     return bitcast[DType.float64, 1](_be_bits(bytes))
 
 
+def decode_numeric[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> Decimal:
+    """Decode the variable-length PostgreSQL `numeric` binary format.
+
+    The wire form is the four `int16`/`uint16` header fields `ndigits`,
+    `weight`, `sign` and `dscale`, followed by `ndigits` base-10000 digit
+    groups, all big-endian. The cell must be exactly `8 + 2 * ndigits`
+    bytes, which is what rules out a truncated or over-long cell; `sign`
+    must be one of the five values PostgreSQL defines, and every digit
+    group must be in `0..9999`.
+
+    `NaN` and the infinities carry no digits, and PostgreSQL sends them
+    with a `dscale` of 32 that is an artefact of its header packing, so
+    for those only the sign is read and `weight` / `dscale` are dropped.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, normalised the way `Decimal` keeps it.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when the cell is shorter than
+            the header, when its length disagrees with `ndigits`, or when
+            `sign`, `dscale` or a digit group is out of range.
+    """
+    if len(bytes) < _NUMERIC_HEADER:
+        raise _binary_value_error(
+            "numeric",
+            String("has ", len(bytes), " bytes, expected at least 8"),
+        )
+    var ndigits = Int(bitcast[DType.int16, 1](UInt16(_be_bits(bytes[0:2]))))
+    var expected = _NUMERIC_HEADER + 2 * ndigits
+    if len(bytes) != expected:
+        raise _binary_value_error(
+            "numeric",
+            String(
+                "has ",
+                len(bytes),
+                " bytes, expected 8 + 2*ndigits = ",
+                expected,
+            ),
+        )
+    var weight = bitcast[DType.int16, 1](UInt16(_be_bits(bytes[2:4])))
+    var sign = UInt16(_be_bits(bytes[4:6]))
+    var dscale = UInt16(_be_bits(bytes[6:8]))
+    if (
+        sign != _NUMERIC_POS
+        and sign != _NUMERIC_NEG
+        and sign != _NUMERIC_NAN
+        and sign != _NUMERIC_PINF
+        and sign != _NUMERIC_NINF
+    ):
+        raise _binary_value_error(
+            "numeric", String("invalid sign ", _hex4(sign))
+        )
+    if sign != _NUMERIC_POS and sign != _NUMERIC_NEG:
+        return Decimal._from_parts(sign, 0, 0, List[Int16]())
+    if dscale > _NUMERIC_DSCALE_MAX:
+        raise _binary_value_error(
+            "numeric", String("dscale ", dscale, " out of range")
+        )
+    var digits = List[Int16](capacity=ndigits)
+    for i in range(ndigits):
+        var at = _NUMERIC_HEADER + 2 * i
+        var digit = bitcast[DType.int16, 1](
+            UInt16(_be_bits(bytes[at : at + 2]))
+        )
+        if digit < 0 or digit > _NUMERIC_DIGIT_MAX:
+            raise _binary_value_error(
+                "numeric", String("digit ", digit, " out of range")
+            )
+        digits.append(digit)
+    return Decimal._from_parts(sign, weight, dscale, digits^)
+
+
+def decode_uuid[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) raises PgError -> UUID:
+    """Decode the sixteen byte PostgreSQL `uuid` binary format.
+
+    The bytes are the UUID itself, in the order its canonical text form
+    spells them out, so nothing is byte-swapped here.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+
+    Returns:
+        The value, holding the sixteen bytes as given.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
+            sixteen bytes.
+    """
+    _check_length(bytes, "uuid", _UUID_BYTES)
+    var raw = Array[UInt8, _UUID_BYTES](fill=0)
+    for i in range(_UUID_BYTES):
+        raw[i] = bytes[i]
+    return UUID(raw)
+
+
 def decode_binary[
     origin: ImmOrigin, //, T: Copyable
 ](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> T:
@@ -272,7 +409,8 @@ def decode_binary[
     The column OID must match `T` exactly; no widening or narrowing
     conversion is performed. `Bool` requires oid 16, `Int16` oid 21,
     `Int32` oid 23, `Int64` and `Int` oid 20, `Float32` oid 700,
-    `Float64` oid 701 and `List[UInt8]` oid 17. `String` requires one of
+    `Float64` oid 701, `List[UInt8]` oid 17, `Decimal` oid 1700
+    (`numeric`) and `UUID` oid 2950. `String` requires one of
     the six string-shaped OIDs -- 25 (`text`), 1043 (`varchar`), 1042
     (`bpchar`), 19 (`name`), 114 (`json`) and 3802 (`jsonb`) -- and is
     therefore not the catch-all it is on the text path. Any other `T` is a
@@ -336,7 +474,7 @@ def decode_binary[
         var value = decode_float64(bytes)
         return rebind[T](value).copy()
     elif T == String:
-        if oid == _OID_JSONB:
+        if oid == OID_JSONB:
             if len(bytes) < 1:
                 raise _binary_length_error("jsonb", len(bytes), 1)
             if bytes[0] != _JSONB_VERSION:
@@ -351,7 +489,7 @@ def decode_binary[
             and oid != OID_VARCHAR
             and oid != OID_BPCHAR
             and oid != OID_NAME
-            and oid != _OID_JSON
+            and oid != OID_JSON
         ):
             raise _binary_oid_error(oid, "String")
         var value = String(unsafe_from_utf8=bytes)
@@ -362,6 +500,16 @@ def decode_binary[
         var value = List[UInt8](capacity=len(bytes))
         for i in range(len(bytes)):
             value.append(bytes[i])
+        return rebind[T](value).copy()
+    elif T == Decimal:
+        if oid != OID_NUMERIC:
+            raise _binary_oid_error(oid, "Decimal")
+        var value = decode_numeric(bytes)
+        return rebind[T](value).copy()
+    elif T == UUID:
+        if oid != OID_UUID:
+            raise _binary_oid_error(oid, "UUID")
+        var value = decode_uuid(bytes)
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"

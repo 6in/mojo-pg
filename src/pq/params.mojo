@@ -1,7 +1,7 @@
 """Query parameters and the libpq argument arrays built from them.
 
 `Param` is the single value type accepted by the parameterised execute
-APIs. Nineteen `@implicit` constructors make a plain list literal --
+APIs. Twenty-three `@implicit` constructors make a plain list literal --
 `[1, "a", 1.5, True, Param.null()]` -- convert to `List[Param]`, so the
 caller never names the type. Each constructor **encodes at construction
 time**: the Mojo value is turned into its PostgreSQL wire bytes right
@@ -56,6 +56,8 @@ from pq.decode_text import (
     OID_INT2,
     OID_INT4,
     OID_INT8,
+    OID_NUMERIC,
+    OID_UUID,
 )
 from pq.encode_binary import (
     encode_bool,
@@ -64,8 +66,12 @@ from pq.encode_binary import (
     encode_int16,
     encode_int32,
     encode_int64,
+    encode_numeric,
+    encode_uuid,
 )
 from pq.errors import PgError, PgErrorKind
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 
 def _text_bytes(s: String) -> List[UInt8]:
@@ -88,9 +94,9 @@ struct Param(Copyable, Movable):
     """One already-encoded query parameter.
 
     Holds the PostgreSQL type OID, the wire format flag and the encoded
-    bytes: big-endian binary for `Bool`, the integers and the floats, raw
-    bytes for `bytea`, and NUL-free text bytes for `String`. A SQL NULL
-    carries no bytes at all.
+    bytes: big-endian binary for `Bool`, the integers, the floats,
+    `Decimal` (`numeric`) and `UUID`, raw bytes for `bytea`, and NUL-free
+    text bytes for `String`. A SQL NULL carries no bytes at all.
 
     Construction is implicit from any of the supported Mojo types and
     from `Optional` of each of them, so `List[Param]` accepts a plain
@@ -245,6 +251,24 @@ struct Param(Copyable, Movable):
         self = Param(UInt32(0), False, False, _text_bytes(String(v)))
 
     @implicit
+    def __init__(out self, v: Decimal):
+        """Encode `v` as a binary `numeric` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_NUMERIC, True, False, encode_numeric(v))
+
+    @implicit
+    def __init__(out self, v: UUID):
+        """Encode `v` as a binary `uuid` parameter.
+
+        Args:
+            v: The value to send.
+        """
+        self = Param(OID_UUID, True, False, encode_uuid(v))
+
+    @implicit
     def __init__(out self, var v: List[UInt8]):
         """Send `v` as a binary `bytea` parameter.
 
@@ -364,6 +388,30 @@ struct Param(Copyable, Movable):
             self = Param(v.take())
         else:
             self = Param.null(OID_BYTEA)
+
+    @implicit
+    def __init__(out self, var v: Optional[Decimal]):
+        """Encode `v` as a binary `numeric` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `numeric`.
+        """
+        if v:
+            self = Param(v.take())
+        else:
+            self = Param.null(OID_NUMERIC)
+
+    @implicit
+    def __init__(out self, v: Optional[UUID]):
+        """Encode `v` as a binary `uuid` parameter, or a typed NULL.
+
+        Args:
+            v: The value to send, or None for a SQL NULL of `uuid`.
+        """
+        if v:
+            self = Param(v.value())
+        else:
+            self = Param.null(OID_UUID)
 
     def oid(self) -> UInt32:
         """Return the PostgreSQL type OID this parameter is sent as.

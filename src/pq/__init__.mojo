@@ -1,14 +1,18 @@
 """PostgreSQL client for Mojo built on libpq via C FFI.
 
 Layout follows HANDOFF.md §4. Phase 1 adds `_ffi`, `connection`, `result`.
-Phase 2 adds `params`, `prepared`, `transaction`.
+Phase 2 adds `params`, `prepared`, `transaction`. Phase 3 adds
+`decode_binary` and the `types_*` modules holding the value types for
+PostgreSQL types Mojo has no built-in for.
 
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
-`PreparedStatement`, `Transaction`, the `CONNECTION_OK` / `CONNECTION_BAD`
-status constants and the five `PQTRANS_*` transaction status constants.
+`PreparedStatement`, `Transaction`, the `Decimal` and `UUID` value types
+for the PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK`
+/ `CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
+status constants.
 
 ## Type mapping
 
@@ -26,9 +30,12 @@ returns the text unchanged.
 | int8 | 20 | `Int64` (also readable as `Int`) | decimal |
 | float4 | 700 | `Float32` | decimal, `NaN` / `Infinity` / `-Infinity` |
 | float8 | 701 | `Float64` | same |
+| numeric | 1700 | `Decimal` | position notation, `NaN` / `±Infinity` |
+| uuid | 2950 | `UUID` | lowercase `8-4-4-4-12` |
 | text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is |
+| json, jsonb | 114, 3802 | `String` | as-is; jsonb drops its version byte |
 | bytea | 17 | `List[UInt8]` | `\\x` hex form only |
-| anything else | -- | only obtainable as `String` | as-is |
+| anything else | -- | `String` in the text format only; a binary result raises `TYPE_MISMATCH` | as-is |
 
 `pq.decode_text.decode_text` implements the table and is the one place to
 change when a type is added.
@@ -82,6 +89,8 @@ wire format and the OID sent in `paramTypes`:
 | `Int64` / `Int` | binary, 8 byte BE | 20 | `Int` is `int8` |
 | `Float32` | IEEE 754, 4 byte BE | 700 | `NaN` / `±Inf` as-is |
 | `Float64` | IEEE 754, 8 byte BE | 701 | same |
+| `Decimal` | binary, 8 byte header + digits | 1700 | `numeric` |
+| `UUID` | binary, 16 byte | 2950 | |
 | `String`, `StringLiteral` | text, NUL-terminated | 0 | server infers |
 | `List[UInt8]` | binary, with length | 17 | empty / NUL-containing ok |
 | NULL | NULL | 0, or the given OID | see below |
@@ -150,3 +159,5 @@ from .params import Param
 from .prepared import PreparedStatement
 from .result import Result, ResultFormat, Row
 from .transaction import Transaction
+from .types_numeric import Decimal
+from .types_uuid import UUID

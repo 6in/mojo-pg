@@ -34,6 +34,8 @@ from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.params import Param
 from pq.result import Result, Row
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 comptime DEFAULT_CONNINFO = (
     "host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test"
@@ -519,6 +521,30 @@ def test_param_oids_and_formats() raises:
     assert_equal(as_bytes.oid(), UInt32(17))
     assert_true(as_bytes.is_binary())
     assert_false(as_bytes.is_null())
+
+
+def test_param_oids_of_the_extended_types() raises:
+    # `Decimal` and `UUID` go out in binary with the OID of the PostgreSQL
+    # type they stand for, unlike `String`, which leaves the OID unspecified.
+    var as_numeric = Param(Decimal(String("1")))
+    assert_equal(as_numeric.oid(), UInt32(1700))
+    assert_true(as_numeric.is_binary())
+    assert_false(as_numeric.is_null())
+
+    var as_uuid = Param(UUID(String("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")))
+    assert_equal(as_uuid.oid(), UInt32(2950))
+    assert_true(as_uuid.is_binary())
+    assert_false(as_uuid.is_null())
+
+
+def test_param_from_empty_optional_of_an_extended_type() raises:
+    var no_numeric = Param(Optional[Decimal](None))
+    assert_equal(no_numeric.oid(), UInt32(1700))
+    assert_true(no_numeric.is_null())
+
+    var no_uuid = Param(Optional[UUID](None))
+    assert_equal(no_uuid.oid(), UInt32(2950))
+    assert_true(no_uuid.is_null())
 
 
 def test_param_from_empty_optional_keeps_the_oid() raises:

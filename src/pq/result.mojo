@@ -525,6 +525,8 @@ struct Row[origin: ImmOrigin](Copyable):
         | `Float32`      | 700 (float4)                | 700 (float4)        |
         | `Float64`      | 701 (float8)                | 701 (float8)        |
         | `List[UInt8]`  | 17 (bytea), hex form only   | 17 (bytea)          |
+        | `Decimal`      | 1700 (numeric)              | 1700 (numeric)      |
+        | `UUID`         | 2950 (uuid)                 | 2950 (uuid)         |
         | `String`       | any                         | string-like OIDs    |
 
         The two rows that differ between the formats:

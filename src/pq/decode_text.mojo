@@ -1,9 +1,13 @@
 """Text-format decoding of PostgreSQL values into Mojo types.
 
-Holds the PostgreSQL OID constants the package understands, the
-`comptime if` type switch `decode_text[T]` that turns a libpq text-format
-cell into a Mojo value, and `parse_bytea_hex` for the `\\x`-prefixed hex
-output of `bytea`. The requested type must match the column OID exactly:
+Holds the PostgreSQL OID constants the package understands -- this module
+is their only home, and `pq.decode_binary`, `pq.encode_binary` and
+`pq.params` import them from here -- the `comptime if` type switch
+`decode_text[T]` that turns a libpq text-format cell into a Mojo value,
+and `parse_bytea_hex` for the `\\x`-prefixed hex output of `bytea`. Types
+whose text form needs a parser of its own (`Decimal`, `UUID`) provide a
+`parse` static method in `pq.types_numeric` / `pq.types_uuid`, which the
+type switch calls. The requested type must match the column OID exactly:
 neither widening (`int2` into `Int32`) nor narrowing is performed, so a
 mismatch raises `PgError(PgErrorKind.TYPE_MISMATCH, ...)` before any
 conversion is attempted. `String` is the single exception; it accepts any
@@ -14,6 +18,8 @@ quotes the offending input text.
 """
 
 from pq.errors import PgError, PgErrorKind
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 comptime OID_BOOL = UInt32(16)
 """OID of `bool`."""
@@ -36,6 +42,9 @@ comptime OID_INT4 = UInt32(23)
 comptime OID_TEXT = UInt32(25)
 """OID of `text`."""
 
+comptime OID_JSON = UInt32(114)
+"""OID of `json`."""
+
 comptime OID_FLOAT4 = UInt32(700)
 """OID of `float4` (`real`)."""
 
@@ -47,6 +56,15 @@ comptime OID_BPCHAR = UInt32(1042)
 
 comptime OID_VARCHAR = UInt32(1043)
 """OID of `varchar` (`character varying`)."""
+
+comptime OID_NUMERIC = UInt32(1700)
+"""OID of `numeric` (`decimal`)."""
+
+comptime OID_UUID = UInt32(2950)
+"""OID of `uuid`."""
+
+comptime OID_JSONB = UInt32(3802)
+"""OID of `jsonb`."""
 
 comptime _INT2_MIN = -32768
 comptime _INT2_MAX = 32767
@@ -135,8 +153,9 @@ def decode_text[T: Copyable](text: String, oid: UInt32) raises PgError -> T:
     The column OID must match `T` exactly; no widening or narrowing
     conversion is performed. `Bool` requires oid 16, `Int16` oid 21,
     `Int32` oid 23, `Int64` and `Int` oid 20, `Float32` oid 700,
-    `Float64` oid 701 and `List[UInt8]` oid 17. `String` accepts any OID
-    and never fails. Any other `T` is a compile-time error.
+    `Float64` oid 701, `List[UInt8]` oid 17, `Decimal` oid 1700
+    (`numeric`) and `UUID` oid 2950. `String` accepts any OID and never
+    fails. Any other `T` is a compile-time error.
 
     Parameters:
         T: The Mojo type to decode into.
@@ -231,6 +250,16 @@ def decode_text[T: Copyable](text: String, oid: UInt32) raises PgError -> T:
         if oid != OID_BYTEA:
             raise _oid_error(oid, "bytea", text)
         var value = parse_bytea_hex(text)
+        return rebind[T](value).copy()
+    elif T == Decimal:
+        if oid != OID_NUMERIC:
+            raise _oid_error(oid, "numeric", text)
+        var value = Decimal.parse(text)
+        return rebind[T](value).copy()
+    elif T == UUID:
+        if oid != OID_UUID:
+            raise _oid_error(oid, "uuid", text)
+        var value = UUID.parse(text)
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"

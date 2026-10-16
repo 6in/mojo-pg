@@ -364,6 +364,8 @@ struct Connection(Movable):
         | `Int64` / `Int` | 20 | binary, 8 byte big-endian |
         | `Float32` | 700 | binary, 4 byte IEEE 754 |
         | `Float64` | 701 | binary, 8 byte IEEE 754 |
+        | `Decimal` | 1700 | binary, 8 byte header + digit groups |
+        | `UUID` | 2950 | binary, 16 byte |
         | `String` / `StringLiteral` | **0 (unspecified)** | text |
         | `List[UInt8]` | 17 | binary, the bytes as-is |
         | `Param.null()` / `Param.null(oid)` | 0 / the given OID | NULL |

@@ -10,6 +10,8 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from pq.decode_binary import decode_binary
 from pq.decode_text import parse_bytea_hex
 from pq.errors import PgErrorKind
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 
 def _hex(digits: String) raises -> List[UInt8]:
@@ -404,6 +406,149 @@ def test_bytea_rejects_text_column() raises:
 
 def test_bytea_rejects_point_column() raises:
     _assert_oid_rejected[List[UInt8]]("0068", 600)
+
+
+# --- numeric ------------------------------------------------------------------
+
+
+def _assert_numeric(digits: String, expected: String) raises:
+    """Assert a `numeric` cell decodes to the text PostgreSQL prints for it.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        expected: The `numeric_out` text of the same value.
+
+    Raises:
+        Error: If decoding failed or printed something else.
+    """
+    var value = _ok[Decimal](digits, 1700)
+    assert_equal(String(value), expected, String("numeric ", digits))
+
+
+def _assert_numeric_rejected(digits: String) raises:
+    """Assert a malformed `numeric` cell is a `TYPE_MISMATCH` naming the type.
+
+    Args:
+        digits: A cell that is not a well-formed `numeric`, as hex digits.
+
+    Raises:
+        Error: If the call succeeded or reported the wrong kind or message.
+    """
+    assert_equal(_error_kind[Decimal](digits, 1700), PgErrorKind.TYPE_MISMATCH)
+    var message = _error_message[Decimal](digits, 1700)
+    assert_true(
+        "cannot decode binary numeric" in message,
+        String("numeric ", digits, ": ", message),
+    )
+
+
+def test_numeric_table_decodes_to_printed_text() raises:
+    # Every row is the wire form PostgreSQL 17 and 14 send for the value in
+    # the second column, taken from `encode(numeric_send(v), 'hex')`.
+    _assert_numeric("000200000000000200011388", "1.50")
+    _assert_numeric("0001ffff40000003000a", "-0.001")
+    _assert_numeric("0000000000000000", "0")
+    _assert_numeric("0000000000000002", "0.00")
+    _assert_numeric("0001fffe000000060064", "0.000001")
+    _assert_numeric("0001fffd0000000a0064", "0.0000000001")
+    _assert_numeric("00010001000000000064", "1000000")
+    _assert_numeric("00010001000000000001", "10000")
+    _assert_numeric("0001000000000000270f", "9999")
+    _assert_numeric("000300010000000104d2162e2328", "12345678.9")
+    _assert_numeric(
+        "000b000700000009000c0d801ed204d2162e23340d801ed204d2162e2328",
+        "123456789012345678901234567890.123456789",
+    )
+    _assert_numeric("0002000000000004000c0d48", "12.3400")
+    _assert_numeric("0001ffff000000040001", "0.0001")
+    _assert_numeric("0001ffff000000011388", "0.5")
+    _assert_numeric("0001ffff400000011388", "-0.5")
+    _assert_numeric("00010000000000000001", "1")
+    _assert_numeric("00000000c0000000", "NaN")
+    _assert_numeric("00000000d0000020", "Infinity")
+    _assert_numeric("00000000f0000020", "-Infinity")
+    # `numeric(10,4)` and `numeric(10,0)`: the typmod shows up as dscale.
+    _assert_numeric("000200000000000400011388", "1.5000")
+    _assert_numeric("00010000000000000064", "100")
+
+
+def test_numeric_infinity_drops_the_header_dscale() raises:
+    # PostgreSQL sends +Infinity with a dscale of 32, an artefact of its
+    # header packing; only the sign is meaningful.
+    var value = _ok[Decimal]("00000000d0000020", 1700)
+    assert_true(value.is_infinite())
+    assert_false(value.is_nan())
+    assert_equal(String(value), "Infinity")
+    assert_equal(value.dscale(), 0)
+
+
+def test_numeric_dscale_pads_and_truncates_the_fraction() raises:
+    # The stored digits and dscale need not agree: the fraction is printed to
+    # exactly dscale places, zero-padded or cut as needed.
+    _assert_numeric("0001ffff000000050001", "0.00010")
+    _assert_numeric("0001fffe0000000503e8", "0.00001")
+
+
+def test_numeric_large_weight_stays_in_position_notation() raises:
+    var want = String("1")
+    for _ in range(130):
+        want += "0"
+    var value = _ok[Decimal]("00010020000000000064", 1700)
+    var printed = String(value)
+    assert_equal(printed.byte_length(), 131)
+    assert_equal(printed, want)
+
+
+def test_numeric_minimum_weight_decodes() raises:
+    # weight 0x8000 is Int16.MIN; taking `-weight` anywhere would overflow.
+    _assert_numeric("00018000000000000001", "0")
+
+
+def test_numeric_rejects_short_header() raises:
+    _assert_numeric_rejected("00000000000000")
+
+
+def test_numeric_rejects_length_disagreeing_with_ndigits() raises:
+    # ndigits 2 needs 12 bytes; this cell is 10.
+    _assert_numeric_rejected("00020000000000020001")
+
+
+def test_numeric_rejects_invalid_sign() raises:
+    _assert_numeric_rejected("0000000012340000")
+
+
+def test_numeric_rejects_digit_out_of_range() raises:
+    # 0x2710 is 10000, one past the last base-10000 digit.
+    _assert_numeric_rejected("00010000000000002710")
+
+
+def test_numeric_rejects_dscale_out_of_range() raises:
+    # 0x4000 is 16384, one past the 14 bit dscale field.
+    _assert_numeric_rejected("0000000000004000")
+
+
+def test_numeric_rejects_int4_column() raises:
+    _assert_oid_rejected[Decimal]("00000001", 23)
+
+
+# --- uuid ---------------------------------------------------------------------
+
+
+def test_uuid_decodes_sixteen_bytes() raises:
+    var value = _ok[UUID]("a0eebc999c0b4ef8bb6d6bb9bd380a11", 2950)
+    assert_equal(String(value), "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+
+
+def test_uuid_rejects_wrong_length() raises:
+    _assert_length_rejected[UUID]("a0eebc999c0b4ef8bb6d6bb9bd380a", 2950, 16)
+    _assert_length_rejected[UUID](
+        "a0eebc999c0b4ef8bb6d6bb9bd380a1122", 2950, 16
+    )
+    _assert_length_rejected[UUID]("", 2950, 16)
+
+
+def test_uuid_rejects_text_column() raises:
+    _assert_oid_rejected[UUID]("a0eebc999c0b4ef8bb6d6bb9bd380a11", 25)
 
 
 def main() raises:

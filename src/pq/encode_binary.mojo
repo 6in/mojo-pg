@@ -1,10 +1,13 @@
 """Binary-format encoding of Mojo values into PostgreSQL wire bytes.
 
-Holds exactly six encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
-`encode_int64`, `encode_float32` and `encode_float64` -- each returning the
-value's PostgreSQL binary representation as a `List[UInt8]` in network byte
-order (big-endian). Lengths are fixed: 1 byte for `bool`, 2 for `int2`, 4
-for `int4` and `float4`, 8 for `int8` and `float8`.
+Holds eight encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
+`encode_int64`, `encode_float32`, `encode_float64`, `encode_numeric` and
+`encode_uuid` -- each returning the value's PostgreSQL binary
+representation as a `List[UInt8]` in network byte order (big-endian).
+Lengths are fixed for all but one: 1 byte for `bool`, 2 for `int2`, 4 for
+`int4` and `float4`, 8 for `int8` and `float8`, 16 for `uuid`. Only
+`numeric` is variable: an 8 byte header plus two bytes per base-10000
+digit group.
 
 There is no `Int` encoder on purpose: callers widen with `Int64(v)` and use
 `encode_int64`, so the wire width is always chosen explicitly.
@@ -19,6 +22,9 @@ decoder of the same suffix there.
 """
 
 from std.memory import bitcast
+
+from pq.types_numeric import Decimal
+from pq.types_uuid import UUID
 
 
 def _be_bytes(bits: UInt64, size: Int) -> List[UInt8]:
@@ -35,6 +41,17 @@ def _be_bytes(bits: UInt64, size: Int) -> List[UInt8]:
     for i in range(size):
         out.append(UInt8((bits >> UInt64(8 * (size - 1 - i))) & 0xFF))
     return out^
+
+
+def _append_be16(mut out: List[UInt8], v: UInt16):
+    """Append `v` to `out` as two bytes, most significant byte first.
+
+    Args:
+        out: The byte list to extend in place.
+        v: The bit pattern to serialise.
+    """
+    out.append(UInt8((v >> 8) & 0xFF))
+    out.append(UInt8(v & 0xFF))
 
 
 def encode_bool(v: Bool) -> List[UInt8]:
@@ -113,3 +130,48 @@ def encode_float64(v: Float64) -> List[UInt8]:
         Eight bytes, big-endian IEEE 754 binary64.
     """
     return _be_bytes(bitcast[DType.uint64, 1](v), 8)
+
+
+def encode_numeric(d: Decimal) -> List[UInt8]:
+    """Encode `d` as the PostgreSQL `numeric` binary format.
+
+    The output is the `ndigits`, `weight`, `sign` and `dscale` header
+    followed by `ndigits` base-10000 digit groups, every field two bytes
+    big-endian. `Decimal` keeps its digits normalised, so this is a plain
+    transcription of its fields and needs no special case: `NaN` and the
+    infinities hold no digits and a zeroed weight and dscale, which is
+    exactly the `0000 0000 <sign> 0000` the server expects for them.
+
+    Args:
+        d: The value to encode.
+
+    Returns:
+        `8 + 2 * ndigits` bytes, big-endian throughout.
+    """
+    var ndigits = len(d._digits)
+    var out = List[UInt8](capacity=8 + 2 * ndigits)
+    _append_be16(out, UInt16(ndigits))
+    _append_be16(out, bitcast[DType.uint16, 1](d._weight))
+    _append_be16(out, d._sign)
+    _append_be16(out, d._dscale)
+    for i in range(ndigits):
+        _append_be16(out, bitcast[DType.uint16, 1](d._digits[i]))
+    return out^
+
+
+def encode_uuid(u: UUID) -> List[UInt8]:
+    """Encode `u` as the sixteen byte PostgreSQL `uuid` binary format.
+
+    The bytes go out in the order the canonical text form spells them, so
+    nothing is byte-swapped.
+
+    Args:
+        u: The value to encode.
+
+    Returns:
+        Exactly sixteen bytes.
+    """
+    var out = List[UInt8](capacity=16)
+    for i in range(16):
+        out.append(u.bytes[i])
+    return out^
