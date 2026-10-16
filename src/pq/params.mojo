@@ -435,8 +435,10 @@ struct _ParamBuffers(Movable):
 
         Raises:
             PgError: `PgErrorKind.USAGE` when a text parameter contains
-                an embedded NUL byte, naming the one-based position as
-                `$N`. The value itself is never put in the message.
+                an embedded NUL byte, or when any parameter is longer
+                than libpq's `paramLengths` can carry (1073741823
+                bytes). Both name the one-based position as `$N`; the
+                value itself is never put in the message.
         """
         var size = len(params)
         self.types = List[UInt32](capacity=size + 1)
@@ -447,6 +449,20 @@ struct _ParamBuffers(Movable):
 
         for i in range(size):
             self.types.append(params[i]._oid)
+            # libpq's `paramLengths` is a C `int`, so a longer buffer would
+            # reach the server with a wrapped -- possibly negative -- length.
+            # Refused here instead, for the binary and the text branch alike.
+            if len(params[i]._data) > 0x3FFFFFFF:
+                raise PgError(
+                    PgErrorKind.USAGE,
+                    String(
+                        "parameter $",
+                        i + 1,
+                        " is too large (",
+                        len(params[i]._data),
+                        " bytes; libpq takes at most 1073741823)",
+                    ),
+                )
             if params[i]._null:
                 self.bufs.append(List[UInt8]())
                 self.lengths.append(c_int(0))

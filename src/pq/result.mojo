@@ -13,8 +13,12 @@ then return NULL, so checking first is what keeps stderr clean.
 
 Row-level access is `__getitem__` and `__iter__`, both of which hand out `Row`
 values. A `Row` is a borrowed view -- a `Pointer[Result, origin]` plus a row
-index, never a snapshot of the row data -- so the `origin` parameter makes a
-`Row` that outlives its `Result` a compile error instead of a dangling read.
+index, never a snapshot of the row data. A `Row` is bound to the `Result`'s
+origin, so using it after the result has been **moved away**
+(`var r2 = res^`, or passing `res^` to a function) is a compile error
+(`use of uninitialized value`). `_ = res^` is **not** a destroy: it is a
+keep-alive marker, and `PQclear` runs after the last use of any `Row` or
+slice borrowed from the result.
 `Row.get` / `Row.get_optional` build on `_check_cell` / `_is_null` / `_text`
 and finish in `pq.decode_text.decode_text`.
 """
@@ -342,9 +346,12 @@ struct Row[origin: ImmOrigin](Copyable):
 
     Holds a pointer to the result and a row index; no cell data is copied at
     construction, and every accessor reads through the pointer. `origin` ties
-    the view to the borrow it came from, so a `Row` outliving its `Result` is
-    a compile error rather than a dangling read -- there is no runtime guard
-    for it.
+    the view to the borrow it came from: using the row after the result has
+    been **moved away** (`var r2 = res^`, or passing `res^` to a function) is
+    a compile error (`use of uninitialized value`), and there is no runtime
+    guard for it. `_ = res^` is **not** a destroy: it is a keep-alive marker,
+    and `PQclear` runs after the last use of any `Row` or slice borrowed from
+    the result.
 
     Parameters:
         origin: Immutable origin of the borrowed `Result`.

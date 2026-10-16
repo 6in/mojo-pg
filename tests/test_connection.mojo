@@ -471,6 +471,25 @@ def _row_get_optional_error(result: Result, name: String) raises -> PgError:
     raise Error("expected a PgError from Row.get_optional(name)")
 
 
+def _get_string(result: Result, i: Int) raises -> String:
+    """Return column `i` of the first row as a `String`.
+
+    Args:
+        result: A result with at least one row.
+        i: Zero-based column index.
+
+    Returns:
+        An owned copy of the cell's text.
+
+    Raises:
+        Error: If `Row.get` raised a `PgError`.
+    """
+    try:
+        return result[0].get[String](i)
+    except e:
+        raise Error(String(e))
+
+
 def _column_type_oid(result: Result, i: Int) raises -> UInt32:
     """Return the type OID of column `i`.
 
@@ -883,6 +902,63 @@ def test_transaction_status_follows_the_transaction() raises:
     _ = rolled_back^
     assert_equal(conn.transaction_status(), Int(PQTRANS_IDLE))
 
+    _ = conn^
+
+
+# --- session settings pinned at open time ------------------------------------
+
+
+def test_open_fixes_datestyle() raises:
+    """Every freshly opened connection reports `DateStyle` as `ISO, YMD`.
+
+    The text form of a date is GUC-dependent, so the decoders can only assume
+    one grammar if `open` pins it. Both constructors go through `_adopt`,
+    which is where the `SET` is sent, so the second connection here is the
+    check that `open(Dict)` is not a separate path.
+    """
+    var conn = _connect(_conninfo())
+    var shown = _execute(conn, "SHOW DateStyle")
+    assert_equal(shown.row_count(), 1)
+    assert_equal(_get_string(shown, 0), "ISO, YMD")
+    _ = shown^
+    _ = conn^
+
+    var from_params = _connect_params(_params())
+    var shown_again = _execute(from_params, "SHOW DateStyle")
+    assert_equal(_get_string(shown_again, 0), "ISO, YMD")
+    _ = shown_again^
+    _ = from_params^
+
+
+def test_open_fixes_intervalstyle() raises:
+    """Every freshly opened connection reports `IntervalStyle` as `postgres`.
+
+    `postgres` is also the server default, so this pins a value rather than
+    changing one -- which is exactly the point: a server configured with
+    `iso_8601` would otherwise hand `P1D` to a decoder that reads
+    `1 day`.
+    """
+    var conn = _connect(_conninfo())
+    var shown = _execute(conn, "SHOW IntervalStyle")
+    assert_equal(shown.row_count(), 1)
+    assert_equal(_get_string(shown, 0), "postgres")
+    _ = shown^
+    _ = conn^
+
+
+def test_client_encoding_is_utf8() raises:
+    """The session encoding is UTF8, which `pq` assumes but never sets.
+
+    Text cells are handed to `String` without validation, so the assumption
+    has to hold somewhere; it holds because libpq takes `client_encoding`
+    from the environment and the test environment is UTF-8. A connection
+    opened under a different locale would be the caller's to fix.
+    """
+    var conn = _connect(_conninfo())
+    var shown = _execute(conn, "SHOW client_encoding")
+    assert_equal(shown.row_count(), 1)
+    assert_equal(_get_string(shown, 0), "UTF8")
+    _ = shown^
     _ = conn^
 
 

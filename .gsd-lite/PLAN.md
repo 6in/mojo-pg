@@ -34,6 +34,8 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 - 所要の目安（Phase 2 末の実測: `check` 80〜115 s、`pixi run test` 5〜6 分、test_leak 1 サーバー 57〜59 s）。Phase 3 で乗るもの:
   `Connection.open` の SET 1 往復（約 +1 ms × connect ループ 10,000 回 ≒ +10 s）、leak ループ 2 本（約 +5 s）、example 1 本、
   新テストファイル 7 本（各 2〜10 s）。**`check` は 2〜3 分、`pixi run test` は 7〜8 分と見込む**（未確認。impl は所要を PROGRESS に単位付きで書く）
+  - **T1 実測（turn 3）**: `check` **113 s**（6/6 PASS。1/6 fmt 1 s・2〜4/6 計 7 s・5/6 tests 105 s・6/6 grep 0 s）、
+    `pixi run test` **約 200 s**（両サーバー 13 ファイル。test_leak は 74 s / サーバー）。GUC の SET 1 往復を足しても Phase 2 末（80〜115 s / 5〜6 分）とほぼ同じで、見込みは過大だった
 - PG14 / PG17 の差は interval の ±infinity だけ（RESEARCH §2.2.7）。**PG17 限定ケースは `conn.server_version() >= 170000`（`src/pq/connection.mojo:712-719`）で分岐**。他は全テスト両サーバー同一期待値
 
 ## 追従先チェックリスト
@@ -45,7 +47,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 | `Param` の `@implicit` ctor を足す（T3〜T5: 8 型 × 2 = 16 本） | `src/pq/params.mojo:4`「Nineteen `@implicit` constructors」→ **Thirty-five**、`src/pq/params.mojo:87-99` struct docstring、`src/pq/connection.mojo:301-313` の `execute(sql, params)` 表、`src/pq/__init__.mojo:36-63` の Parameters 表、`tests/test_params.mojo:496` `test_param_oids_and_formats` 系に新型の OID / `is_binary()` | `grep -c '@implicit' src/pq/params.mojo` = 35、`grep -c Nineteen src/pq/params.mojo` = 0、`grep -c Thirty-five src/pq/params.mojo` = 1 |
 | `encode_binary.mojo` に encoder を足す（T3〜T5: 8 本） | `src/pq/encode_binary.mojo:3`「Holds exactly six encoders」→ **fourteen** + 一覧、`tests/test_encode_binary.mojo:119-125` `test_encoded_widths_are_fixed` に固定長の型（date 4 / timestamp 8 / timestamptz 8 / time 8 / timetz 12 / interval 16 / uuid 16） | `grep -c '^def encode_' src/pq/encode_binary.mojo` = 14、`grep -c 'exactly six' src/pq/encode_binary.mojo` = 0 |
 | `decode_binary.mojo` に decoder を足す | 名前は `encode_<pgtype>` / `decode_<pgtype>` で対（`encode_binary.mojo:16-18` の約束） | `grep -c '^def decode_' src/pq/decode_binary.mojo` = 14（bool / int16 / int32 / int64 / float32 / float64 / numeric / date / timestamp / timestamptz / time / timetz / interval / uuid。text 系・bytea・jsonb は `decode_binary[T]` 内で直接扱い、関数は作らない） |
-| `execute` に `result_format` 引数を足す（T2） | `src/pq/connection.mojo:286-288` / `:326-327`「Results always come back in text form; a binary `result_format` is Phase 3.」、`src/pq/prepared.mojo:127` / `:138-139`（同文）、`src/pq/transaction.mojo:393`（`execute(sql, params)` の passthrough）、`src/pq/__init__.mojo` に `ResultFormat` の節 | `grep -rn 'is Phase 3' src/pq` = 0 件、`grep -c 'result_format' src/pq/connection.mojo src/pq/prepared.mojo src/pq/transaction.mojo` が各 ≥ 2 |
+| `execute` に `result_format` 引数を足す（T2） | `src/pq/connection.mojo:286-288` / `:326-327`「Results always come back in text form; a binary `result_format` is Phase 3.」、`src/pq/prepared.mojo:127` / `:138-139`（同文）、`src/pq/transaction.mojo:393`（`execute(sql, params)` の passthrough）、`src/pq/__init__.mojo` に `ResultFormat` の節 | `grep -rn 'Phase 3' src/pq --include='*.mojo'` が `encode_binary.mojo:16`（名前の対の説明）の 1 行だけ（**turn 3 訂正**: 元の `grep -rn 'is Phase 3'` は該当文が `is` と `Phase 3.` の間で行送りされているため変更前でも 0 件で、検査にならない）、`grep -c 'result_format' src/pq/connection.mojo src/pq/prepared.mojo src/pq/transaction.mojo` が各 ≥ 2 |
 | 公開 struct を足す（`ResultFormat` / `Decimal` / `Date` / `Timestamp` / `TimestampTz` / `Time` / `TimeTz` / `Interval` / `UUID`） | `src/pq/__init__.mojo:102-116` の再エクスポート + モジュール docstring、docstring 診断（3/6 段） | `mojo precompile --diagnose-missing-doc-strings src/pq -o build/pq.mojoc 2>&1 \| grep -v '/_ffi/' \| grep -vE "'(__init__\|__deinit__\|__copyinit__\|__moveinit__)'" \| grep -c 'doc string'` = 0、`from pq import ResultFormat, Decimal, Date, Timestamp, TimestampTz, Time, TimeTz, Interval, UUID` が `examples/binary.mojo` でコンパイルする |
 | `examples/` を足す（T8: `binary.mojo` / `bench_formats.mojo`） | `pixi.toml:17-18` の並びに `example-binary` / `bench`、`tests/final_check.sh:117-123` の 4/6 段に `examples/binary.mojo` の実行行（**`bench_formats.mojo` は足さない**: 合否なし。P29） | `grep -rn 'examples/' pixi.toml tests/final_check.sh` に `examples/binary.mojo` が両方、`bench_formats` は pixi.toml にだけ |
 | テストファイルを足す（T2〜T7 で 7 本） | 無し（`run_tests.sh:76` は glob）。サーバー不要のファイルも両サーバーで 2 回回る（`run_tests.sh:15-17` の方針） | `pixi run test` のログに新ファイル名が 2 回出る |
@@ -57,7 +59,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
 
 ## Tasks
 
-- [ ] T1: 持ち越し整理（REQ §6 の 10 件）+ 接続直後の GUC 固定（REQ §4.7）+ `test_connection` 3 件
+- [x] T1: 持ち越し整理（REQ §6 の 10 件）+ 接続直後の GUC 固定（REQ §4.7）+ `test_connection` 3 件
   - 完了基準:
     - (a) REQ §6-1: `src/pq/prepared.mojo:127-163`（`execute` docstring）に「A prepared statement binds values of the **same width** the server resolved at `PQprepare` time: `$1::int4` wants `Int32`, and passing `Int` (`int8`) is SQLSTATE `22P03`」を 1 文、
       `src/pq/__init__.mojo:36-63`（Parameters 節）に同趣旨を 1 文

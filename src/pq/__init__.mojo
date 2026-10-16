@@ -62,6 +62,12 @@ A SQL NULL is `Param.null()` when the statement determines the type, and
 bare `None` literal does not, so write the type out:
 `Optional[Int](None)`, or `var x: Optional[Int] = None` and pass `x`.
 
+`PreparedStatement.execute(params)` is stricter about width than
+`Connection.execute(sql, params)`: the types were fixed when the server
+prepared the statement, so a value has to be the **same width** that
+`param_type_oid(i)` reports -- `$1::int4` wants `Int32`, and passing `Int`
+(`int8`) is SQLSTATE `22P03`.
+
 ## Transactions
 
 `Connection.transaction()` issues `BEGIN` and returns a

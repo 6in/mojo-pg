@@ -6,9 +6,13 @@ and returns a `PreparedStatement` holding the statement name and that type
 list. `PreparedStatement.execute` runs it with `PQexecPrepared`.
 
 The statement is a *borrowed view* of its `Connection`: it carries a
-`Pointer[Connection, origin]` rather than a copy, so `origin` makes a
-statement that outlives its connection a compile error instead of a call
-through a closed `PGconn*`. It is `Movable` but deliberately **not**
+`Pointer[Connection, origin]` rather than a copy. A `PreparedStatement` is
+bound to the `Connection`'s origin, so using it after the connection has been
+**moved away** (`var c2 = conn^`, or passing `conn^` to a function) is a
+compile error (`use of uninitialized value`) instead of a call through a
+closed `PGconn*`. `_ = conn^` is **not** a destroy: it is a keep-alive
+marker, and `PQfinish` runs after the last use of any statement borrowed from
+the connection. It is `Movable` but deliberately **not**
 `Copyable`: a copy would hand the same statement name to two destructors and
 the second `DEALLOCATE` would be sent for a name that no longer exists.
 
@@ -135,6 +139,11 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
         an open transaction is left usable. Embedded NUL bytes in text
         parameters are rejected next, also before anything is sent.
 
+        A prepared statement binds values of the **same width** the server
+        resolved at `PQprepare` time: `$1::int4` wants `Int32`, and passing
+        `Int` (`int8`) is SQLSTATE `22P03`. `param_type_oid(i)` is what the
+        server resolved, so it is the authority on which width to send.
+
         Results always come back in text form; a binary `result_format` is
         Phase 3.
 
@@ -222,8 +231,20 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
 
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` when `i` is outside
-                `0..param_count() - 1`, which includes every negative index.
+                `0..param_count() - 1`, which includes every negative index. A
+                statement that takes no parameters has no valid index at all,
+                and says so (`statement takes no parameters`) rather than
+                naming the empty range `0..-1`.
         """
+        if len(self._param_types) == 0:
+            raise PgError(
+                PgErrorKind.TYPE_MISMATCH,
+                String(
+                    "parameter index ",
+                    i,
+                    " out of range (statement takes no parameters)",
+                ),
+            )
         if i < 0 or i >= len(self._param_types):
             raise PgError(
                 PgErrorKind.TYPE_MISMATCH,

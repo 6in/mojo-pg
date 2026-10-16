@@ -48,6 +48,18 @@ from pq.prepared import PreparedStatement
 from pq.result import Result
 from pq.transaction import Transaction, _default_rollback_failure_handler
 
+comptime _SESSION_SETUP_SQL = (
+    "SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'"
+)
+"""The session settings every connection is pinned to right after connecting.
+
+Date and interval text parsing is GUC-dependent, so a server configured with
+`DateStyle = German` would hand `02.01.2024` to a decoder that only reads
+`YYYY-MM-DD`. Pinning both styles once per connection is what lets the text
+decoders assume one grammar. The binary wire format is GUC-independent and
+needs none of this.
+"""
+
 
 def _error_field(
     pq: Pointer[LibpqFFI, MutUntrackedOrigin],
@@ -107,6 +119,19 @@ struct Connection(Movable):
     ):
         """Take ownership of an already-connected `PGconn*`.
 
+        Two fields are initialised here that no argument supplies.
+        `_stmt_counter` is the per-connection prepared-statement number, which
+        starts at 0 so the first `prepare` issues `pq_stmt_1`; numbering is
+        never shared between connections, so two connections both hold a
+        `pq_stmt_1`. `_rollback_failure_handler` starts as
+        `_default_rollback_failure_handler`, which writes a single line to
+        stderr, and is what every `Transaction` copies when `transaction()`
+        runs; replace it beforehand with `set_rollback_failure_handler`.
+
+        This does not send the session setup `SET` that `_adopt` sends, so a
+        connection built directly here keeps the server's own `DateStyle` and
+        `IntervalStyle`.
+
         Args:
             conn: A `PGconn*` whose status is `CONNECTION_OK`.
             pq: The libpq table `conn` was opened with.
@@ -127,22 +152,36 @@ struct Connection(Movable):
     def _adopt(
         pq: Pointer[LibpqFFI, MutUntrackedOrigin], conn: PGconnPtr
     ) raises PgError -> Connection:
-        """Validate a freshly returned `PGconn*` and wrap it.
+        """Validate a freshly returned `PGconn*`, wrap it and pin its session.
 
         A non-NULL connection whose status is not `CONNECTION_OK` is closed
         before raising, so no handle leaks on a failed connect.
+
+        Once the handle is owned, `_SESSION_SETUP_SQL` is sent as the first
+        statement of the session. Both `SET`s travel in one `PQexec`, which
+        makes them one implicit transaction: either both settings land or
+        neither does, so no connection is ever handed out with only
+        `DateStyle` pinned. Phase 4's asynchronous connect will send the same
+        SQL as its first query step.
+
+        A failed setup raises, and the `Connection` built a line earlier is
+        destroyed on the way out -- its `__deinit__` is what runs `PQfinish`,
+        so no second close is written here.
 
         Args:
             pq: The libpq table `conn` was opened with.
             conn: The `PGconn*` returned by libpq.
 
         Returns:
-            A `Connection` owning `conn`.
+            A `Connection` owning `conn`, with its session settings pinned.
 
         Raises:
             PgError: `PgErrorKind.CONNECTION` when libpq returned NULL or the
                 connection attempt failed. The message is libpq's own text and
                 never includes the caller's connection parameters.
+                `PgErrorKind.SERVER` when the session setup `SET` is rejected,
+                under the classification `_take_result` applies; the
+                connection is closed before this propagates.
         """
         if conn.is_null():
             raise PgError(
@@ -153,7 +192,9 @@ struct Connection(Movable):
             var message = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
             pq[].PQfinish(conn)
             raise PgError(PgErrorKind.CONNECTION, message)
-        return Connection(conn, pq)
+        var connection = Connection(conn, pq)
+        _ = connection.execute(String(_SESSION_SETUP_SQL))
+        return connection^
 
     @staticmethod
     def open(var conninfo: String) raises PgError -> Connection:
@@ -176,6 +217,9 @@ struct Connection(Movable):
                 fragment of a *malformed* conninfo string, so a password that
                 contains a space or a stray `%` can reach the error text. Use
                 `open(Dict)` for credentials the program supplies.
+                `PgErrorKind.SERVER` when the session setup `SET` that
+                `_adopt` sends is rejected; the connection is closed before
+                raising.
         """
         _reject_nul(conninfo, "conninfo")
         var pq = libpq_ptr()
@@ -208,6 +252,9 @@ struct Connection(Movable):
                 taken literally rather than parsed, so -- unlike
                 `open(String)` -- no value can be echoed back as a conninfo
                 syntax error, and a password cannot leak through the message.
+                `PgErrorKind.SERVER` when the session setup `SET` that
+                `_adopt` sends is rejected; the connection is closed before
+                raising.
         """
         for ref item in params.items():
             _reject_nul(item.key, "params key")
@@ -420,9 +467,14 @@ struct Connection(Movable):
         `param_type_oid()` can differ from what was passed in.
 
         The returned statement borrows the connection immutably, so
-        `Connection.execute` stays callable while it is alive, but the
-        statement cannot outlive the connection -- that is a compile error.
-        Destroying it sends `DEALLOCATE`; see the `pq.prepared` module
+        `Connection.execute` stays callable while it is alive. Because it is
+        bound to the connection's origin, using it after the connection has
+        been **moved away** (`var c2 = conn^`, or passing `conn^` to a
+        function) is a compile error (`use of uninitialized value`).
+        `_ = conn^` is **not** a destroy: it is a keep-alive marker, and
+        `PQfinish` runs after the last use of any statement borrowed from the
+        connection. Destroying the statement sends `DEALLOCATE`; see the
+        `pq.prepared` module
         docstring for when Mojo destroys it and why `PREPARE` surviving a
         `ROLLBACK` is expected.
 
@@ -758,8 +810,13 @@ struct Connection(Movable):
 
         The returned value borrows the connection immutably, so
         `Connection.execute` stays callable -- and runs inside the block --
-        while it is alive, but the transaction cannot outlive the connection:
-        that is a compile error. Destroying it without `commit()` or
+        while it is alive. Because it is bound to the connection's origin,
+        using it after the connection has been **moved away**
+        (`var c2 = conn^`, or passing `conn^` to a function) is a compile
+        error (`use of uninitialized value`). `_ = conn^` is **not** a
+        destroy: it is a keep-alive marker, and `PQfinish` runs after the last
+        use of any transaction borrowed from the connection. Destroying the
+        transaction without `commit()` or
         `rollback()` sends `ROLLBACK`, and because Mojo destroys it right
         after its last use, the `pq.transaction` module docstring is worth
         reading before mixing `tx.execute` and `conn.execute`.

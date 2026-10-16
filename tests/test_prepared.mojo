@@ -61,6 +61,9 @@ comptime ONE_INT_SQL: StaticString = "SELECT $1::int4"
 comptime ONE_UNTYPED_SQL: StaticString = "SELECT $1"
 """One parameter with nothing to infer from, so the server picks `text`."""
 
+comptime NO_PARAM_SQL: StaticString = "SELECT 1"
+"""A statement with no placeholders, so `param_type_oid` has no valid index."""
+
 comptime COUNT_BY_NAME: StaticString = (
     "SELECT count(*) FROM pg_prepared_statements WHERE name = $1"
 )
@@ -504,6 +507,30 @@ def test_prepare_describes_and_executes() raises:
     _ = conn^
 
 
+def test_param_type_oid_on_a_statement_with_no_parameters() raises:
+    """A statement with no placeholders says so instead of naming `0..-1`.
+
+    The generic message builds its upper bound from `param_count() - 1`, which
+    reads as an empty range the caller cannot act on. The count being zero is
+    the fact that explains the rejection, so it is what the message carries.
+    """
+    var conn = _connect(_conninfo())
+    var stmt = _prepare(conn, String(NO_PARAM_SQL))
+
+    assert_equal(stmt.param_count(), 0)
+
+    var error = _param_type_oid_error(stmt, 0)
+    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH)
+    assert_true(error.message.find("takes no parameters") >= 0)
+    assert_true(error.message.find("0..-1") < 0)
+
+    # Nothing was sent, so there is no server diagnostic to carry.
+    assert_equal(error.sqlstate, "")
+
+    _ = stmt^
+    _ = conn^
+
+
 def test_statement_numbering_is_per_connection() raises:
     """A second connection starts its own counter at `pq_stmt_1`."""
     var first_conn = _connect(_conninfo())
@@ -540,8 +567,7 @@ def test_param_count_mismatch_never_reaches_the_server() raises:
     var error = _stmt_execute_error(stmt, one)
     assert_true(error.kind == PgErrorKind.USAGE)
     # Both numbers are named: what the statement wants and what it got.
-    assert_true(error.message.find("3") >= 0)
-    assert_true(error.message.find("1") >= 0)
+    assert_true(error.message.find("takes 3 parameters, got 1") >= 0)
     # Nothing reached the server, so there is no diagnostic to carry.
     assert_equal(error.sqlstate, "")
 

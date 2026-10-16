@@ -115,16 +115,19 @@ machine.
 comptime TOLERANCE_PAGES = 256
 """How much total RSS growth (in pages) a non-leaking loop may show.
 
+256 is a **permanent specification**, not a number to be tuned down later.
+
 Measured on PG14 and PG17, with this file run as the binary `mojo build`
 produces (the only way `tests/run_tests.sh` runs it): a non-leaking loop is
-stable to within 2 pages, except for a *single* one-off step of exactly 83
-pages (~332 KiB) that lands at an arbitrary iteration of an arbitrary loop — a
-lazy first-use allocation somewhere under libpq, not per-iteration growth. 256
-pages (1 MiB) clears two such steps.
+stable to within 2 pages, except for a *single* one-off step of 83-85 pages
+(~332 KiB) that lands at an arbitrary iteration of an arbitrary loop, not
+per-iteration growth. The cause is **unidentified**; an expansion of a glibc
+arena is the guess, and nothing has been measured that confirms it. 256 pages
+(1 MiB) clears two such steps.
 
 The step is why the tolerance is not tightened to 16 pages: over 16 built-binary
 series (4 loops x 2 servers x 2 runs) 14 came in at 0-2 pages of total growth
-and 2 showed the 83-page step, once at the 4th sample and once at the 9th.
+and 2 showed the step, once at the 4th sample and once at the 9th.
 
 Total growth, not monotonicity, is the signal that actually fires here: a real
 leak moves thousands of pages per sampling interval, far past this tolerance.

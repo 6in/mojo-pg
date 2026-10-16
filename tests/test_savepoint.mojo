@@ -51,6 +51,20 @@ This one string is asserted verbatim because it is produced here rather
 than by the server, so it is the same under PG14 and PG17.
 """
 
+comptime NUL_NAME_MESSAGE: StaticString = "embedded NUL byte in name"
+"""The message of the local rejection of a savepoint name holding a NUL byte.
+
+The argument is named `name`, not the parameter of the quoting helper the
+name would otherwise reach first.
+"""
+
+comptime NUL_MARKER: StaticString = "AFTER_NUL_MARKER"
+"""Text placed *after* an embedded NUL byte in a rejected savepoint name.
+
+libpq takes C strings, so everything from the NUL onwards would be invisible
+to it; the marker shows the truncated tail never reaches the message either.
+"""
+
 comptime NO_SUCH_SAVEPOINT: StaticString = "3B001"
 """`invalid_savepoint_specification`: the name is not an open savepoint."""
 
@@ -625,6 +639,50 @@ def test_empty_savepoint_name_is_a_usage_error() raises:
     assert_true(on_release.kind == PgErrorKind.USAGE)
     assert_equal(on_release.message, String(EMPTY_NAME_MESSAGE))
     assert_equal(on_release.sqlstate, "")
+
+    # Nothing was sent, so the block is still open and still usable.
+    assert_equal(conn.transaction_status(), Int(PQTRANS_INTRANS))
+
+    var ok = _tx_execute(tx, "SELECT 1")
+    assert_equal(ok.row_count(), 1)
+    _ = ok^
+
+    _commit(tx)
+    _ = tx^
+    _ = conn^
+
+
+# --- a NUL byte in the name never reaches the server -- (c)-7 ----------------
+
+
+def test_savepoint_name_with_a_nul_byte_is_rejected() raises:
+    """All three calls refuse a name holding a NUL byte, naming `name`.
+
+    libpq takes C strings, so a name with an embedded NUL would be silently
+    cut there. The rejection happens before `escape_identifier` sees the
+    name, which is what makes the message name `name` rather than the
+    quoting helper's own parameter -- and what leaves the block intact,
+    shown by the unchanged `PQTRANS_INTRANS`.
+    """
+    var conn = _connect(_conninfo())
+    var tx = _transaction(conn)
+
+    var name = String("sp") + chr(0) + NUL_MARKER
+
+    var on_savepoint = _savepoint_error(tx, name)
+    assert_true(on_savepoint.kind == PgErrorKind.TYPE_MISMATCH)
+    assert_equal(on_savepoint.message, String(NUL_NAME_MESSAGE))
+    # The truncated tail is never echoed back.
+    assert_true(on_savepoint.message.find(NUL_MARKER) < 0)
+    assert_equal(on_savepoint.sqlstate, "")
+
+    var on_rollback_to = _rollback_to_error(tx, name)
+    assert_true(on_rollback_to.kind == PgErrorKind.TYPE_MISMATCH)
+    assert_equal(on_rollback_to.message, String(NUL_NAME_MESSAGE))
+
+    var on_release = _release_error(tx, name)
+    assert_true(on_release.kind == PgErrorKind.TYPE_MISMATCH)
+    assert_equal(on_release.message, String(NUL_NAME_MESSAGE))
 
     # Nothing was sent, so the block is still open and still usable.
     assert_equal(conn.transaction_status(), Int(PQTRANS_INTRANS))

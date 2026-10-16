@@ -137,11 +137,16 @@ run_logged env PQ_TEST_LEAK_SERVERS=1 bash tests/run_tests.sh || fail "5/6 tests
 # or COMMIT (the server answers those with "there is already a transaction in
 # progress" / "there is no transaction in progress").
 #
+# The default rollback-failure handler's line is counted as a third pattern.
+# It is written to stderr from a destructor, where nothing can raise, so a
+# transaction whose implicit ROLLBACK failed would otherwise pass unnoticed:
+# the test suite is green and the single reported line scrolls past in $LOG.
+#
 # Nothing below may emit the counted literals through say(); they would land in
 # $LOG and count themselves. printf without tee stays out of $LOG, so the
 # report lines are safe -- they are worded without the literals anyway.
 stage "6/6 zero compiler and server warnings in log"
-warnings=$(grep -cE 'warning:|WARNING:' "$LOG" || true)
+warnings=$(grep -cE 'warning:|WARNING:|implicit ROLLBACK failed' "$LOG" || true)
 printf 'matched lines in %s: %s\n' "$LOG" "$warnings"
 if [ "$warnings" -ne 0 ]; then
     failed_stages+=("6/6 warnings ($warnings)")
