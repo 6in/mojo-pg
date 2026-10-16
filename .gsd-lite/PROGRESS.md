@@ -173,3 +173,26 @@
   - 未確認（A が契約外として報告）: `TimeTz.write_to` に生 ctor で範囲外の `offset_secs` を入れると時の桁が 3 桁以上で出る（`_pad2` は切り詰めない）。`decode_timetz` と `from_hms` が両方弾くので到達経路は無い
   - 未確認: `_write_fraction` は `_format_time_of_day` 内のインライン実装と約 10 行重複している（A が append-only 指示を守った結果）。共通化は T9 の文書・整理フェーズの候補
   - 未確認: `types_datetime.mojo` は **1892 行**になった（T4 末 1151 行）。T6 以降はこのファイルに足すものが無いので分割の必要は無い見込み
+## turn 8 — impl — T6 サーバー格子（拡張型 8 種 + json / jsonb の text / binary 一致）
+- やったこと: `tests/test_extended_numeric.mojo`（10 件 / 929 行。numeric / uuid / json / jsonb）と `tests/test_extended_datetime.mojo`（19 件 / 1016 行。date / timestamp / timestamptz / time / timetz / interval）を新設し、
+  Phase 3 で足した 8 型を**実サーバー往復**で検査する格子を通した。text / binary の値一致、`String(T)` と text の `get[String]` の一致、`SELECT $1::<type>` のパラメータ往復（両結果形式）、PG17 分岐、非 ISO DateStyle / IntervalStyle、境界値。
+  **サブエージェント 2 本を並行**（A: numeric 側 / B: datetime 側。対象ファイルは 1 本ずつで重ならせず、`fmt`・両サーバー検証・コミットは親）
+- 想定外:
+  (1) **`gen_random_uuid()` を 2 回呼ぶ完了基準は原理的に満たせない**（毎回別値）。`CREATE TEMP TABLE pq_t6_uuid AS SELECT gen_random_uuid() AS u` で 1 値を固定してから text / binary で 2 回読む形にした。PLAN を訂正
+  (2) `1e130::numeric` のテキストは**指数表記にならない**（`1` + ゼロ 130 個 = 131 文字）。`Decimal` は指数リテラルを受けないので、パラメータ往復はサーバーが返した位置表記を `Decimal(text)` に食わせる形にした（RESEARCH §2.2.2 の記述どおりで、PLAN の誤りではない）
+  (3) `'4714-11-24 00:00:00 BC'::timestamp` の値は RESEARCH に無かった（あるのは `4713-01-01 00:00:00 BC` = `fd0f7fbdaf17e000`）。PG17 の `timestamp_send` で実測して `fd0f7cc1411fa000` = **-211813488000000000**（= timestamp の下限）を期待値にした
+  (4) `'36 hours'::interval` / `'1.5 days'::interval` はサーバーが正規化するのでテキストが入力リテラルと違う（`36:00:00` / `1 day 12:00:00`）。テストは text の `get[String]` と突き合わせる作りなのでそのまま通る
+  (5) `TestSuite` に skip API が無いので、PG17 / PG14 分岐の 2 件は非該当バージョンでは早期 return して **PASS と表示される**（「走っていないのに緑」）。テスト名で `_on_pg17_and_later` / `_before_pg17` と区別できるようにしてある
+- やり直し: 0 回（A / B とも担当範囲は初回で green。親の統合も修正なしで、`pixi run fmt` が 2 ファイルを整形しただけ）
+- PLAN 訂正: 1 件
+  - T6 (a) ⑥ の `gen_random_uuid()` を「TEMP TABLE で 1 値を固定してから両形式で読む」に（根拠: 想定外 (1)。2 クエリでは比較不能）
+- 既存テストの期待値を変えた箇所: **なし**（既存 18 ファイルは無変更。新規 2 ファイルを足しただけで、`src/` は 1 行も触っていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 20 ファイル全 PASS**（40/40 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-008-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 118 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s / T4 118 s / T5 125 s と同水準
+  - 確認済み（所要・単位 s / ms）: `test_extended_numeric` 10 件 = **1〜2 s**（単体 49 ms + 接続）、`test_extended_datetime` 19 件 = **1〜2 s**（単体 94 ms + 接続）、`test_leak` 12 件 = **61 s（PG17）/ 63 s（PG14）**
+  - 確認済み: 期待メッセージはすべて 2 語以上の部分文字列（`"oid 1700"` / `"oid 3802"` / `"ResultFormat.TEXT"` / `"02.01.2024" as date` / `"P1D" as interval`）。PG14 の interval ±infinity は `SERVER` + sqlstate `22007`（SQL）/ `22008`（パラメータ）を**実測で確認**
+  - 確認済み: binary が GUC 非依存であること（`SET DateStyle TO 'German'` 下で text の `get[Date]` が `TYPE_MISMATCH`、同じ列の binary が `Date(8767)`）。GUC を触る 2 テストは専用接続で行い、最後に GUC を戻して同じ SQL が通ることまで見ている
+  - 未確認（B が契約外として報告）: timetz の最大西 / 最大東（`-15:59` → 57540、`+15:59:59` → -57599）はサーバー往復に入れていない（PLAN ① のリストに無い）。`Int32` の符号反転を一番きわどく突くケースなので verify が足したければ候補
+  - 未確認（B が契約外として報告）: `test_timestamp_params_round_trip` の**非 UTC 分岐は CI で一度も走らない**（コンテナが `Etc/UTC` 固定で `_is_utc()` が常に真）。`options='-c TimeZone=Asia/Tokyo'` 付きの接続で 1 ケース回せば分岐自体を検証できる
+  - 未確認（A が契約外として報告）: NULL の binary（`SELECT NULL::numeric / ::uuid / ::jsonb` の `NULL_VALUE` / `get_optional` / `is_null`）と、`PreparedStatement` / `Transaction` 経由の binary を**拡張型で**は見ていない（既存 8 型は `test_binary.mojo` が押さえている）
+  - 未確認: T7（zero-copy）の `get_text` / `get_bytes` はまだ無い。T7 (c) の陽性対照は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-zerocopy-neg.mojo` に置き、`grep -rn -- '-> ref' src/pq/*.mojo` = 0 を PROGRESS に書くところまでが T7 の仕事

@@ -198,7 +198,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `tests/test_types_datetime.mojo` への追記（対象: その 1 ファイル）
     - 親: (c)(d)(e)
 
-- [ ] T6: サーバー格子 — 拡張型 8 種 + json / jsonb の text / binary 一致・パラメータ往復・PG17 分岐・非 ISO DateStyle（`tests/test_extended_numeric.mojo` / `tests/test_extended_datetime.mojo`）
+- [x] T6: サーバー格子 — 拡張型 8 種 + json / jsonb の text / binary 一致・パラメータ往復・PG17 分岐・非 ISO DateStyle（`tests/test_extended_numeric.mojo` / `tests/test_extended_datetime.mojo`）
   - 完了基準:
     - (a) `tests/test_extended_numeric.mojo`（numeric / uuid / json / jsonb。両サーバー同一）:
       ① RESEARCH N1〜N8 の **全値**（`1.50`, `-0.001`, `0`, `0.000001`, `1e130`（SQL は `1e130::numeric`）, `1e-10`, `0.00`, `1000000`, `12345678.9`, `NaN`, `Infinity`, `-Infinity`, `'-0'`, `123456789012345678901234567890.123456789`, `10000`, `9999`, `0.0001`, `1.5::numeric(10,4)`, `100::numeric(10,0)`, `0.5`, `-0.5`, `12.3400`, `+1`）を text / binary で `get[Decimal]` し `==` かつ `String()` 一致、text の `get[String]` とも `String(Decimal)` が一致（**Inf は値比較**。P1）；
@@ -206,7 +206,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
       ③ `SELECT 1.0::numeric = 1.00::numeric, 'NaN'::numeric = 'NaN'::numeric, 'Infinity'::numeric = 'Infinity'::numeric` の 3 真偽が `Decimal` の `==` と一致（P5）；
       ④ uuid: `'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`、`'00000000-0000-0000-0000-000000000000'`、`'ffffffff-ffff-ffff-ffff-ffffffffffff'`、`upper(...)` の 4 値を text / binary で `get[UUID]` 一致、`$1::uuid` 往復；
       ⑤ json / jsonb（P22）: `'{"a":1}'::json` は text / binary とも `get[String]` が `{"a":1}`；`'{"b":2,"a":1,"a":3}'::jsonb` は両形式とも `{"a": 3, "b": 2}`（正規化。両形式で同じ）、`'null'::jsonb` → `null`、`'[]'::jsonb` → `[]`、`'"é"'::jsonb` → `"é"`、ネスト `'{"a":{"b":[1,{"c":null}]}}'::jsonb` が両形式一致；`$1::json` / `$1::jsonb` に `String` を送って返る（REQ §4.4）；
-      ⑥ 異常系: `'1.5'::numeric` を binary で `get[Int32]` → `TYPE_MISMATCH` + `"oid 1700"`、`'{"a":1}'::jsonb` を binary で `get[List[UInt8]]` → `TYPE_MISMATCH` + `"oid 3802"`、`gen_random_uuid()` を text で `get[UUID]` → 成功かつ binary と `==`。
+      ⑥ 異常系: `'1.5'::numeric` を binary で `get[Int32]` → `TYPE_MISMATCH` + `"oid 1700"`、`'{"a":1}'::jsonb` を binary で `get[List[UInt8]]` → `TYPE_MISMATCH` + `"oid 3802"`、`gen_random_uuid()` を text で `get[UUID]` → 成功かつ binary と `==`（**turn 8 訂正**: `gen_random_uuid()` は呼ぶたび別値なので 2 クエリでは原理的に比較不能。`CREATE TEMP TABLE pq_t6_uuid AS SELECT gen_random_uuid() AS u` で 1 値を固定し、その列を text / binary で 2 回読んで比較する）。
       不正なバイナリをサーバーに**送る**側のテストは作らない: `Decimal` / `UUID` は構築時の検査（P6）で RESEARCH §2.2.5 の `22P03` / `08P01` を出し得ない（docstring にその旨）
     - (b) `tests/test_extended_datetime.mojo`（6 型）:
       ① date D1〜D3、timestamp T1〜T2（RESEARCH §2.2.3 の SQL と値）、timestamptz Z 系（`'2024-01-02 03:04:05.678901+00'::timestamptz` と `'2024-01-02 12:04:05.678901+09'::timestamptz` が両形式とも同じ micros）、time（`'00:00:00'`, `'24:00:00'`, `'23:59:59.999999'`, `'12:34:56.5'`）、timetz（`'12:34:56+09'`, `'12:00:00+05:53:28'`, `'12:00:00-03:30'`, `'00:00:00+00:00:01'`, `'24:00:00+09'`）、interval（P8 の 11 値 + `'1 day'`, `'1 mon'`, `'1 year'`, `'-1 day 2 hours'`, `'36 hours'`, `'1.5 days'`）を text / binary で `get[T]` し `==`、`String(T)` が text の `get[String]` と一致（timestamptz は `+00` 付きの text と一致: コンテナの TimeZone は `Etc/UTC`。TimeZone が UTC でない環境では `String()` 比較だけ skip して値一致は見る — `SHOW TimeZone` を先に読む）；
