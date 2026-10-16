@@ -218,3 +218,30 @@
   - 未確認: T7 (b) の「NUL を含むなら長さどおり」は**サーバーで作れない**（`chr(0)` が 54000）ため `test_zero_copy` には入れていない。`_raw` が `PQgetlength` を使う（NUL 走査しない）ことは `test_decode_binary` の NUL 入り text ケースが単体で担保している
   - 未確認: `get_bytes` は OID も形式も問わない仕様（決めた事項 9）なので、text 形式の `bytea` は `\x00ff00` の 8 byte を返す。これは `get[List[UInt8]]` の hex デコードと**意図的に違う**。T9 の `__init__.mojo` 型マッピング表に 1 行欲しい（`## Zero-copy access` 節には書いた）
   - 未確認: T8 の `test_zero_copy_does_not_leak` は `get_text(0).byte_length()` を足すだけのループで、`src/pq` 側に新しい解放経路は無い（`_raw` は読み出しのみ）。陽性対照（`PQclear` を `pass` に）は T8 (b) の手順どおり
+## turn 10 — impl — T8 leak ループ 2 本 + 陽性対照 + `examples/binary.mojo` / `bench_formats.mojo`
+- やったこと: `tests/test_leak.mojo` に `test_binary_execute_does_not_leak`（`PHASE3_SQL` を binary で取り 10 列全部を `get[T]`。`[Decimal("1.50"), Date(8825)]` を `WHERE $1 = 1.5 AND $2 = '2024-02-29'` に束ねて binary encode 経路も通す）と
+  `test_zero_copy_does_not_leak`（同じ文を text で `get_text(0).byte_length()` だけ）を追加（12 → 14 件）。`examples/binary.mojo`（17 型を 1 行で binary 取得 + `column_format(0)` 検査）と `examples/bench_formats.mojo`（100,000 行 × 5 列、exec / decode 分離計時、合否なし）を新設し、
+  `pixi.toml` に `example-binary` / `bench`、`final_check.sh` 4/6 段に `examples/binary.mojo` を結線。サブエージェントは使わず（PLAN の推奨本数 1 = 並列サブ作業が 1 つなので自分で順に実装）
+- 想定外:
+  (1) **なし**（例・ベンチ・leak ループとも初回でコンパイルと実行が通った）。`fmt` が `test_leak.mojo` を 1 回整形しただけ
+- やり直し: 0 回
+- PLAN 訂正: なし
+- 既存テストの期待値を変えた箇所: **なし**（`test_leak.mojo` はモジュール docstring の件数「Twelve tests」→「Fourteen tests」と所要見積もりの行を実測に更新し、テストを 2 本足しただけ。既存 12 件の判定・`TOLERANCE_PAGES` 256・サンプリング定数はいずれも無変更。`final_check.sh` は 4/6 段に 1 行追加 + コメントの「Both examples」→「All examples」のみで、判定条件は変えていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-010-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 130 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-010-check.log`。4/6 段に `examples/binary.mojo` の 17 行、5/6 段の 54314 側は `skipped (PQ_TEST_LEAK_SERVERS=1)`）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 / T7 126 s と同水準で、**3 分には達していない**
+  - 確認済み（所要）: `test_leak` 14 件 = **65 s（PG17）/ 66 s（PG14）**（12 件のときは 61〜67 s）。新しい 2 本の内訳は `binary-execute` **2.97 s** / `zero-copy` **2.74 s**（10,000 回ずつ、1 接続使い回し）。docstring の見積もりを「2 本で ~6 s、合計 ~65 s」に実測で書き換えた
+  - 確認済み（T8 (a) の RSS。両サーバーとも 9 サンプル全部が同値 = 完全にフラット）: PG17 `binary-execute [4722 × 9]` / `zero-copy [4722 × 9]`、PG14 は `[4670 × 9]`
+  - 確認済み（T8 (b) 陽性対照。`.gsd-lite/logs/phase3-binary-all-types/scratch/turn-010-leaksrc/pq/result.mojo:176-177` の `PQclear` を `pass` にしたコピーを `-I .../turn-010-leaksrc` でビルド → `turn-010-test_leak_noclear`。**新しい 2 本とも FAIL**）:
+    - `FAIL test_binary_execute_does_not_leak` — `binary-execute RSS pages: [642306, 659126, 675947, 692767, 709587] — grew 67281 pages past the first sample, over the 65536 allowed; aborting the loop (leaking)`
+    - `FAIL test_zero_copy_does_not_leak` — `zero-copy RSS pages: [743228, 760048, 776869, 793689, 810509] — grew 67281 pages past the first sample, over the 65536 allowed; aborting the loop (leaking)`
+    - 同じ実行で既存の 5 本（connect / execute(params) / prepared / transaction×2）も FAIL、`is_leaking` 単体 4 件と `PGresult` を持たない 3 本（failed-open / escape_literal / failed-execute）は PASS = 計 7 passed / 7 failed。**サンプル 1 区間あたり約 16,800 ページ（≒ 65 MiB = `PAYLOAD_BYTES` × 1,000 回）** の増加で、ループは `ABORT_PAGES` 超過により途中で打ち切られている
+  - 確認済み（T8 (d) ベンチ。`pixi run bench` を PG17 で 1 回、ウォームアップ 1 + 計測 3 回。単位 ms）:
+    - `text   : exec 42 ms, decode 33 ms, total 76 ms` / `binary : exec 38 ms, decode 8 ms, total 47 ms`
+    - `text   : exec 42 ms, decode 35 ms, total 77 ms` / `binary : exec 38 ms, decode 9 ms, total 47 ms`
+    - `text   : exec 43 ms, decode 34 ms, total 77 ms` / `binary : exec 39 ms, decode 8 ms, total 47 ms`
+    - 読み: **decode が 4 倍速い**（33〜35 → 8〜9 ms）のが binary の効き所で、exec はほぼ同じ（38〜43 ms）。合計で 1.6 倍。turn 1 の生 libpq プローブ（`turn-001-probe-bench-pg17.log`）と同傾向
+  - 確認済み（追従先チェックリストのうち T8 の行）: `grep -c '^def test_' tests/test_leak.mojo` = **14**、`grep -c 'Twelve' tests/test_leak.mojo` = **0**、`grep -rn 'examples/' pixi.toml tests/final_check.sh` で `examples/binary.mojo` が**両方**に・`bench_formats` が **pixi.toml にだけ**（P29）
+  - 確認済み: `pixi run example-binary` / `pixi run bench` はどちらも単体で動く（T9 (d) の前倒し確認）
+  - 未確認（T9 への申し送り）: T9 (a) の `__init__.mojo:13-34` 型マッピング表はまだ Phase 1 の 8 型のまま。turn 9 で挙げた「`get_bytes` は text 形式の bytea で `\x00ff00` の 8 byte を返す（`get[List[UInt8]]` の hex デコードとは意図的に違う）」の 1 行もこの表に欲しい
+  - 未確認（T9 への申し送り）: T9 (b) の追従先チェックリスト**全行**の再実行はまだ。turn 5（`@implicit` の grep が実 ctor 数 + 1）・turn 4（`decode_` が `decode_binary` 自身を数える）・turn 3（`is Phase 3` は行送りで 0 件）の 3 件は**期待値そのものを PLAN で訂正済み**なので、訂正後の値で照合すること
+  - 未確認: `examples/bench_formats.mojo` の出力は `print` の区切り空白のため `text   : exec ...`（PLAN の `text  : exec ...` より空白 1 個多い）。合否判定が無いので直していない
