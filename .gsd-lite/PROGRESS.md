@@ -245,3 +245,74 @@
   - 未確認（T9 への申し送り）: T9 (a) の `__init__.mojo:13-34` 型マッピング表はまだ Phase 1 の 8 型のまま。turn 9 で挙げた「`get_bytes` は text 形式の bytea で `\x00ff00` の 8 byte を返す（`get[List[UInt8]]` の hex デコードとは意図的に違う）」の 1 行もこの表に欲しい
   - 未確認（T9 への申し送り）: T9 (b) の追従先チェックリスト**全行**の再実行はまだ。turn 5（`@implicit` の grep が実 ctor 数 + 1）・turn 4（`decode_` が `decode_binary` 自身を数える）・turn 3（`is Phase 3` は行送りで 0 件）の 3 件は**期待値そのものを PLAN で訂正済み**なので、訂正後の値で照合すること
   - 未確認: `examples/bench_formats.mojo` の出力は `print` の区切り空白のため `text   : exec ...`（PLAN の `text  : exec ...` より空白 1 個多い）。合否判定が無いので直していない
+## turn 11 — impl — T9 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
+- やったこと: `src/pq/__init__.mojo` の型マッピング表に **binary form 列**を足して 19 行に拡張（json / jsonb を別行に分け、`anything else` を「text では `String`、binary では `TYPE_MISMATCH` + `ResultFormat.TEXT` の案内」に）、Layout 行に Phase 3 の追加モジュール名 4 つを明記、表の下に `Row.get_bytes` が OID を見ない例外であることを 1 文（turn 9 / 10 の申し送り）。
+  追従先チェックリスト全行を**実行可能なスクリプト**に落として 32 件すべて green（T9 (b)）、REQ §5.1 / §5.2 / §5.4 の全項目にテスト名を対応づけ（T9 (c)）、`check` / `test` / `package` / `example-binary` / `bench` を実測（T9 (d)）。サブエージェントは使わず（PLAN の推奨本数 0）
+- 想定外:
+  (1) **REQ §5.2 の「範囲外 weight」だけテストが無かった**（T9 (c) の「対応先の無い項目はこのタスクで足す」に該当）。`types_numeric.mojo:209` の `weight > 32767 or weight < -32768` は**整数部 131,073 桁**でしか踏めず、既存の拒否テストは dscale 側（16,384 桁の小数）だけだった。`tests/test_types_numeric.mojo` に `test_rejects_weight_over_limit` を 1 件追加（ctor `USAGE` / `parse` `TYPE_MISMATCH` の両方。1.336 s。文字列構築が所要の大半）
+  (2) `bench_formats` の追従先チェックリスト行（「`bench_formats` は pixi.toml にだけ」）が**素の grep では FAIL する**。`final_check.sh:118` に「`examples/bench_formats.mojo` is deliberately absent: ...」という**意図を述べたコメントが 1 行ある**ためで、実行行（`run_logged`）は無く P29 は満たしている。コメントは残す価値があるので、検査側を `grep -c '^[^#]*bench_formats'` = 0 + `grep -c '^#.*bench_formats'` = 1 の 2 行に分けた。PLAN を訂正
+  (3) 型マッピング表は Phase 1 の 8 型のままだと思っていたが、T2〜T5 の各ターンが**行自体は 17 型まで足していた**（足りなかったのは binary 列と json / jsonb の分離、`get_bytes` の例外、Layout 行のモジュール名）。turn 10 の「まだ Phase 1 の 8 型のまま」という申し送りは実物と違っていた
+- やり直し: 0 回（`fmt` は 44 ファイル無変更、`package` は初回で警告ゼロ）
+- PLAN 訂正: 1 件
+  - 追従先チェックリスト「`examples/` を足す（T8）」行の確かめ方を、`grep -rn 'examples/' pixi.toml tests/final_check.sh` から **`bench_formats` は実行行が無いこと（`^[^#]*bench_formats` = 0）+ 不在を述べたコメントが 1 行あること（`^#.*bench_formats` = 1）** に（根拠: 想定外 (2)。素の grep はコメント行を拾って FAIL する）
+- 既存テストの期待値を変えた箇所: **なし**（`tests/test_types_numeric.mojo` はテストを 1 件足しただけで既存 45 件は無変更。`src/pq/__init__.mojo` はモジュール docstring のみで、コードは 1 行も触っていない）
+- 追従先チェックリスト ✓（T9 (b)。**再現は `bash .gsd-lite/logs/phase3-binary-all-types/scratch/turn-011-checklist.sh`**、ログ `turn-011-checklist.log`。32 件すべて OK = 「不一致: 0 件」で exit 0）:
+  | # | 行 | 期待 = 実測 |
+  |---|---|---|
+  | 1 | `Row.get[T]` の対応型 | `grep -c 'elif T ==' src/pq/decode_text.mojo` = **16**、`decode_binary.mojo` = **16**、`__init__.mojo` の拡張型 8 行 = **8**、`grep -c 'anything else' src/pq/__init__.mojo` = **1** |
+  | 2 | OID 定数 | `grep -c '^comptime OID_' src/pq/decode_text.mojo` = **21**、`UInt32(1700)\|UInt32(1082)\|UInt32(2950)` の decode_text 以外の重複 = **0** |
+  | 3 | `Param` の `@implicit` | `grep -c '@implicit' src/pq/params.mojo` = **36**（turn 5 訂正どおり実 ctor 数 + 1）、`grep -c '^    @implicit'` = **35**、`Nineteen` = **0**、`Thirty-five` = **1** |
+  | 4 | encoder | `grep -c '^def encode_' src/pq/encode_binary.mojo` = **14**、`exactly six` = **0** |
+  | 5 | decoder | `grep -c '^def decode_' src/pq/decode_binary.mojo` = **15**（14 本 + `decode_binary` 自身。turn 4 訂正どおり） |
+  | 6 | `result_format` | `grep -rc 'Phase 3' src/pq --include='*.mojo'` の合計 = **2**（turn 5 訂正どおり `encode_binary.mojo` の名前の対 + `__init__.mojo` の Layout 行。placeholder は残っていない）、`result_format` が connection / prepared / transaction の各 ≥ 2 = **yes / yes / yes** |
+  | 7 | 公開 struct | 再エクスポート 9 型 = **9**、docstring 診断（`_ffi` と dunder を除く）の `doc string` 行 = **0** |
+  | 8 | `examples/` | `examples/binary.mojo` が pixi.toml = **1** / final_check.sh = **1**、`bench_formats` が pixi.toml = **1** / final_check.sh の**実行行** = **0** / 同コメント = **1**（PLAN 訂正後の形） |
+  | 9 | テストファイル | `pixi run test` のログに新ファイル名が 2 回（**21 ファイル × 2 サーバー = 42 の summary**。下の「確認済み」参照） |
+  | 10 | リークループ | `grep -c '^def test_' tests/test_leak.mojo` = **14**、`Twelve` = **0** |
+  | 11 | `test_connection` | `grep -c '^def test_' tests/test_connection.mojo` = **31** |
+  | 12 | libpq の経路 | `grep -rc 'PQexec(' src/pq/*.mojo` の合計 = **4**（connection ×2 / transaction / prepared）、`PQfreemem(` = **2** |
+  | 13 | 生存期間の docstring | `grep -rn 'compile error' src/pq/*.mojo` = **8 行**。うち `connection.mojo:6` は `var b = a`（別物・残す）で、残り 7 行（`result.mojo:18` / `:449` / `:708`、`prepared.mojo:12`、`transaction.mojo:14`、`connection.mojo:491`、`__init__.mojo:106`）はすべて**消費する移動の後の使用**の文脈。T7 (c) の陽性対照 3 本（turn 9）がこの文言を実測で裏づけている |
+  | 14 | `-> ref` | `grep -rc -- '-> ref' src/pq/*.mojo` の合計 = **0**（P19） |
+- 受け入れ基準 → テスト対応（T9 (c)。verify はこの格子を使う。`ファイル:関数` 形式）:
+  - §5.1「§6 の全型（+ time / timetz / interval）の text / binary 一致」: `test_binary.mojo:test_binary_scalars_match_text`（既存 8 型 + varchar / bpchar / name / 空 bytea）、`test_extended_numeric.mojo:test_numeric_binary_matches_text` / `:test_uuid_binary_matches_text` / `:test_json_and_jsonb_binary_match_text`、`test_extended_datetime.mojo:test_date_values_match_in_both_formats` / `:test_timestamp_values_match_in_both_formats` / `:test_timestamptz_same_instant_from_two_offsets` / `:test_time_values_match_in_both_formats` / `:test_timetz_zone_sign_follows_postgres` / `:test_interval_p8_values_match_in_both_formats` / `:test_interval_literals_match_in_both_formats`
+  - §5.1 境界値「整数の最小 / 最大 / 0 / 負」: `test_binary.mojo:test_binary_integer_boundaries_match_text` + 単体 `test_decode_binary.mojo:test_int16_min`〜`:test_int_max`（8 件）
+  - §5.1 境界値「float の NaN / ±Infinity / -0.0」: `test_binary.mojo:test_binary_float_special_values_match_text` + `test_decode_binary.mojo:test_float32_nan` / `:test_float32_positive_infinity` / `:test_float32_negative_infinity` / `:test_float32_negative_zero` / `:test_float64_nan` / `:test_float64_negative_zero`
+  - §5.1 境界値「`infinity` / `-infinity` の日時」: `test_extended_datetime.mojo:test_infinite_dates_match_in_both_formats` / `:test_infinite_timestamps_match_in_both_formats` / `:test_infinite_timestamptz_match_in_both_formats` / `:test_interval_infinity_on_pg17_and_later` + 単体 `test_decode_binary.mojo:test_date_sentinels_decode_as_infinite` / `:test_timestamp_sentinels_decode_as_infinite` / `:test_interval_sentinels_decode_as_infinite`
+  - §5.1 境界値「numeric の大きな桁 / 小数 / 負 / 0 / NaN」: `test_extended_numeric.mojo:test_numeric_binary_matches_text`（`1e130` 含む 23 値）/ `:test_numeric_special_values_in_both_formats` + 単体 `test_types_numeric.mojo`（46 件）/ `test_decode_binary.mojo:test_numeric_table_decodes_to_printed_text`（表 20 行）
+  - §5.1 境界値「uuid の全ゼロ / 全 F」: `test_extended_numeric.mojo:test_uuid_binary_matches_text` + `test_types_uuid.mojo:test_all_zero_round_trip` / `:test_all_f_round_trip`
+  - §5.1 境界値「空文字列」: `test_binary.mojo:test_binary_scalars_match_text`（列 8 で `""` かつ `is_null` が偽）+ `test_decode_binary.mojo:test_text_empty`
+  - §5.1 境界値「NUL を含む bytea」: `test_binary.mojo:test_binary_scalars_match_text`（列 12 = `[0, 255, 0]` を両形式で）+ `test_decode_binary.mojo:test_bytea_three_bytes` / `:test_text_keeps_embedded_nul`
+  - §5.1 境界値「jsonb のネスト」: `test_extended_numeric.mojo:test_json_and_jsonb_binary_match_text`（`{"a":{"b":[1,{"c":null}]}}` 含む）
+  - §5.1「未対応 OID をバイナリで要求 → `TypeMismatch`、トレースバックを出さない」: `test_binary.mojo:test_binary_unsupported_oids_are_type_mismatch`（7 列 × 3 型 = 21 セル）+ 対照 `:test_text_reads_every_unsupported_oid_as_string`
+  - §5.1「バイナリ列の `get[String]`（非文字列 OID）/ `get[List[UInt8]]`（非 bytea）」: `test_decode_binary.mojo:test_string_rejects_int4_column` / `:test_string_rejects_point_column` / `:test_string_rejects_int4_array_column` / `:test_bytea_rejects_text_column` / `:test_bytea_rejects_point_column` + サーバー側 `test_extended_numeric.mojo:test_binary_refuses_mismatched_numeric_and_jsonb`
+  - §5.1「`column_format(i)` が BINARY / `execute(sql)` は TEXT」: `test_binary.mojo:test_column_format_is_binary_for_every_column` / `:test_column_format_defaults_to_text` / `:test_result_format_constants_and_equality`
+  - §5.1「拡張型 8 種を `$1` で送り同じ値が返る（両形式）」: `test_extended_numeric.mojo:test_numeric_param_roundtrip_in_both_formats` / `:test_uuid_param_roundtrip_in_both_formats` / `:test_json_and_jsonb_param_roundtrip_in_both_formats`、`test_extended_datetime.mojo:test_date_and_time_params_round_trip` / `:test_timestamp_params_round_trip` / `:test_interval_param_round_trips` / `:test_infinite_params_round_trip`
+  - §5.1「`SHOW DateStyle` が `ISO, YMD`」: `test_connection.mojo:test_open_fixes_datestyle`（+ `:test_open_fixes_intervalstyle` / `:test_client_encoding_is_utf8`）
+  - §5.1「`bench_formats.mojo` が実行でき所要を表示」: テストではなく `pixi run bench`（下の実測。`final_check.sh` には入れない = P29）
+  - §5.1「zero-copy の値一致 + 消費する移動の後はコンパイルエラー」: `test_zero_copy.mojo` 11 件（値一致は `:test_get_text_matches_get_string_in_text_format` / `:..._in_binary_format` / `:test_get_bytes_matches_get_list_in_binary_format`、生存延長の正例は `:test_slice_survives_a_keep_alive_marker`）+ **コンパイルエラー側は turn 9 の scratch 3 本**（`turn-009-zerocopy-neg{,2,3}.mojo`。テストスイートに置けないため唯一の証跡）
+  - §5.2「長さ不足のバイナリ列」: `test_decode_binary.mojo:test_bool_rejects_wrong_length` / `:test_int16_...` / `:test_int32_...` / `:test_int64_...` / `:test_float32_...` / `:test_float64_rejects_wrong_length`、`:test_date_rejects_wrong_length` / `:test_timestamp_rejects_wrong_length` / `:test_timestamptz_rejects_wrong_length_and_oid` / `:test_time_rejects_wrong_length_and_oid` / `:test_timetz_rejects_wrong_length_and_oid` / `:test_interval_rejects_wrong_length_and_oid`
+  - §5.2「不正な uuid 長」: `test_decode_binary.mojo:test_uuid_rejects_wrong_length`（15 / 17 byte）
+  - §5.2「numeric の不正 ndigits」: `test_decode_binary.mojo:test_numeric_rejects_length_disagreeing_with_ndigits` / `:test_numeric_rejects_short_header` / `:test_numeric_rejects_invalid_sign` / `:test_numeric_rejects_digit_out_of_range` / `:test_numeric_rejects_dscale_out_of_range`
+  - §5.2「範囲外 weight」: **`test_types_numeric.mojo:test_rejects_weight_over_limit`（このターンで追加）**。decode 側は weight が Int16 の生フィールドなので範囲外が作れず（決めた事項 3 で範囲検査なしと決定）、正の対照が `test_decode_binary.mojo:test_numeric_large_weight_stays_in_position_notation` / `:test_numeric_minimum_weight_decodes`（`0x8000` でも raise しない）
+  - §5.2「jsonb の未知バージョンバイト」: `test_decode_binary.mojo:test_jsonb_rejects_version_two` / `:test_jsonb_rejects_empty`
+  - §5.2「テキスト形式の非 ISO 日時文字列」: `test_extended_datetime.mojo:test_binary_date_is_independent_of_datestyle`（`DateStyle=German` 下で text が `TYPE_MISMATCH`・binary が成功）/ `:test_binary_interval_is_independent_of_intervalstyle`（`iso_8601`）+ 単体 `test_types_datetime.mojo` の `parse` 拒否群
+  - §5.2「NULL」: `test_binary.mojo:test_binary_null_column`（`NULL_VALUE` / `get_optional` → None / `is_null`）、`test_zero_copy.mojo:test_null_cell_raises_null_value`
+  - §5.2「空結果」: `test_binary.mojo:test_binary_zero_row_result`（+ `:test_binary_format_is_accepted_by_ddl_and_insert` が DDL / INSERT の `command_tag`）
+  - §5.2「未接続・切断後」: `test_binary.mojo:test_terminated_backend_then_binary_connection_error`
+  - §5.2「`PQclear` / `PQfinish` / `PQfreemem` が正常系・異常系で呼ばれ二重解放しない」: `test_leak.mojo` 14 件（陽性対照は turn 10 の `PQclear` 除去コピーで新 2 本とも FAIL）+ checklist #12（`PQexec(` 4 行 / `PQfreemem(` 2 行から増えていない）
+  - §5.2「解放済みポインタへのアクセスが型・所有権の上で起こらない」: turn 9 の scratch 3 本（コンパイルエラー）+ checklist #14（`-> ref` = 0）
+  - §5.2「10,000 回のバイナリ execute でメモリが単調増加しない」: `test_leak.mojo:test_binary_execute_does_not_leak` / `:test_zero_copy_does_not_leak`（turn 10 実測で RSS 9 サンプル全部同値）
+  - §5.4「公開 struct / メソッドに docstring」: `final_check.sh` 3/6 段 = checklist #7（`doc string` 行 0）
+  - §5.4「`pixi run fmt` で差分なし」: `final_check.sh` 1/6 段（下の実測で PASS。`fmt` 単体でも 44 ファイル無変更）
+  - §5.4「`examples/binary.mojo` が単体で実行できる」: `pixi run example-binary`（下の実測）+ `final_check.sh` 4/6 段
+  - §5.4「`pixi run package` が通る」: `final_check.sh` 2/6 段 + 単体実行（下の実測）
+  - §5.4「`pixi run check` が 6/6 PASS」: 下の実測
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-011-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）
+  - 確認済み: `pixi run check` **6/6 PASS = 134 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-011-check.log`。段別の時刻は 1/6 fmt 1 s・2/6 precompile 1 s・3/6 docstring 1 s・4/6 examples 8 s・5/6 tests 123 s・6/6 grep 0 s）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 / T7 126 / T8 130 s からの増分は新テスト 1 件（+1.3 s）相当で、**3 分には達していない**
+  - 確認済み（T9 (d) の単体実行）: `pixi run package` **警告ゼロ**（出力はタスク行のみ）、`pixi run example-binary` が 17 型 + `column_format(0) = Binary` の 18 行を出して exit 0、`pixi run bench` が 6 行を出して exit 0
+  - 確認済み（T9 (d) ベンチ再測。PG17、ウォームアップ 1 + 計測 3 回。単位 ms）: `text : exec 41 / 45 / 43、decode 33 / 34 / 33、total 75 / 80 / 76` / `binary : exec 39 / 40 / 39、decode 8 / 8 / 8、total 47 / 48 / 47`。turn 10 の実測（text total 76〜77 / binary 47）と**ばらつきの範囲で一致**し、decode が約 4 倍速い点も同じ
+  - 確認済み: 追従先チェックリスト 32 件すべて green（上の表。スクリプトは exit 0 = 不一致 0 件）。turn 3 / 4 / 5 で PLAN を訂正した 3 件（`is Phase 3` の行送り / `decode_` が自身を数える / `@implicit` が実 ctor 数 + 1）は**訂正後の期待値で照合して一致**
+  - 未確認（verify への申し送り。いずれも「テストが無い」のではなく「この格子に載っていない」もの）: turn 8 で挙げた 3 件がそのまま残っている — timetz の最大西 / 最大東（`-15:59` / `+15:59:59`）のサーバー往復、`test_timestamp_params_round_trip` の非 UTC 分岐（コンテナが `Etc/UTC` 固定で一度も走らない）、拡張型の NULL binary と `PreparedStatement` / `Transaction` 経由の binary。**REQ §5.1 / §5.2 の項目としては上の格子で全部に対応先がある**ので T9 (c) の「足す」対象には含めなかった
+  - 未確認: `test_leak` は今回 `check`（5/6 段、PG17 のみ）と `pixi run test`（両サーバー）で通っているが、turn 10 以降 `test_leak.mojo` は無変更なので RSS のサンプル列は turn 10 の記録が最新
+  - 未確認: PLAN の全 9 タスクが `- [x]` になった。次は `/gsd-lite-verify`（`phase: "verify"`）
