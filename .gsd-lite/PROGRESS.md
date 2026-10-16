@@ -124,3 +124,25 @@
   - 未確認: 0 byte の jsonb のメッセージ（`binary jsonb value has 0 bytes, expected 1`）は turn 4 からの持ち越しのまま。T3 は jsonb の OID を `decode_text` に移しただけで分岐の文面は触っていない（既存テストが文面の部分文字列を見ているので、直すなら T9 でテストと同時に）
   - 未確認: `types_numeric.mojo` / `types_uuid.mojo` の `_usage_error` / `_decode_error` は**モジュールごとに同名で重複定義**している（決めた事項 4 の「`decode_text` を import すると循環するため型モジュール側に private ビルダーを置く」どおり）。T4 / T5 の `types_datetime.mojo` も 3 本目の同じ対を持つことになる。共通化したいなら置き場は `errors.mojo`（verify / T9 の判断）
   - 未確認: `Decimal` / `UUID` を**サーバー往復**で見るのは T6（拡張型 8 種の格子）。T3 は単体 + `Param` の OID / 形式までで、`SELECT $1::numeric` の往復はまだ 1 件も通していない
+## turn 6 — impl — T4 `Date` / `Timestamp` / `TimestampTz` + codec / `Param` + 単体テスト
+- やったこと: `src/pq/types_datetime.mojo` を新設（Hinnant 暦算法の Mojo 床除算版 + `Date` / `Timestamp` / `TimestampTz`、共用ヘルパ `_format_date` / `_format_time_of_day` / `_parse_fraction` / `_parse_hms` は T5 が使う）、
+  OID 3 個（1082 / 1114 / 1184）を `decode_text.mojo` に集約し、`decode_date` / `decode_timestamp` / `decode_timestamptz` と `encode_date` / `encode_timestamp` / `encode_timestamptz`、`decode_text` / `decode_binary` の 3 型分岐、`Param` の `@implicit` 6 本を結線。
+  テストは `tests/test_types_datetime.mojo` 75 件（サーバー不要）+ `test_decode_binary` +10 件 / `test_encode_binary` +4 件 / `test_params` の OID・NULL 追記。
+  **サブエージェント 2 本を並行**（A: `types_datetime.mojo` / B: `tests/test_types_datetime.mojo` を契約から独立に）。codec・`params.mojo`・docstring 追従・統合検証は親
+- 想定外:
+  (1) 期待値の転記ミスは**ゼロ**だった。親が PG17 の `date_send` / `timestamp_send` で 7 + 10 件を取り直し、B も独自の JDN 計算で 9 + 7 + 6 件を照合し、どちらも PLAN / RESEARCH と完全一致
+  (2) A が overflow 対策の門を 2 つ足した（`from_ymd` 系の入口で `|y| > 6000000` を `USAGE`、`Timestamp` は micros を作る前に日数を `-2451545..106751982` で検査）。`_days_from_civil` の `era * 146097` と `days * 86400000000` が値域検査より先に overflow するため。**通る値の集合は契約どおり**（完了基準の 9 + 7 件と拒否 12 件が全部期待どおり）
+  (3) A が `Date.parse("0000-01-01")` を拒否にした（PG の `date_in` と同じ。`_format_date` は天文年 0 を `0001-01-01 BC` と書くので往復の一貫性もこちら）。契約に明記が無かった判断なので verify の確認材料に残す
+  (4) `_parse_hms` は契約どおり `HH` を 0..24 で通すので `"24:30:00"` も -1 にならない（`Timestamp` 側は 86400000000 以上を弾くので影響なし）。T5 の `Time` が 24 時台をどう扱うかは T5 の判断
+- やり直し: 0 回（A / B とも担当範囲は初回で green。親の統合も修正なしで、`pixi run fmt` が 2 ファイルを整形しただけ）
+- PLAN 訂正: なし（T4 の完了基準・期待値はすべて実物と一致した）
+- 既存テストの期待値を変えた箇所: **なし**（既存 15 ファイルは無変更で PASS。追記したのは `test_decode_binary` +10 件 / `test_encode_binary` +4 件 / `test_params` の既存 2 関数への追加 assert のみで、既存ケースの期待値は触っていない）
+- 次への注意:
+  - 確認済み: `pixi run test` **両サーバー 18 ファイル全 PASS**（36/36 が `0 failed`。per-file 合計 215 s）。`pixi run check` **6/6 PASS = 118 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s から変化なし（「3 分を超えたら書く」には未達）
+  - 確認済み（所要・単位 ms）: `test_types_datetime` 75 件 = **25〜37 ms**、`test_decode_binary` 68 件 = **66〜77 ms**、`test_encode_binary` 22 件 = **41 ms**（いずれもサーバー不要）。`test_params` 33 件 = **116〜124 s**（サーバー往復込み）。`test_leak` 12 件 = **66〜68 s / サーバー**（T3 の 73.5 s から微減）
+  - 確認済み（追従先チェックリストの中間値、素のシェルで再現可）: `^comptime OID_` = **18**、`^    @implicit` = **29**（grep `'@implicit'` は 30）、`^def encode_` = **11**、`^def decode_` = **12**、`elif T ==` は decode_text **13** / decode_binary **13**（最終目標は各 16）、`Twenty-nine` = 1、`UInt32(1082)|UInt32(1114)|UInt32(1184)` の decode_text 以外での出現 = **0**、`-> ref` = **0**（P19）
+  - 確認済み: PG17 から取り直した原本（`docker exec -i tests-pg17-1 psql -U pq -d pq_test -At -c "... encode(date_send(v), 'hex') ..."`）— date: `2000-01-01`=00000000 / `1970-01-01`=ffffd533 / `2024-02-29`=00002279 / `0001-01-01 BC`=fff4da8b / `4714-11-24 BC`=ffda97a7 / `5874897-12-31`=7fda970c / `10000-01-01`=002c95d4 / `0001-01-01`=fff4dbf9 / `infinity`=7fffffff / `-infinity`=80000000。timestamp 7 件も RESEARCH と一致。T5 の time / timetz / interval も同じ手で原本を作れる
+  - 未確認（T5 への申し送り）: `types_datetime.mojo` は 1079 行 → fmt 後も 1 ファイル。T5 は**同じファイルに追記**し、`_format_time_of_day` / `_parse_hms` / `_parse_fraction` / `_pad2` / `_usage_error` / `_decode_error` を**再利用**する（同名の対を作らない）。`_infinite_error(pg_type, accessor)` も既にある
+  - 未確認（B が契約外として報告。T6 / verify の材料）: `TimestampTz` の分解アクセサ 7 本と `from_utc` の拒否（`"invalid timestamptz"` の文面）はどのテストも通っていない（契約には在る）。`Timestamp` / `TimestampTz` の `is_infinite()` でのアクセサ raise も Date だけで確かめている。T6 (b) ③ の往復で `from_utc` は通るが、拒否側は空白のまま
+  - 未確認: `Date` / `Timestamp` の**テキスト**経路は DateStyle `ISO, YMD` 前提（T1 の GUC 固定が効いている）。非 ISO で `TYPE_MISMATCH` になることの確認は T6 (b) ⑤ が担う。この前提は `result.mojo` の `Row.get` 表には書いていない（T9 の文書整備で 1 行足す候補）
+  - 未確認: A の契約外提案 3 件 — `Date` / `Timestamp` の順序比較（`__lt__` 等。内部整数の比較でそのまま正しい）、`Date` ↔ `Timestamp` 変換、`TimestampTz.parse` のコロン無しオフセット `[+-]HHMM`。いずれも実装していない（現契約では `+HHMM` は拒否が正）
