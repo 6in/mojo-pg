@@ -45,7 +45,7 @@ from pq._ffi.types import (
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
 from pq.prepared import PreparedStatement
-from pq.result import Result
+from pq.result import Result, ResultFormat
 from pq.transaction import Transaction, _default_rollback_failure_handler
 
 comptime _SESSION_SETUP_SQL = (
@@ -300,6 +300,12 @@ struct Connection(Movable):
         and libpq brings the connection back to a usable state on the next
         `execute`.
 
+        Results always come back in text form here: `PQexec` has no
+        `resultFormat` argument, so this overload takes no `result_format`
+        either. Use `execute(sql, [], result_format=ResultFormat.BINARY)` --
+        the `PQexecParams` path, which accepts an empty parameter list -- to
+        get binary results for a statement that binds nothing.
+
         The result is adopted by `_take_result`, which `execute(sql, params)`,
         `PreparedStatement.execute` and each `Transaction` command also go
         through, so they all classify failures identically.
@@ -331,7 +337,10 @@ struct Connection(Movable):
         return self._take_result(res)
 
     def execute(
-        self, var sql: String, params: List[Param]
+        self,
+        var sql: String,
+        params: List[Param],
+        result_format: ResultFormat = ResultFormat.TEXT,
     ) raises PgError -> Result:
         """Run one parameterised statement with `PQexecParams`.
 
@@ -370,8 +379,13 @@ struct Connection(Movable):
         client-side, so passing fewer than the placeholders need is SQLSTATE
         `08P01`, and the connection remains usable afterwards.
 
-        Results always come back in text form; a binary `result_format` is
-        Phase 3.
+        `result_format` selects text (the default) or binary results for
+        **every** column of the result -- libpq takes one format for the whole
+        request, not one per column. Reading the rows back does not change:
+        `Row.get` reads `PQfformat` and decodes accordingly, so the only
+        caller-visible difference is that in binary a `String` is limited to
+        the string-like OIDs. `Result.column_format(i)` reports what came
+        back.
 
         The result is adopted by `_take_result`, the same path `execute(sql)`
         takes, so both classify failures identically.
@@ -379,6 +393,8 @@ struct Connection(Movable):
         Args:
             sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
             params: The values to bind, `params[0]` binding `$1`.
+            result_format: Wire format for every column of the result,
+                `ResultFormat.TEXT` by default.
 
         Returns:
             The `Result` of the statement, owning the `PGresult*`.
@@ -406,7 +422,7 @@ struct Connection(Movable):
             buffers.values_ptr(),
             buffers.lengths_ptr(),
             buffers.formats_ptr(),
-            c_int(0),
+            c_int(result_format.value),
         )
         _ = buffers^
         _ = sql^

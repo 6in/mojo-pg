@@ -19,17 +19,75 @@ origin, so using it after the result has been **moved away**
 (`use of uninitialized value`). `_ = res^` is **not** a destroy: it is a
 keep-alive marker, and `PQclear` runs after the last use of any `Row` or
 slice borrowed from the result.
-`Row.get` / `Row.get_optional` build on `_check_cell` / `_is_null` / `_text`
-and finish in `pq.decode_text.decode_text`.
+`Row.get` / `Row.get_optional` build on `_check_cell` / `_is_null` and then
+branch on the cell's wire format: a text column goes through `_text` into
+`pq.decode_text.decode_text`, a binary one through `Row._raw` into
+`pq.decode_binary.decode_binary`. The format is whatever `PQfformat` reports,
+so it follows the `result_format` the statement was run with and callers write
+`row.get[T](i)` either way.
 """
 
 from std.ffi import c_int
 
+from pq.decode_binary import decode_binary
 from pq.decode_text import decode_text
 from pq.errors import PgError, PgErrorKind, _reject_nul
 
 from ._ffi.functions import LibpqFFI
 from ._ffi.types import CStr, PGresultPtr
+
+
+@fieldwise_init
+struct ResultFormat(Equatable, TrivialRegisterPassable, Writable):
+    """Wire format libpq is asked to return a result's columns in.
+
+    An `Int` newtype with exactly two constants, `TEXT` and `BINARY`, matching
+    the `resultFormat` argument of `PQexecParams` / `PQexecPrepared`. The
+    choice applies to **every** column of the result at once: libpq takes one
+    format for the whole result, not one per column.
+    """
+
+    var value: Int
+    """Numeric discriminant of the format, as libpq's `resultFormat`."""
+
+    comptime TEXT = Self(0)
+    """Every column comes back in text form. The default."""
+
+    comptime BINARY = Self(1)
+    """Every column comes back in the server's binary form."""
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compare two formats for equality.
+
+        Args:
+            other: The format to compare against.
+
+        Returns:
+            True if both formats have the same discriminant.
+        """
+        return self.value == other.value
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compare two formats for inequality.
+
+        Args:
+            other: The format to compare against.
+
+        Returns:
+            True if the formats have different discriminants.
+        """
+        return self.value != other.value
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Write the format's name to `writer`.
+
+        Args:
+            writer: The writer receiving the format name.
+        """
+        if self == Self.TEXT:
+            writer.write("Text")
+        elif self == Self.BINARY:
+            writer.write("Binary")
 
 
 def _row_range_error(row: Int, nrows: Int) -> PgError:
@@ -242,6 +300,30 @@ struct Result(Iterable, Movable, Sized):
             raise _column_range_error(i, self._ncols)
         return self._pq[].PQftype(self._res, c_int(i))
 
+    def column_format(self, i: Int) raises PgError -> ResultFormat:
+        """Return the wire format column `i` came back in.
+
+        The format is a property of the whole result rather than of the single
+        column -- libpq takes one `resultFormat` for the request -- so every
+        column of a given result reports the same value. It is `TEXT` unless
+        the statement was run with `result_format=ResultFormat.BINARY`.
+
+        Args:
+            i: Zero-based column index.
+
+        Returns:
+            The `PQfformat` value as a `ResultFormat`: `ResultFormat.TEXT` or
+            `ResultFormat.BINARY`.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when `i` is outside
+                `0..column_count() - 1`. The index is rejected before libpq is
+                called.
+        """
+        if i < 0 or i >= self._ncols:
+            raise _column_range_error(i, self._ncols)
+        return ResultFormat(Int(self._pq[].PQfformat(self._res, c_int(i))))
+
     def affected_rows(self) -> Int:
         """Return the row count reported by the command tag.
 
@@ -372,6 +454,50 @@ struct Row[origin: ImmOrigin](Copyable):
         self._res = res
         self._index = index
 
+    def _raw(self, col: Int) raises PgError -> Span[UInt8, Self.origin]:
+        """Return a cell's bytes as a borrowed `Span`, without copying.
+
+        The span points straight into the `PGresult`'s own storage, so it is
+        bound to `Self.origin` and stays valid exactly as long as any other
+        borrow of the result: until `PQclear` runs. The length comes from
+        `PQgetlength` rather than from a NUL scan, which is what makes this
+        usable for binary values -- they may contain NUL bytes anywhere.
+
+        Assumes the coordinate has already passed `Result._check_cell`. A SQL
+        NULL reads back as a zero-length span here, exactly as `Result._text`
+        reads it back as an empty string; use `Result._is_null` to tell the two
+        apart.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            A span over the cell's bytes, borrowed from the result.
+
+        Raises:
+            PgError: `TYPE_MISMATCH` when `PQgetvalue` returns NULL, which
+                only happens for an out-of-range coordinate that skipped
+                `Result._check_cell`.
+        """
+        var res = self._res
+        var p = (
+            res[]._pq[].PQgetvalue(res[]._res, c_int(self._index), c_int(col))
+        )
+        if not p:
+            raise PgError(
+                PgErrorKind.TYPE_MISMATCH,
+                String("cell (", self._index, ", ", col, ") is out of range"),
+            )
+        var length = Int(
+            res[]._pq[].PQgetlength(res[]._res, c_int(self._index), c_int(col))
+        )
+        return Span[UInt8, Self.origin](
+            unsafe_ptr=Pointer[UInt8, Self.origin](
+                unsafe_from_address=Int(p.value())
+            ),
+            length=length,
+        )
+
     def get[T: Copyable](self, col: Int) raises PgError -> T:
         """Decode column `col` of this row as `T`.
 
@@ -381,22 +507,39 @@ struct Row[origin: ImmOrigin](Copyable):
         thing that distinguishes them. Use `get_optional` for a nullable
         column.
 
+        The decoder is picked from the cell's wire format: `PQfformat` of 1
+        decodes the raw bytes with `pq.decode_binary.decode_binary`, 0 decodes
+        the text with `pq.decode_text.decode_text`. Callers do not write
+        anything differently -- the format follows the `result_format` the
+        statement was run with, and `Result.column_format` reports it.
+
         The column's OID must match `T` exactly -- there is no widening, so
         reading an `int2` column as `Int32` is a `TYPE_MISMATCH`:
 
-        | `T`            | Required column OID                          |
-        |----------------|----------------------------------------------|
-        | `Bool`         | 16 (bool)                                    |
-        | `Int16`        | 21 (int2)                                    |
-        | `Int32`        | 23 (int4)                                    |
-        | `Int64`, `Int` | 20 (int8)                                    |
-        | `Float32`      | 700 (float4)                                 |
-        | `Float64`      | 701 (float8)                                 |
-        | `List[UInt8]`  | 17 (bytea), hex format only                  |
-        | `String`       | any                                          |
+        | `T`            | Required column OID, text   | binary              |
+        |----------------|-----------------------------|---------------------|
+        | `Bool`         | 16 (bool)                   | 16 (bool)           |
+        | `Int16`        | 21 (int2)                   | 21 (int2)           |
+        | `Int32`        | 23 (int4)                   | 23 (int4)           |
+        | `Int64`, `Int` | 20 (int8)                   | 20 (int8)           |
+        | `Float32`      | 700 (float4)                | 700 (float4)        |
+        | `Float64`      | 701 (float8)                | 701 (float8)        |
+        | `List[UInt8]`  | 17 (bytea), hex form only   | 17 (bytea)          |
+        | `String`       | any                         | string-like OIDs    |
 
-        `pq.decode_text.decode_text` implements the table and is the one place
-        to change when a type is added.
+        The two rows that differ between the formats:
+
+        - `String` is the text format's wildcard -- it accepts **any** OID and
+          hands back the text unchanged -- but in binary it only accepts the
+          string-like OIDs 25 (text), 1043 (varchar), 1042 (bpchar), 19
+          (name), 114 (json) and 3802 (jsonb), because only those have a
+          binary form that *is* the UTF-8 text.
+        - `List[UInt8]` is bytea-only in **both** formats. In text that means
+          the `\\x` hex form; in binary the bytes arrive as-is.
+
+        `pq.decode_text.decode_text` and `pq.decode_binary.decode_binary`
+        implement the two columns of the table and are the places to change
+        when a type is added.
 
         Parameters:
             T: The Mojo type to decode into, from the table above. Any other
@@ -411,18 +554,18 @@ struct Row[origin: ImmOrigin](Copyable):
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL;
                 `TYPE_MISMATCH` when `col` is outside
-                `0..Result.column_count() - 1`, or when the column OID or
-                the cell text does not match `T`.
+                `0..Result.column_count() - 1`, or when the column OID, or the
+                cell's text or bytes, does not match `T`.
         """
         self._res[]._check_cell(self._index, col)
         if self._res[]._is_null(self._index, col):
             raise PgError(
                 PgErrorKind.NULL_VALUE, String("column ", col, " is NULL")
             )
-        return decode_text[T](
-            self._res[]._text(self._index, col),
-            self._res[].column_type_oid(col),
-        )
+        var oid = self._res[].column_type_oid(col)
+        if self._res[].column_format(col) == ResultFormat.BINARY:
+            return decode_binary[T](self._raw(col), oid)
+        return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get[T: Copyable](self, col: String) raises PgError -> T:
         """Decode the column named `col` of this row as `T`.
@@ -462,6 +605,10 @@ struct Row[origin: ImmOrigin](Copyable):
         value, so a `text` column holding `''` comes back as `Optional("")`,
         not as `None`.
 
+        Decoding branches on the cell's wire format exactly as `get` does:
+        `PQfformat` of 1 goes through `pq.decode_binary.decode_binary`, 0
+        through `pq.decode_text.decode_text`.
+
         Parameters:
             T: The Mojo type to decode into.
 
@@ -474,16 +621,16 @@ struct Row[origin: ImmOrigin](Copyable):
 
         Raises:
             PgError: `TYPE_MISMATCH` when `col` is outside
-                `0..Result.column_count() - 1`, or when the column OID or
-                the cell text does not match `T`.
+                `0..Result.column_count() - 1`, or when the column OID, or the
+                cell's text or bytes, does not match `T`.
         """
         self._res[]._check_cell(self._index, col)
         if self._res[]._is_null(self._index, col):
             return None
-        return decode_text[T](
-            self._res[]._text(self._index, col),
-            self._res[].column_type_oid(col),
-        )
+        var oid = self._res[].column_type_oid(col)
+        if self._res[].column_format(col) == ResultFormat.BINARY:
+            return decode_binary[T](self._raw(col), oid)
+        return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get_optional[
         T: Copyable

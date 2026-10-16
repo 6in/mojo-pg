@@ -60,7 +60,7 @@ from pq._ffi.types import CStr
 from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.params import Param, _ParamBuffers
-from pq.result import Result
+from pq.result import Result, ResultFormat
 
 
 struct PreparedStatement[origin: ImmOrigin](Movable):
@@ -128,7 +128,11 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
         if not res.is_null():
             pq[].PQclear(res)
 
-    def execute(self, params: List[Param]) raises PgError -> Result:
+    def execute(
+        self,
+        params: List[Param],
+        result_format: ResultFormat = ResultFormat.TEXT,
+    ) raises PgError -> Result:
         """Run the statement with `params` via `PQexecPrepared`.
 
         Placeholders are `$1` through `$n`, so `params[0]` binds `$1`, and the
@@ -144,14 +148,22 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
         `Int` (`int8`) is SQLSTATE `22P03`. `param_type_oid(i)` is what the
         server resolved, so it is the authority on which width to send.
 
-        Results always come back in text form; a binary `result_format` is
-        Phase 3.
+        `result_format` selects text (the default) or binary results for
+        **every** column of the result -- libpq takes one format for the whole
+        request, not one per column -- and is independent of the formats the
+        *parameters* go out in. Reading the rows back does not change:
+        `Row.get` reads `PQfformat` and decodes accordingly, so the only
+        caller-visible difference is that in binary a `String` is limited to
+        the string-like OIDs. `Result.column_format(i)` reports what came
+        back.
 
         The result is adopted by `Connection._take_result`, the same path
         `Connection.execute` takes, so failures are classified identically.
 
         Args:
             params: The values to bind, `params[0]` binding `$1`.
+            result_format: Wire format for every column of the result,
+                `ResultFormat.TEXT` by default.
 
         Returns:
             The `Result` of the statement, owning the `PGresult*`.
@@ -194,7 +206,7 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
             buffers.values_ptr(),
             buffers.lengths_ptr(),
             buffers.formats_ptr(),
-            c_int(0),
+            c_int(result_format.value),
         )
         # After the call: libpq reads through the buffer addresses for the
         # duration of PQexecPrepared, so dropping them earlier is a use after

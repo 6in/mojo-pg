@@ -5,10 +5,10 @@ Phase 2 adds `params`, `prepared`, `transaction`.
 
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
-`Connection`, `Result`, `Row`, `PgError`, `PgErrorKind`, `Param` for
-`execute(sql, params)`, `PreparedStatement`, `Transaction`, the
-`CONNECTION_OK` / `CONNECTION_BAD` status constants and the five `PQTRANS_*`
-transaction status constants.
+`Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
+argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
+`PreparedStatement`, `Transaction`, the `CONNECTION_OK` / `CONNECTION_BAD`
+status constants and the five `PQTRANS_*` transaction status constants.
 
 ## Type mapping
 
@@ -32,6 +32,36 @@ returns the text unchanged.
 
 `pq.decode_text.decode_text` implements the table and is the one place to
 change when a type is added.
+
+## Result format
+
+`Connection.execute(sql, params)`, `PreparedStatement.execute(params)` and
+`Transaction.execute(sql, params)` take a `result_format` keyword argument,
+`ResultFormat.TEXT` by default. `ResultFormat.BINARY` asks the server for the
+binary form instead:
+
+```mojo
+var res = conn.execute(
+    "SELECT $1::int8", [Int(7)], result_format=ResultFormat.BINARY
+)
+```
+
+Three things to know about it:
+
+- It applies to the **whole result**, never to a single column: libpq takes
+  one `resultFormat` per request, so `BINARY` means every column comes back
+  binary. `Result.column_format(i)` reports what actually arrived, and gives
+  the same answer for every `i` of a given result.
+- Reading the rows back is unchanged. `Row.get[T]` / `Row.get_optional[T]`
+  read `PQfformat` and pick the decoder themselves, so the same
+  `row.get[Int64](0)` works in either format. The one difference is `String`:
+  it is the text format's wildcard and accepts **any** OID, while in binary it
+  only accepts the string-like OIDs 25 (text), 1043 (varchar), 1042 (bpchar),
+  19 (name), 114 (json) and 3802 (jsonb).
+- `Connection.execute(sql)` -- the single-argument overload -- is always
+  text, because `PQexec` has no `resultFormat` argument. For a statement that
+  binds nothing, `execute(sql, [], result_format=ResultFormat.BINARY)` goes
+  through `PQexecParams` with an empty parameter list and does get binary.
 
 ## Parameters
 
@@ -118,5 +148,5 @@ from .connection import Connection
 from .errors import PgError, PgErrorKind
 from .params import Param
 from .prepared import PreparedStatement
-from .result import Result, Row
+from .result import Result, ResultFormat, Row
 from .transaction import Transaction

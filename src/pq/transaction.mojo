@@ -76,7 +76,7 @@ from pq.connection import Connection, _error_field
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param
 from pq.prepared import PreparedStatement
-from pq.result import Result
+from pq.result import Result, ResultFormat
 
 
 def _default_rollback_failure_handler(e: PgError):
@@ -412,7 +412,10 @@ struct Transaction[origin: ImmOrigin](Movable):
         return self._conn[].execute(sql^)
 
     def execute(
-        self, var sql: String, params: List[Param]
+        self,
+        var sql: String,
+        params: List[Param],
+        result_format: ResultFormat = ResultFormat.TEXT,
     ) raises PgError -> Result:
         """Run one parameterised statement inside the block.
 
@@ -421,9 +424,15 @@ struct Transaction[origin: ImmOrigin](Movable):
         and the same `Param` type table; `SELECT 1; SELECT 2` is rejected by
         the server with `42601` exactly as it is there.
 
+        `result_format` is passed straight through, so it selects text (the
+        default) or binary results for **every** column exactly as it does on
+        `Connection.execute(sql, params)`.
+
         Args:
             sql: Exactly one SQL statement, using `$1`..`$n` placeholders.
             params: The values to bind, `params[0]` binding `$1`.
+            result_format: Wire format for every column of the result,
+                `ResultFormat.TEXT` by default.
 
         Returns:
             The `Result` of the statement, owning the `PGresult*`.
@@ -435,7 +444,7 @@ struct Transaction[origin: ImmOrigin](Movable):
                 command needs `rollback()` or `rollback_to()`.
         """
         self._check_open()
-        return self._conn[].execute(sql^, params)
+        return self._conn[].execute(sql^, params, result_format)
 
     def prepare(
         self,
