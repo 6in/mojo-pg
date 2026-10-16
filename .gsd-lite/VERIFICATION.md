@@ -118,4 +118,4 @@ REQ §5.1 / §5.2 / §5.4 の各項目には PROGRESS turn 11「受け入れ基�
 
 ## 7. マージ
 
-- `git remote get-url origin` → `No such remote 'origin'`（ローカルのみ）→ `git checkout main` → `git merge --no-ff gsd-lite/phase3-binary-all-types`。結果: __MERGE_RESULT__
+- `git remote get-url origin` → `No such remote 'origin'`（ローカルのみ）→ `git checkout main` → `git merge --no-ff gsd-lite/phase3-binary-all-types`。結果: **衝突なしでマージ成功**（merge commit `15e8a2c`、43 ファイル +15,327 / -2,130）。ブランチ `gsd-lite/phase3-binary-all-types` は削除せず残す。次は `/gsd-lite-reflect`（state の `reflect: true`）

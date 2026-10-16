@@ -354,3 +354,19 @@
     `tests/test_connection.mojo:953` の `test_client_encoding_is_utf8` docstring 「libpq takes `client_encoding` from the environment」も同様（libpq の既定は `server_encoding`）。
     どれも文言だけで、メッセージ側は部分文字列でテストされている可能性があるので verify の判断に委ねる
   - 確認済み: PLAN の未完了タスクはこれで 0 件。次は verify round 2（turn 12 の申し送りどおり「round 1 の格子の再確認 + F1 差分の回帰」。ファズを再ビルドすると weight クラスの行が消え、dscale クラスの 71 件が残るのが期待）
+## turn 14 — verify — round 2: 合格（新しい指摘 0 件）、`main` へ `--no-ff` ローカルマージ成功（`15e8a2c`）
+- やったこと: F1 差分（`b185a69..HEAD` の 6 ファイル、コード変更は `decode_numeric` 1 箇所）を PLAN の表 4 行と照合、round 1 の格子を再確認
+  （ファズ probe を再ビルドして再実行: BAD 72 行は round 1 と同一の dscale クラス、crafted の `ok 6230 → 6224` で weight クラス 6 入力が `TYPE_MISMATCH` に移動、クラッシュ 0；
+  追従先チェックリスト 32 件 OK；T7 陽性対照は現 HEAD でもコンパイルエラー）、クリーンな `pixi run check` 6/6 PASS（131 s、41 summary 全部 `0 failed`）。
+  VERIFICATION.md を round 2 の結果で更新してブランチにコミット → リモート無しなので `main` にマージ。サブエージェント 0 本
+- 想定外:
+  (1) ファズの期待「weight クラスの BAD 行が消える」は**形が違った**。round 1 でも weight wrap は BAD 行ではなく `ok` 側に数えられていた（`String()` → 再 parse → `==` の往復は wrap した値同士で一致するため）ので、
+      修正の効果は BAD 行の増減ではなく crafted の `ok / err` 集計（6230 / 41825 → 6224 / 41831）に出た。BAD 行は 72 で不変（round 1 の VERIFICATION が「71 件」と書いていたのは数え間違い。訂正済み）
+  (2) impl が turn 13 で挙げた契約外の字句 3 件（`params.mojo:643` / `:670`、`test_connection.mojo:954`）は F1 (c) と同型で、round 1 がコメント行だけを名指しして同じ関数の docstring / メッセージを見なかったのが原因。
+      文言のみで誤動作が無いので差し戻さず残留リスク（次マイルストーンの持ち越し整理）にした
+- やり直し: 0 回
+- 次への注意:
+  - 確認済み: `main` は `15e8a2c`（merge commit）。ブランチ `gsd-lite/phase3-binary-all-types` は残してある。作業ツリーは `main` 上で、この state.json / PROGRESS / VERIFICATION は `main` にコミットする
+  - 確認済み: `pixi run check` = 131 s（1/6〜4/6 計 7 s、5/6 124 s）。round 1 の約 140 s / turn 13 の 143 s と同水準
+  - reflect への材料: (a) verify round 1 の指摘は impl の turn 5「未確認」と同一だった（申し送りが機能した例）、(b) 字句の指摘はクラス（同じ関数の docstring・コメント・メッセージ）でまとめて名指しする、
+    (c) ファズの「期待される変化」は BAD 行ではなく集計の `ok / err` で書く、(d) 次マイルストーンの REQ §6 持ち越し: `params.mojo:643` / `:670` の 1 GB 文言、`test_connection.mojo:954` の `client_encoding` 文言、`decode_timetz` の時刻部範囲検査（残留リスク）
