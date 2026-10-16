@@ -332,3 +332,25 @@
   - 確認済み: F1 の検査位置は `decode_numeric` 側（`_from_parts` は raise しないシグネチャ。`_parse_opt` は先頭ゼロ群を作らないので対象外）
   - 確認済み: round 2 は「round 1 の格子の再確認 + F1 差分の回帰」だけ。ファズは `scratch/turn-012-fuzz` を再ビルドして回せば `BAD bin decimal text roundtrip` の 71 件（dscale クラス）が残り、weight クラスの行が消えるのが期待
   - 未確認: F1 (c) の文言は趣旨だけ PLAN に書いた。impl が英文にするときは「`pq` は `client_encoding` を設定しない」「UTF-8 を検証しない」の 2 点を落とさない
+
+## turn 13 — impl — F1 `decode_numeric` の正規化後 weight 範囲検査 + 字句 3 件
+- やったこと: `decode_numeric` が digits を読み終えた後に先頭ゼログループ数 `lead` を数え、`Int(weight) - lead < Int(Int16.MIN)` なら
+  `cannot decode binary numeric: weight <stripped> out of range after stripping <lead> leading zero groups` を raise するようにした（`_from_parts` はコードを触らず docstring に呼び出し側の責務を追記）。
+  `tests/test_decode_binary.mojo` に `test_numeric_rejects_weight_underflow_after_strip` を 1 件、字句 3 件（`params.mojo` の 1 GB 上限の根拠、`result.mojo` / `__init__.mojo` の `client_encoding`）
+- 想定外: なし（PLAN の 4 行の表がそのまま通った。`pixi` が PATH に無く `/home/parallels/.pixi/bin/pixi` を直接呼んだ。`/usr/bin/time` が無いので所要は `date +%s` の差）
+- やり直し: 0 回
+- 次への注意:
+  - 確認済み: `pixi run test` = 両サーバー 21 ファイル × 2 + leak ビルド 1、全 PASS / 0 failed、所要 189 s（各ファイルの `took` の和。ログ `scratch/turn-013-test.log`）。
+    `pixi run check` 6/6 PASS = 143 s（`date +%s` の差 1792172545 → 1792172688。ログ `scratch/turn-013-check.log`。1/6 fmt は no diff、3/6 docstring 診断 0 件、6/6 警告 0 行）
+  - 確認済み: PLAN F1 の表 4 行の実測 — `00018000000000000001` → `0`（既存テスト PASS のまま）／`000280010000000000000001`（stripped = -32768）→ 成功して 1 行目と `==`／
+    `000280000000000000000001`（-32769）と `0003800000000000000000000001`（-32770）→ `TYPE_MISMATCH` で message に `cannot decode binary numeric` と `weight` を含む
+  - 確認済み: `grep -c '^def test_' tests/test_decode_binary.mojo` = 78（PLAN F1 (b) の期待どおり。77 → 78）
+  - 確認済み: 既存テストの期待値の変更は **0 件**（追加 1 件のみ。`test_numeric_minimum_weight_decodes` を含め既存の numeric テストは無改変で PASS）
+  - 確認済み: 追従先チェックリストのうち今回の変更が触る行の再実行 — `grep -c '^def decode_' src/pq/decode_binary.mojo` = 15（decoder は増えていない）、
+    `grep -rn -- '-> ref' --include='*.mojo' src/pq/` = 0 件、`grep -rn 'compile error' --include='*.mojo' src/pq/` の 8 行すべて消費する移動の文脈のまま（`connection.mojo:6` は既定の例外）、
+    `grep -c 'anything else' src/pq/__init__.mojo` = 1。他の行は OID / `@implicit` / encoder / example / pixi.toml に触っていないので対象外
+  - 未確認（**契約外の提案**。F1 の範囲は PLAN が名指しした 3 箇所なので直していない）: `params.mojo` の同じ関数の docstring Raises 「longer than libpq's `paramLengths` can carry (1073741823 bytes)」と
+    エラーメッセージ「libpq takes at most 1073741823」は、今回直したコメントと同じ「1 GB を `paramLengths` の限界と見る」言い方のまま。
+    `tests/test_connection.mojo:953` の `test_client_encoding_is_utf8` docstring 「libpq takes `client_encoding` from the environment」も同様（libpq の既定は `server_encoding`）。
+    どれも文言だけで、メッセージ側は部分文字列でテストされている可能性があるので verify の判断に委ねる
+  - 確認済み: PLAN の未完了タスクはこれで 0 件。次は verify round 2（turn 12 の申し送りどおり「round 1 の格子の再確認 + F1 差分の回帰」。ファズを再ビルドすると weight クラスの行が消え、dscale クラスの 71 件が残るのが期待）

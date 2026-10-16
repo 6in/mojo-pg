@@ -267,7 +267,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
   - 依存: T8
   - 並列サブ作業: なし（推奨本数: **0**）
 
-- [ ] F1: `decode_numeric` の正規化後 weight 範囲検査（verify round 1 の指摘 1）+ docstring / コメントの字句 3 件
+- [x] F1: `decode_numeric` の正規化後 weight 範囲検査（verify round 1 の指摘 1）+ docstring / コメントの字句 3 件
   - 背景: `Decimal._from_parts`（`src/pq/types_numeric.mojo:253-264`）は先頭ゼログループを落とすたびに `stripped -= 1` し、最後に `Int16(stripped)` で狭める。
     wire `0002 8000 0000 0000 0000 0001`（ndigits 2 / weight -32768 / digits [0, 1]）は `decode_numeric` の全検査を通り、`stripped = -32769` が `32767` に wrap して 1e131068 相当の値が**エラー無しで**返る
     （verify turn 12 のファズ `turn-012-fuzz.mojo` の crafted ケース・コードレビュー・セキュリティチェックの 3 経路で一致。PG の `make_result` は同じ入力を `value overflows numeric format` で拒否する）。REQ §5.2「範囲外 weight → PgError」の取りこぼし。
