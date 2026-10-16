@@ -237,6 +237,12 @@ struct Decimal(Copyable, Equatable, Movable, Writable):
         only its sign, since the server sends an arbitrary weight and dscale
         alongside `Infinity`.
 
+        The caller guarantees that the stripped weight still fits an `Int16`:
+        `_parse_opt` never builds a leading zero group, so it has nothing to
+        check, and `decode_numeric` checks the wire parts before handing them
+        over. This does not raise, so a weight below `Int16.MIN` would wrap
+        here rather than be reported.
+
         Args:
             sign: One of the five `_SIGN_*` constants.
             weight: Base-10000 exponent of the first group.

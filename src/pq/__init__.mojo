@@ -109,7 +109,9 @@ for row in res:
   OIDs in binary; `get_bytes` accepts every column in either format and hands
   back the region as it is, so a `bytea` is the eight bytes of `\\x00ff00` in
   text format and the three bytes `00 ff 00` in binary. Neither validates
-  UTF-8 -- `client_encoding` is `UTF8` and that is the guarantee.
+  UTF-8, and `pq` never sets `client_encoding`: libpq defaults it to the
+  database's `server_encoding` (or `PGCLIENTENCODING`), and the tests only
+  check that this is `UTF8` on the test containers.
 - Nothing in `pq` returns a `ref`; the origin travels with the slice.
 
 ## Parameters

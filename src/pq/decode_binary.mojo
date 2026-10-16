@@ -348,7 +348,9 @@ def decode_numeric[
     Raises:
         PgError: `PgErrorKind.TYPE_MISMATCH` when the cell is shorter than
             the header, when its length disagrees with `ndigits`, or when
-            `sign`, `dscale` or a digit group is out of range.
+            `sign`, `dscale` or a digit group is out of range; also when
+            dropping the leading zero groups would take the weight below
+            `Int16.MIN`.
     """
     if len(bytes) < _NUMERIC_HEADER:
         raise _binary_value_error(
@@ -397,6 +399,27 @@ def decode_numeric[
                 "numeric", String("digit ", digit, " out of range")
             )
         digits.append(digit)
+    # `Decimal` normalizes by dropping leading zero groups and lowering the
+    # weight once per group, and keeps the weight in an `Int16`. A wire form
+    # whose weight is already near `Int16.MIN` would wrap there into a huge
+    # positive exponent, so the stripped weight is checked before handing the
+    # parts over. PostgreSQL's own `make_result` rejects the same cells with
+    # `value overflows numeric format`.
+    var lead = 0
+    while lead < len(digits) and digits[lead] == 0:
+        lead += 1
+    var stripped = Int(weight) - lead
+    if stripped < Int(Int16.MIN):
+        raise _binary_value_error(
+            "numeric",
+            String(
+                "weight ",
+                stripped,
+                " out of range after stripping ",
+                lead,
+                " leading zero groups",
+            ),
+        )
     return Decimal._from_parts(sign, weight, dscale, digits^)
 
 

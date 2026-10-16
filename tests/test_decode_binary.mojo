@@ -512,6 +512,25 @@ def test_numeric_minimum_weight_decodes() raises:
     _assert_numeric("00018000000000000001", "0")
 
 
+def test_numeric_rejects_weight_underflow_after_strip() raises:
+    # Normalization lowers the weight once per leading zero group, so a cell
+    # whose header weight is already near Int16.MIN can only carry so many of
+    # them. Landing exactly on Int16.MIN is fine and decodes to the same value
+    # as the unpadded cell above; one group further would wrap the weight into
+    # a huge positive exponent, so it is refused.
+    var at_minimum = _ok[Decimal]("000280010000000000000001", 1700)
+    assert_equal(at_minimum, _ok[Decimal]("00018000000000000001", 1700))
+    for digits in [
+        "000280000000000000000001",
+        "0003800000000000000000000001",
+    ]:
+        _assert_numeric_rejected(digits)
+        assert_true(
+            "weight" in _error_message[Decimal](digits, 1700),
+            String("numeric ", digits, ": message does not name the weight"),
+        )
+
+
 def test_numeric_rejects_short_header() raises:
     _assert_numeric_rejected("00000000000000")
 

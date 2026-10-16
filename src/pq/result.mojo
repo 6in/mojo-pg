@@ -709,10 +709,13 @@ struct Row[origin: ImmOrigin](Copyable):
            uninitialized value`), and there is no runtime guard for it.
            `_ = res^` is **not** a destroy: it is a keep-alive marker, so
            `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
-        3. The bytes are **not** validated as UTF-8. `Connection.open` leaves
-           `client_encoding` at the `UTF8` the container and libpq default to,
-           and that is the whole of the guarantee; a server configured
-           otherwise hands back whatever it hands back.
+        3. The bytes are **not** validated as UTF-8, and `pq` never sets
+           `client_encoding`: libpq defaults it to the database's
+           `server_encoding` unless `PGCLIENTENCODING` says otherwise, so the
+           encoding is whatever the connection ended up with. The test suite
+           only checks that it is `UTF8` on the test containers; a connection
+           to a differently encoded database hands back whatever it hands
+           back.
         4. No `ref` is returned, here or anywhere else in `pq`: the slice
            carries the origin, so there is no reference to outlive.
 

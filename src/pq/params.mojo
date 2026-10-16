@@ -653,9 +653,12 @@ struct _ParamBuffers(Movable):
 
         for i in range(size):
             self.types.append(params[i]._oid)
-            # libpq's `paramLengths` is a C `int`, so a longer buffer would
-            # reach the server with a wrapped -- possibly negative -- length.
-            # Refused here instead, for the binary and the text branch alike.
+            # 0x3FFFFFFF is the 1 GB ceiling PostgreSQL itself works to --
+            # both the protocol message length and `MaxAllocSize` -- so a
+            # larger parameter could not be sent whatever libpq did with it.
+            # `paramLengths` is a C `int` and does not wrap until 0x7FFFFFFF;
+            # this is the conservative limit, not the wrapping one. Refused
+            # here for the binary and the text branch alike.
             if len(params[i]._data) > 0x3FFFFFFF:
                 raise PgError(
                     PgErrorKind.USAGE,
