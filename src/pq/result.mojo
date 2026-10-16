@@ -25,12 +25,28 @@ branch on the cell's wire format: a text column goes through `_text` into
 `pq.decode_binary.decode_binary`. The format is whatever `PQfformat` reports,
 so it follows the `result_format` the statement was run with and callers write
 `row.get[T](i)` either way.
+`Row.get_text` / `Row.get_bytes` skip the decode and hand back a borrowed
+view of the same storage, under the same origin rule.
 """
 
 from std.ffi import c_int
 
-from pq.decode_binary import decode_binary
-from pq.decode_text import decode_text
+from pq.decode_binary import (
+    _JSONB_VERSION,
+    _binary_length_error,
+    _binary_oid_error,
+    _binary_value_error,
+    decode_binary,
+)
+from pq.decode_text import (
+    OID_BPCHAR,
+    OID_JSON,
+    OID_JSONB,
+    OID_NAME,
+    OID_TEXT,
+    OID_VARCHAR,
+    decode_text,
+)
 from pq.errors import PgError, PgErrorKind, _reject_nul
 
 from ._ffi.functions import LibpqFFI
@@ -677,6 +693,107 @@ struct Row[origin: ImmOrigin](Copyable):
                 cell text does not match `T`.
         """
         return self.get_optional[T](self._res[].column_index(col))
+
+    def get_text(self, col: Int) raises PgError -> StringSlice[Self.origin]:
+        """Return column `col` of this row as a borrowed `StringSlice`.
+
+        The zero-copy counterpart of `get[String]`: nothing is allocated and
+        nothing is copied. The slice points straight into the `PGresult`'s own
+        storage, so four things follow from that:
+
+        1. It stays valid until `PQclear` runs, which is after the last use of
+           any `Row` or slice borrowed from the result -- not at the end of the
+           enclosing scope.
+        2. Using it after the result has been **moved away** (`var r2 = res^`,
+           or passing `res^` to a function) is a compile error (`use of
+           uninitialized value`), and there is no runtime guard for it.
+           `_ = res^` is **not** a destroy: it is a keep-alive marker, so
+           `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
+        3. The bytes are **not** validated as UTF-8. `Connection.open` leaves
+           `client_encoding` at the `UTF8` the container and libpq default to,
+           and that is the whole of the guarantee; a server configured
+           otherwise hands back whatever it hands back.
+        4. No `ref` is returned, here or anywhere else in `pq`: the slice
+           carries the origin, so there is no reference to outlive.
+
+        A text-format column is accepted whatever its OID -- the cell *is* its
+        text, exactly as `get[String]` reads it. A binary-format column is
+        accepted only for the six string-shaped OIDs 25 (`text`), 1043
+        (`varchar`), 1042 (`bpchar`), 19 (`name`), 114 (`json`) and 3802
+        (`jsonb`), because only those have a binary form that is the UTF-8
+        text; `jsonb` opens with a one byte format version, which must be 1 and
+        is not part of the slice. Any other binary OID raises the same
+        `TYPE_MISMATCH` `get[String]` raises, naming the OID and
+        `ResultFormat.TEXT`.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            A slice over the cell's bytes, borrowed from the result.
+
+        Raises:
+            PgError: `NULL_VALUE` when the cell is SQL NULL; `TYPE_MISMATCH`
+                when `col` is outside `0..Result.column_count() - 1`, or when
+                the column is binary and its OID is not one of the six, or
+                when a binary `jsonb` cell is empty or carries a version byte
+                other than 1.
+        """
+        var bytes = self.get_bytes(col)
+        if self._res[].column_format(col) == ResultFormat.BINARY:
+            var oid = self._res[].column_type_oid(col)
+            if oid == OID_JSONB:
+                if len(bytes) < 1:
+                    raise _binary_length_error("jsonb", len(bytes), 1)
+                if bytes[0] != _JSONB_VERSION:
+                    raise _binary_value_error(
+                        "jsonb",
+                        String("version byte is ", bytes[0], ", expected 1"),
+                    )
+                bytes = bytes[1:]
+            elif (
+                oid != OID_TEXT
+                and oid != OID_VARCHAR
+                and oid != OID_BPCHAR
+                and oid != OID_NAME
+                and oid != OID_JSON
+            ):
+                raise _binary_oid_error(oid, "String")
+        return StringSlice[Self.origin](unsafe_from_utf8=bytes)
+
+    def get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]:
+        """Return column `col` of this row as a borrowed `Span` of bytes.
+
+        The zero-copy counterpart of `get[List[UInt8]]`, and the one accessor
+        that reads the cell's storage **as it is**, whatever the format and
+        whatever the OID: a binary column hands back the wire bytes, a text
+        column hands back the bytes of the text. So a `bytea` read in text
+        format comes back as the eight bytes of `\\x00ff00`, while the same
+        column read in binary format comes back as the three bytes
+        `00 ff 00`. `get[List[UInt8]]`, which owns its bytes, stays bytea-only
+        in both formats; this method deliberately does not share that rule,
+        because its subject is the region rather than the value.
+
+        The span's lifetime and the compile-time rules are `get_text`'s, down
+        to `_ = res^` being a keep-alive marker rather than a destroy.
+
+        Args:
+            col: Zero-based column index.
+
+        Returns:
+            A span over the cell's `PQgetlength` bytes, borrowed from the
+            result.
+
+        Raises:
+            PgError: `NULL_VALUE` when the cell is SQL NULL; `TYPE_MISMATCH`
+                when `col` is outside `0..Result.column_count() - 1`.
+        """
+        self._res[]._check_cell(self._index, col)
+        if self._res[]._is_null(self._index, col):
+            raise PgError(
+                PgErrorKind.NULL_VALUE, String("column ", col, " is NULL")
+            )
+        return self._raw(col)
 
     def is_null(self, col: Int) raises PgError -> Bool:
         """Report whether column `col` of this row holds SQL NULL.

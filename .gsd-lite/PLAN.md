@@ -223,7 +223,7 @@ impl の各ターンがテストに使うコマンド（リポジトリルート
     - B: `tests/test_extended_datetime.mojo`
     - 親: 両サーバーで実行・`fmt`・コミット
 
-- [ ] T7: zero-copy `Row.get_text` / `get_bytes`（REQ §4.5）+ `tests/test_zero_copy.mojo` + コンパイルエラーの陽性対照
+- [x] T7: zero-copy `Row.get_text` / `get_bytes`（REQ §4.5）+ `tests/test_zero_copy.mojo` + コンパイルエラーの陽性対照
   - 完了基準:
     - (a) `src/pq/result.mojo` に **決めた事項 9** の `Row.get_text(self, col: Int) raises PgError -> StringSlice[Self.origin]` / `Row.get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]`（T2 の `_raw` を使う。NULL は `NULL_VALUE`、範囲外は `TYPE_MISMATCH`。`get_text` は text 形式なら任意 OID、binary 形式なら文字列系 6 OID のみで jsonb は version byte を 1 つ飛ばす、それ以外は決めた事項 4 の OID 不一致メッセージ）。
       docstring に (1) `Result` の `PQgetvalue` 領域を指し `PQclear` まで有効、(2) **消費する移動（`var r2 = res^` / 関数へ `res^`）の後の使用はコンパイルエラー `use of uninitialized value`、`_ = res^` は生存延長で安全**（P18）、(3) UTF-8 は検証しない（client_encoding UTF8 前提。P20）、(4) `ref` は返さない（P19）

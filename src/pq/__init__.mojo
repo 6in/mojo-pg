@@ -78,6 +78,30 @@ Three things to know about it:
   binds nothing, `execute(sql, [], result_format=ResultFormat.BINARY)` goes
   through `PQexecParams` with an empty parameter list and does get binary.
 
+## Zero-copy access
+
+`Row.get_text(i)` returns a `StringSlice` and `Row.get_bytes(i)` a
+`Span[UInt8]`, both pointing straight into the `PGresult`'s own storage
+instead of allocating a copy:
+
+```mojo
+var total = 0
+for row in res:
+    total += row.get_text(0).byte_length()
+```
+
+- The view is valid until `PQclear` runs, which is after the **last use** of
+  any `Row` or slice borrowed from the result. Using one after the result has
+  been moved away (`var r2 = res^`, or passing `res^` to a function) is a
+  compile error, not a dangling read; `_ = res^` is a keep-alive marker, so
+  `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
+- `get_text` accepts any OID in text format and only the six string-shaped
+  OIDs in binary; `get_bytes` accepts every column in either format and hands
+  back the region as it is, so a `bytea` is the eight bytes of `\\x00ff00` in
+  text format and the three bytes `00 ff 00` in binary. Neither validates
+  UTF-8 -- `client_encoding` is `UTF8` and that is the guarantee.
+- Nothing in `pq` returns a `ref`; the origin travels with the slice.
+
 ## Parameters
 
 `Connection.execute(sql, params)` and `PreparedStatement.execute(params)`
