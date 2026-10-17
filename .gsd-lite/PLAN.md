@@ -337,6 +337,44 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
   - 依存: T7
   - 並列サブ作業: なし（推奨本数: **0**。実行待ちと文書）
 
+- [ ] F1: verify round 1 の差し戻し — `timeout_ms` の上限（`c_int` 切り捨て・deadline 溢れ）+ `notifications()` の UTF-8 検証（D12 との整合）+ 文書・例 5 件
+  - 背景（VERIFICATION.md §4）: (1) `poll.mojo:165` の `c_int(timeout_ms)` は 2^31 以上で wrap し、`2^32+50` → 50 ms で `timeout`、`2^31` → 負値 = 無期限、`Int.MAX` → `fetch_all` が 0 ms で `TIMEOUT`（プローブ再現済み。`-1` 以外の「無期限」を渡す利用者が黙って誤動作する）。
+    (2) `notifications()` は `relname` / `extra` を `unsafe_from_utf8_ptr` で `String` にし、`SQL_ASCII` DB の `NOTIFY ch, E'ab\xC3\x28\xF0'` が不正 UTF-8 の `String` になる（再現済み）。同じバイトは `get_text` が `TYPE_MISMATCH` にするので D12 の趣旨とパッケージ内で食い違う
+  - **期待結果**（完了基準とテストはこの表だけを参照する。kind / 文言をここ以外に書かない）:
+
+    | # | 条件 | 結果 |
+    |---|---|---|
+    | 1 | `poll_socket` / `wait_readable` / `wait_writable` / `connect_blocking`（2 形）/ `fetch_all` / `wait_notification` に `timeout_ms > 2147483647` | `USAGE`。message に `timeout_ms must be` と `2147483647` の両方を含む 1 文言（例 `timeout_ms must be -1, 0 or at most 2147483647 (got N)`）。既存の `< -1` の検査と同じ関数・同じ文言に統合。libpq を呼ばず待たない（経過 < 100 ms） |
+    | 2 | 同じ入口に `timeout_ms = 2147483647`（上限ちょうど）で、待つ対象が既に readable | 即時に返る（`USAGE` にしない。`test_poll`: 1 byte 書いた pipe で `readable=True`） |
+    | 3 | `timeout_ms = -1 / 0 / 1..2147483647` | 現状どおり（既存テストの期待値変更ゼロ。`"timeout_ms must be"` の部分文字列検査は現状のまま通る） |
+    | 4 | `notifications()` が受けた `PGnotify` の `extra`（または `relname`）が不正 UTF-8（`SQL_ASCII` DB で `NOTIFY ch, E'ab\xC3\x28'`） | その 1 件は `PQfreemem` して捨て、同じ呼び出しで既に集めた正常な通知は `_pending` に戻した**後**に `TYPE_MISMATCH`。message は `invalid UTF-8 at byte 2 of notification payload`（`relname` なら `... of notification channel`）。本文のバイトは message に入れない。`state()` 不変、接続は使える |
+    | 5 | 4 の直後の `notifications()` / `wait_notification(2000)` | 捨てた 1 件を除く通知が返る（4 の後に送った `NOTIFY ch, 'ok'` が届く） |
+    | 6 | UTF-8 DB の `NOTIFY ch, 'héllo'`（既存 `test_notify`） | 現状どおり受信（期待値変更ゼロ） |
+    | 7 | `wait_notification` 経由で 4 が起きる | 同じ `TYPE_MISMATCH` が伝播する（`None` に写さない） |
+  - 完了基準:
+    - (a) 表 1〜3: `src/pq/_platform/poll.mojo`（`poll_socket` の入口）と `src/pq/async_conn.mojo` `_reject_bad_timeout` の両方に上限検査。文言は 1 箇所に定義して共有してよい（`_platform/poll` → `errors` の import 向きは維持。決めた事項 17）。
+      上限が 2^31-1 なら `timeout_ms * 1_000_000` は Int64 に収まるので deadline 計算は変えなくてよい（コメントに 1 文）。`__init__.mojo` の `## Asynchronous use` 節の Timeouts 項に上限を 1 文。
+      テスト: `tests/test_poll.mojo` に 2 件（表 1: `poll_socket(fd, True, False, 2147483648)` → `USAGE`、経過 < 100 ms／表 2）、`tests/test_async.mojo` に 1 件（表 1 を `wait_readable(2147483648)` / `fetch_all(Int.MAX)` / `wait_notification(4294967296)` / `connect_blocking(_conninfo(), 4294967296)` の 4 入口で。`fetch_all` は `send("SELECT 1")` 後に呼び、`USAGE` の後 `state()` が `BUSY` のまま → `fetch_all(5000)` で回収できる）
+    - (b) 表 4〜7: `notifications()` のループで `relname` / `extra` を `strlen` 長の `Span` にして `_validated_utf8` 相当で検査する（`decode_binary._validated_utf8` に「何の」を表す引数を足すか、同型の私用関数を `async_conn.mojo` に置く。実装は 1 つ、スキャナ `_utf8_first_invalid` は共有）。
+      `PQfreemem` は検査の結果に関わらず必ず呼ぶ（`src_PQfreemem_calls` は 3 のまま）。raise の前に `found` の正常分を `self._pending` に戻す（表 5）。
+      テスト: `tests/test_notify.mojo` に 2 件。準備は同期 `Connection` で `CREATE DATABASE pq_test_ascii ENCODING 'SQL_ASCII' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'`（`42P04` duplicate_database は無視。`pq` は両サーバーで superuser、verify turn 11 に確認済み）。
+      ① listener = `AsyncConnection.connect_blocking(<_conninfo() の dbname を pq_test_ascii に>, 5000)` で `LISTEN pq_f1`、notifier = 同期 `Connection`（同 DB）で `execute("NOTIFY pq_f1, E'ab\\xC3\\x28'")` → listener の `wait_notification(2000)` が表 4 の `TYPE_MISMATCH`（`"invalid UTF-8 at byte 2"` と `"notification payload"` の 2 部分文字列、`"ab"` を含まない）→ notifier が `execute("NOTIFY pq_f1, 'ok'")` → `wait_notification(2000)` が `payload == "ok"`（表 5・7）。
+      ② `relname` 側: `LISTEN "ch\xC3\x28"` は識別子で同じ DB なら通るはず（通らなければ ① の channel 側は「契約外（SQL_ASCII でも識別子は PG が拒否）」と PROGRESS に書き、テストは payload 側だけにしてよい）。
+      陽性対照（PROGRESS に貼る）: 検査を外したコピーで ① が `Notification` を返し `payload.byte_length() == 4` になることを 1 回実測
+    - (c) 文書・例（1 コミットにまとめてよい）: ① `connect_blocking` の Raises（`async_conn.mojo` の 2 形 docstring と `__init__.mojo` 公開 API 表の行）に `SERVER`（`poll_connect` → `_drain_setup` が SET 拒否で投げる）を足す；
+      ② `fetch_all` / `connect_blocking` の docstring に「`timeout_ms = 0` は予算なし = 最初の wait の前に `TIMEOUT`（`wait_*` の `0` = 1 回だけ見る、とは違う。バッファ済みの結果も集めない）」を 1 文（verify プローブ P2 / P5 の実測）；
+      ③ `.gsd-lite/TRACE.md` §1 の `init_TIMEOUT=3` を再実行の値（現在 6、F1 後はさらに増える）に更新し、§1 全体を F1 完了時点の再実行出力で差し替える；
+      ④ `examples/async_query.mojo` のループを「`poll_result` が `None` **かつ** `state() == IDLE` で終了」の形にする（最初の結果で `break` して `BUSY` のまま drop しない。出力行 `n = 1` / `empty polls while waiting = N` は不変）；
+      ⑤ `tests/test_extended_datetime.mojo:787` の `print("SKIP test_timestamp_params_round_trip: ...")` は関数が続けて Tokyo ケースを走らせるので SKIP の意味とずれる → 文言を `SKIP test_timestamp_params_round_trip(main): TimeZone is not UTC` のように「主接続ケースだけ」と分かる形に（1 行・80 桁以内。`^SKIP ` は維持）
+    - (d) `pixi run test` 両サーバー PASS、`pixi run check` 6/6、`pixi run fmt` 差分なし、`pixi run package` 警告ゼロ。**既存テストの期待値変更ゼロ**（追加は `test_poll` +2 / `test_async` +1 / `test_notify` +1〜2）。
+      チェックリスト再実行: `poll_external_call_symbols ≤ 3` / `src_PQfreemem_calls = 3` / `src_PQexec_calls = 4` 不変、`test_poll_tests ≥ 11`、`test_async_tests ≥ 30`、`test_notify_tests ≥ 10`。
+      PROGRESS に (b) の陽性対照と、`notifications()` の `PQfreemem` が raise 経路でも呼ばれる行番号を書く
+  - **修正後にプローブで期待される変化**（round 2 はこの数だけ照合する）: `scratch/turn-011-probe-grid.mojo` の P1 が `timeout=True elapsed_ms=50` → **`USAGE` raise**（P2〜P5 は不変）；`scratch/turn-011-sec-timeout.mojo` の `wait_readable(2**32)` / `fetch_all(Int.MAX)` / `fetch_all(1e13)` / `wait_notification(2**32)` の **4 行が全部 `USAGE`**（`wait_readable(300)` の 1 行は `Timeout` のまま）；
+    `scratch/turn-011-sec-ascii-notify.mojo`（DB 名を `pq_test_ascii` に変えて）が `notification payload bytes` の行の代わりに **`TYPE_MISMATCH` `invalid UTF-8 at byte 2 of notification payload`**；`check` 5/6 段のサマリは 47 本 `0 failed` のまま、`test_poll` 9 → **11**、`test_async` 29 → **30**、`test_notify` 9 → **10〜11**
+  - 対象: `src/pq/_platform/poll.mojo`, `src/pq/async_conn.mojo`, `src/pq/__init__.mojo`, `src/pq/decode_binary.mojo`（`_validated_utf8` に引数を足す場合のみ）, `examples/async_query.mojo`, `tests/test_poll.mojo`, `tests/test_async.mojo`, `tests/test_notify.mojo`, `tests/test_extended_datetime.mojo`（SKIP 文言 1 行）, `.gsd-lite/TRACE.md`
+  - 依存: T8
+  - 並列サブ作業: なし（推奨本数: **0**。`async_conn.mojo` と `poll.mojo` の小さな差分 + テスト 3 ファイル。1 ターンで完結）
+
 ## 決めた事項
 
 1. **`_platform/poll` の形**（REQ §4.1 / D7 / RESEARCH §2.3・§3-14・§3-15。mojothon/libc と同型）: `src/pq/_platform/poll.mojo` に

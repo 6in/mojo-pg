@@ -332,3 +332,15 @@
   - verify が照合すべき一覧: 既存テストの期待値変更は Phase 4 全体で **ゼロ**（turn 9 の `test_notify.mojo:385` への
     `_wait_until_active` 挿入だけが既存テストへの変更で、期待値ではなく手順。理由は turn 9 に記載）
   - 未確認: なし（TRACE.md §3 で 10 件すべてを処分済み）
+
+## turn 11 — verify — round 1: 指摘あり（差し戻し F1 = 誤動作 1 + D12 整合 1 + 文書・例 5）/ マージなし
+- やったこと: サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用、並行 約 10 分）+ 親が `async_conn.mojo` / `poll.mojo` 通読、クリーンな `pixi run check`（**6/6 PASS、179 s**、47 サマリ全部 `0 failed`）、
+  追従先チェックリスト再実行（全行期待値。TRACE §1 との差は `init_TIMEOUT` 3 → 6 の字句のみ）、堅牢性プローブ 5 本（`scratch/turn-011-probe-grid.mojo`）。VERIFICATION.md を作成し PLAN に F1 を追記
+- 判定の根拠: 受け入れ基準 §5.1 の 4 件・§5.2・§5.4 は全部満たす。差し戻しは **`timeout_ms ≥ 2^31` の `c_int` 切り捨て**（`2^32+50` → 50 ms で timeout、`fetch_all(Int.MAX)` → 0 ms で `TIMEOUT`。親とセキュリティが独立に再現）が
+  「黙って誤動作」に当たるため。ついでに `notifications()` の UTF-8 無検証（`SQL_ASCII` DB で再現。D12 の趣旨と不整合）と文書・例 5 件を F1 に同梱。既存テストの期待値変更ゼロはコードレビュー側が全 hunk 分類で確認
+- 想定外: (1) サブエージェントの出力ファイルの更新時刻で完了を待つ `until` ループが即終了した（出力は完了時にまとめて書かれる）→ `sleep 300` の再試行で待った。
+  (2) セキュリティ側が検証のために PG17 に `pq_sec_ascii` DB を作って削除した（作業木は無変更）。(3) P3（`Sending` 中の切断）は 3 回中 1 回しか `Sending` を観測できなかったが、その 1 回で状態機械が `Idle` に戻ることを確認
+- やり直し: 1 回（上記 (1) の待ち方）
+- 次への注意: impl は F1 の**期待結果の表**だけを見て実装する（文言は表に 1 回だけ書いた）。`pq` は両サーバーで superuser なので `CREATE DATABASE pq_test_ascii` はテストが自分で作れる（`42P04` は無視）。
+  F1 (b) の `LISTEN "ch\xC3\x28"`（channel 側）が PG に拒否されたら payload 側だけにしてよい。round 2 の verify は PLAN F1 末尾「修正後にプローブで期待される変化」の数だけ照合する
+  （P1 → `USAGE`、sec-timeout 4 行 → `USAGE`、sec-ascii-notify → `TYPE_MISMATCH`、`test_poll` 11 / `test_async` 30 / `test_notify` 10〜11）。セキュリティ側プローブは DB 名 `pq_sec_ascii` を使っているので round 2 で `pq_test_ascii` に直して回す
