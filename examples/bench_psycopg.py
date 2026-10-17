@@ -8,8 +8,9 @@ every cell, so nothing can be skipped unread. Text is the default cursor,
 binary is `cursor(binary=True)`.
 
 Run it with `pixi run bench-psycopg`. The server comes from `PQ_TEST_CONNINFO`
-(`key=value ...` form), falling back to the local container. Any psycopg error
-is printed and turned into exit status 1.
+(`key=value ...` form), falling back to the local container. A psycopg error, a
+conninfo that is not UTF-8 and a stdout that cannot be written are each printed
+as one `failed: <type> <message>` record and turned into exit status 1.
 """
 
 import os
@@ -64,23 +65,48 @@ def _run(conn: psycopg.Connection, binary: bool, label: str, report: bool) -> No
         sys.exit(1)
 
 
+def _discard_stdout() -> None:
+    """Point fd 1 at /dev/null so the interpreter's exit-time flush cannot fail.
+
+    This is the recipe the `signal` module documents under "Note on SIGPIPE".
+    Without it, a stdout that cannot be written (a full device, a closed pipe)
+    fails a second time on the way out and Python prints `Exception ignored
+    while flushing sys.stdout` and exits with status 120.
+    """
+    os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+
+
 def main() -> None:
+    status = 0
     try:
-        with psycopg.connect(_conninfo(), autocommit=True) as conn:
-            print(
-                f"psycopg {psycopg.__version__} impl={psycopg.pq.__impl__}"
-                f" libpq={psycopg.pq.version()} server={conn.info.server_version}"
-                f" python={sys.version.split()[0]}"
-            )
-            print(f"rows: {ROWS} x 5 columns, {RUNS} runs per format")
-            _run(conn, False, "warmup", False)
-            _run(conn, True, "warmup", False)
-            for _ in range(RUNS):
-                _run(conn, False, "text  ", True)
-                _run(conn, True, "binary", True)
-    except psycopg.Error as e:
-        print("failed:", type(e).__name__, str(e).strip())
-        sys.exit(1)
+        try:
+            with psycopg.connect(_conninfo(), autocommit=True) as conn:
+                print(
+                    f"psycopg {psycopg.__version__} impl={psycopg.pq.__impl__}"
+                    f" libpq={psycopg.pq.version()} server={conn.info.server_version}"
+                    f" python={sys.version.split()[0]}"
+                )
+                print(f"rows: {ROWS} x 5 columns, {RUNS} runs per format")
+                _run(conn, False, "warmup", False)
+                _run(conn, True, "warmup", False)
+                for _ in range(RUNS):
+                    _run(conn, False, "text  ", True)
+                    _run(conn, True, "binary", True)
+        except psycopg.Error as e:
+            print("failed:", type(e).__name__, str(e).strip())
+            status = 1
+        except ValueError as e:
+            # UnicodeEncodeError is a ValueError: psycopg encodes the conninfo
+            # itself, so bytes that are not UTF-8 never reach libpq.
+            print("failed:", type(e).__name__, str(e).strip())
+            status = 1
+        if sys.stdout is not None:  # None when fd 1 is closed; print() is a no-op then
+            sys.stdout.flush()
+    except OSError as e:
+        _discard_stdout()
+        print("failed:", type(e).__name__, str(e).strip(), file=sys.stderr)
+        status = 1
+    sys.exit(status)
 
 
 if __name__ == "__main__":

@@ -307,7 +307,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
   - 依存: T6
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（実行と転記だけ）
 
-- [ ] F1: `examples/bench_psycopg.py` の堅牢性（REQ §5 D4「どの入力・出力状態でもトレースバックを出さず … 終了コード 1」の取りこぼし 2 クラス）+ README の字句 1 件（verify round 1 / turn 10）
+- [x] F1: `examples/bench_psycopg.py` の堅牢性（REQ §5 D4「どの入力・出力状態でもトレースバックを出さず … 終了コード 1」の取りこぼし 2 クラス）+ README の字句 1 件（verify round 1 / turn 10）
   - 背景（`VERIFICATION.md` §3、生ログ `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-010-robust-grid.log`）: Mojo の examples 7 本と loader は入力クラス（非 UTF-8 / 制御文字 / 100 KB / 引用符不整合 /
     空白のみ / 存在しない DB / `libc.so.6` / ディレクトリ / 空ファイル）× 出力クラス（`/dev/full` / 閉じた stdout / パイプ閉鎖）の全部で `failed: PgError(...)` + exit 1 か正常終了で、トレースバックなし。
     **`bench_psycopg.py` だけ** 2 クラスで外れる: (ⅰ) `PQ_TEST_CONNINFO` に UTF-8 でないバイトがあると psycopg の `conninfo.encode()` が **`UnicodeEncodeError`（`ValueError` の子）** を投げ、

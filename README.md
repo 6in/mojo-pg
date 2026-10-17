@@ -359,8 +359,11 @@ pixi run db-down    # コンテナと volume を破棄
 | 旧版サーバー | 54314 | `postgres:14` |
 | blackhole | 54399 | `alpine/socat`（接続を受けたあと何も返さない。接続タイムアウトのテスト用） |
 
-テストやサンプルの接続先は `PQ_TEST_CONNINFO` で差し替えられます
-（`key=value ...` 形式のみ。`postgres://` の URI は受けません）。
+テストやサンプルの接続先は `PQ_TEST_CONNINFO` で差し替えられます。
+**テストだけは `key=value ...` 形式のみ**です（`tests/run_tests.sh` が末尾に
+` password=...` を付け足して「わざと間違ったパスワード」を作るため、
+`postgres://` の URI では壊れた接続文字列になります）。`examples/` は値を
+そのまま `PQconnectdb` に渡すので URI でも動きます。
 フィクスチャが汚れたとき（テストが作った一時データベースが残っているなど）は
 `pixi run db-reset` でまるごと作り直します。
 
