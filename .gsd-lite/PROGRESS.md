@@ -394,3 +394,9 @@
 - やり直し: 0 回
 - 次への注意: reflect は REQ §9 の実験（T5「テスト 2 ファイル型を 1 本」の USD を Phase 3 T6 の 2 本・USD 10.77 と比べる）を生ログから。verify 側の学び: round 1 の「修正後にプローブで期待される変化」を数で書いておいたので round 2 は 10 分で終わった（プローブ 3 本 + check 1 回 + 通読）。
   テストが両サーバーに `pq_test_ascii` DB を残す（Phase 5 の環境整備で `db-reset` 相当を考える余地）。`PQcancel` の deprecated 注記と Windows 分岐の未検証は Phase 5 への申し送りのまま
+
+## turn 14 — reflect — phase4-async-cancel-notify
+- やったこと: 振り返りを .gsd-lite/reflect/20261017-1925-phase4-async-cancel-notify.md に作成（提案 10 件）。前回提案 12 件の照合: 守られた 9 / 部分的 2（所要見積もり・PROGRESS 40 行）/ 未反映 1（ツール側の usage 集計）
+- 想定外: turns.jsonl の turn 10 / 11 / 13 が生ログの最後の `result` だけを記録しており、出力トークン・num_turns がその 3 ターン分だけ過小（cost_usd は正しい）。表には注記して推定で埋めていない
+- やり直し: 0 回
+- 次への注意: 縮小変換（c_int 等）の境界値を plan の観点に常設 / 所要見積もりを Phase 4 末実測（check 167〜187 s）で置き換え / PLAN 訂正は TRACE.md へ / T1 に pq_test_ascii の後始末と VERIFICATION §5 先頭 2 件
