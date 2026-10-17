@@ -2,7 +2,7 @@
 
 `types` holds the Int-backed opaque handles, pointer aliases and the
 `libpq-fe.h` / `postgres_ext.h` enum constants. `functions` holds `LibpqFFI`,
-a `Movable`-only table of 50 libpq entry points resolved from one dlopen'd
+a `Movable`-only table of 55 libpq entry points resolved from one dlopen'd
 handle. `loader` owns the process-wide handle: it searches the candidate paths,
 enforces the libpq >= 14 floor and exposes `libpq()` / `libpq_ptr()`.
 

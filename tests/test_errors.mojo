@@ -59,5 +59,11 @@ def test_usage_differs_from_type_mismatch() raises:
     assert_true(PgErrorKind.USAGE != PgErrorKind.TYPE_MISMATCH)
 
 
+def test_timeout_kind_discriminant_and_name() raises:
+    assert_equal(PgErrorKind.TIMEOUT.value, 6)
+    assert_equal(String(PgErrorKind.TIMEOUT), "Timeout")
+    assert_true(PgErrorKind.TIMEOUT != PgErrorKind.USAGE)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

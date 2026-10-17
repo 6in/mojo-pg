@@ -27,17 +27,6 @@ from pq._ffi.types import (
     IntPtr,
     MutRawPtr,
     OidPtr,
-    PG_DIAG_CONTEXT,
-    PG_DIAG_MESSAGE_DETAIL,
-    PG_DIAG_MESSAGE_HINT,
-    PG_DIAG_MESSAGE_PRIMARY,
-    PG_DIAG_SEVERITY,
-    PG_DIAG_SEVERITY_NONLOCALIZED,
-    PG_DIAG_SQLSTATE,
-    PG_DIAG_STATEMENT_POSITION,
-    PGRES_COMMAND_OK,
-    PGRES_EMPTY_QUERY,
-    PGRES_TUPLES_OK,
     PGconnPtr,
     PGresultPtr,
     PQTRANS_IDLE,
@@ -45,7 +34,7 @@ from pq._ffi.types import (
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
 from pq.prepared import PreparedStatement
-from pq.result import Result, ResultFormat
+from pq.result import Result, ResultFormat, adopt_result
 from pq.transaction import Transaction, _default_rollback_failure_handler
 
 comptime _SESSION_SETUP_SQL = (
@@ -59,27 +48,6 @@ Date and interval text parsing is GUC-dependent, so a server configured with
 decoders assume one grammar. The binary wire format is GUC-independent and
 needs none of this.
 """
-
-
-def _error_field(
-    pq: Pointer[LibpqFFI, MutUntrackedOrigin],
-    res: PGresultPtr,
-    code: c_int,
-) -> String:
-    """Copy one `PQresultErrorField` into an owned `String`.
-
-    Args:
-        pq: The libpq function table to call through.
-        res: The result carrying the diagnostic.
-        code: A `PG_DIAG_*` field code.
-
-    Returns:
-        The field text, or an empty string when libpq reports NULL.
-    """
-    var p = pq[].PQresultErrorField(res, code)
-    if p:
-        return String(unsafe_from_utf8_ptr=p.value())
-    return String()
 
 
 struct Connection(Movable):
@@ -611,11 +579,7 @@ struct Connection(Movable):
         return name^
 
     def _take_result(self, res: PGresultPtr) raises PgError -> Result:
-        """Adopt a finished `PGresult` or raise the error it reports.
-
-        A successful result is handed to `Result`, which takes over the
-        `PQclear`. Every failing path clears `res` itself before raising, apart
-        from a NULL `res`, where libpq allocated nothing to clear.
+        """Adopt a finished `PGresult` by delegating to `adopt_result`.
 
         Args:
             res: The result libpq returned for the command that just ran, as-is
@@ -625,70 +589,10 @@ struct Connection(Movable):
             The `Result` of the command, owning the `PGresult*`.
 
         Raises:
-            PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
-                all, or when the connection was lost while running the command
-                and libpq reported it without an SQLSTATE, or
-                `PgErrorKind.SERVER` when the server reports a diagnostic. (A
-                disconnect the server announced as a FATAL *with* an SQLSTATE
-                is therefore still `SERVER` for that statement, and the next
-                command is the one that raises `CONNECTION`.) Server errors
-                carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
-                `context` when libpq supplies them.
+            PgError: Whatever `adopt_result` raises; its docstring carries the
+                classification.
         """
-        if res.is_null():
-            # No PGresult was allocated, so there is nothing to PQclear.
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                String(
-                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
-                ),
-            )
-        var status = self._pq[].PQresultStatus(res)
-        if status == PGRES_TUPLES_OK or status == PGRES_COMMAND_OK:
-            return Result(res, self._pq)
-        if status == PGRES_EMPTY_QUERY:
-            self._pq[].PQclear(res)
-            raise PgError(PgErrorKind.SERVER, "empty query")
-        # Every diagnostic is copied into owned Strings before PQclear frees
-        # the PGresult the field pointers point into.
-        var severity = _error_field(
-            self._pq, res, PG_DIAG_SEVERITY_NONLOCALIZED
-        )
-        if severity == "":
-            severity = _error_field(self._pq, res, PG_DIAG_SEVERITY)
-        var sqlstate = _error_field(self._pq, res, PG_DIAG_SQLSTATE)
-        var message = _error_field(self._pq, res, PG_DIAG_MESSAGE_PRIMARY)
-        if message == "":
-            message = String(
-                unsafe_from_utf8_ptr=self._pq[].PQresultErrorMessage(res)
-            )
-        if message == "":
-            message = String("unexpected result status ", Int(status))
-        var detail = _error_field(self._pq, res, PG_DIAG_MESSAGE_DETAIL)
-        var hint = _error_field(self._pq, res, PG_DIAG_MESSAGE_HINT)
-        var position = _error_field(self._pq, res, PG_DIAG_STATEMENT_POSITION)
-        var context = _error_field(self._pq, res, PG_DIAG_CONTEXT)
-        self._pq[].PQclear(res)
-        # A diagnostic that carries no SQLSTATE did not come from the server:
-        # libpq generated it client-side. When the connection is also gone,
-        # that is a lost connection rather than a rejected statement, so it is
-        # reported as CONNECTION -- `PgErrorKind.CONNECTION` is what tells the
-        # caller the connection is no longer usable. Both halves of the test
-        # matter: a syntax error has an SQLSTATE, and `COPY ... TO STDOUT`
-        # has none but leaves the connection perfectly usable.
-        var kind = PgErrorKind.SERVER
-        if sqlstate == "" and self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
-            kind = PgErrorKind.CONNECTION
-        raise PgError(
-            kind,
-            message,
-            sqlstate=sqlstate,
-            severity=severity,
-            detail=detail,
-            hint=hint,
-            position=position,
-            context=context,
-        )
+        return adopt_result(self._pq, self._conn, res)
 
     def escape_literal(self, var s: String) raises PgError -> String:
         """Quote `s` as a SQL string literal with `PQescapeLiteral`.

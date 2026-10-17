@@ -171,7 +171,7 @@ enclosing scope -- which is where the implicit `ROLLBACK` or the
 
 ## `PgErrorKind`
 
-Every `pq` API raises `PgError`, and its `kind` is one of exactly six
+Every `pq` API raises `PgError`, and its `kind` is one of exactly seven
 values. The name in parentheses is what `PgErrorKind.write_to` prints:
 
 - `LIBPQ_LOAD` (`LibpqLoad`) -- libpq itself could not be loaded.
@@ -186,6 +186,8 @@ values. The name in parentheses is what `PgErrorKind.write_to` prints:
 - `USAGE` (`Usage`) -- the caller misused the `pq` API. Detected
   client-side; nothing was sent to the server, so `sqlstate` and the other
   diagnostics are empty.
+- `TIMEOUT` (`Timeout`) -- an asynchronous wait ran out of time. The
+  connection is untouched and still usable.
 
 The two embedded-NUL cases are deliberately **not** the same kind: a NUL
 byte in the `sql` text is `TYPE_MISMATCH`, like every other argument libpq

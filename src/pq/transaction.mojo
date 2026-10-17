@@ -72,11 +72,11 @@ from pq._ffi.types import (
     PG_DIAG_STATEMENT_POSITION,
     PGRES_COMMAND_OK,
 )
-from pq.connection import Connection, _error_field
+from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param
 from pq.prepared import PreparedStatement
-from pq.result import Result, ResultFormat
+from pq.result import Result, ResultFormat, _error_field
 
 
 def _default_rollback_failure_handler(e: PgError):

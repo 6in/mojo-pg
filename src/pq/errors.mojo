@@ -1,6 +1,6 @@
 """Error types for the `pq` package.
 
-Defines `PgErrorKind`, a small `Int` newtype enumerating the six failure
+Defines `PgErrorKind`, a small `Int` newtype enumerating the seven failure
 categories the package can report, and `PgError`, the single error type raised
 by `pq` APIs via typed `raises PgError`.
 """
@@ -10,8 +10,8 @@ by `pq` APIs via typed `raises PgError`.
 struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
     """Category of a `PgError`.
 
-    An `Int` newtype with exactly six constants: `LIBPQ_LOAD`, `CONNECTION`,
-    `SERVER`, `NULL_VALUE`, `TYPE_MISMATCH` and `USAGE`.
+    An `Int` newtype with exactly seven constants: `LIBPQ_LOAD`, `CONNECTION`,
+    `SERVER`, `NULL_VALUE`, `TYPE_MISMATCH`, `USAGE` and `TIMEOUT`.
     """
 
     var value: Int
@@ -41,6 +41,14 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
 
     Detected client-side; nothing was sent to the server, so `sqlstate` and
     the other diagnostics are empty.
+    """
+
+    comptime TIMEOUT = Self(6)
+    """The state change being waited for did not arrive within `timeout_ms`.
+
+    Raised only by the asynchronous API's blocking helpers. The connection is
+    untouched and still usable: the statement is simply still running, so the
+    caller can keep waiting, or `cancel()` it.
     """
 
     def __eq__(self, other: Self) -> Bool:
@@ -83,6 +91,8 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
             writer.write("TypeMismatch")
         elif self == Self.USAGE:
             writer.write("Usage")
+        elif self == Self.TIMEOUT:
+            writer.write("Timeout")
 
 
 struct PgError(Copyable, Writable):
