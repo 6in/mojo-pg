@@ -52,3 +52,48 @@
   （`test_notify.mojo:492,534` と `test_decode_binary.mojo:470,481,489,497,538`。行番号は T1 で `test_notify.mojo` が +32 行ずれたので **grep で取り直す**）。
   docstring 16 行は `grep -n -B2 -A2 'UTF-8' src/pq/*.mojo` で複数行 docstring も拾う（同一行 grep だけでは漏れる）。`_reject_lost` は `notifications` / `wait_notification` の 2 入口に入れ、
   T3 で `wait_notifications` が 3 つ目になる。`env VAR=... pixi run ...` が使える。`check` は 185 s が基線
+
+## turn 4 — impl — T2 `PgErrorKind.ENCODING` + `notifications()` 先行チェック + UTF-8 4 バイト境界
+- やったこと: `errors.mojo` に `ENCODING = Self(7)`（`write_to` → `"Encoding"`、kind は 8 値）、UTF-8 不正の raise 4 箇所を
+  `ENCODING` に（**メッセージ文言は一字も変えず**）、`async_conn.mojo` に `_reject_lost(method)` を追加して `notifications` /
+  `wait_notification` の入口（`_reject_connecting` の直後）で呼ぶ、docstring 18 行を `ENCODING` に、テスト 4 件分の変更。
+  コミット `5094bcb`。サブエージェント 推奨 1 本 / 実 1 本（A = `tests/` 3 ファイル）
+- 既存テストの期待値変更（全 7 行。T2 (c) のとおりで増減なし）: `tests/test_decode_binary.mojo:470,481,489,497,538`
+  （`test_text_rejects_invalid_utf8_naming_the_byte_offset` / `_truncated_utf8_sequence` / `_overlong_utf8_encoding` /
+  `_utf8_encoded_surrogate` / `test_jsonb_utf8_offset_skips_the_version_byte`）と `tests/test_notify.mojo:519,563`
+  （`test_a_payload_that_is_not_utf8_is_rejected_and_dropped` / `test_a_channel_that_is_not_utf8_is_rejected_and_dropped`）。
+  **理由はすべて同一**: UTF-8 不正の kind が `TYPE_MISMATCH` → `ENCODING` になったため。文言の断定行（`invalid UTF-8 at byte N`）は不変。
+  OID 不一致・幅不一致・jsonb 版数・添字・NULL・numeric・domain の `TYPE_MISMATCH` は 1 行も変えていない
+  （`test_decode_binary.mojo:146,159,167,179,197,332,339,390,394,642,650,907,920` と `test_zero_copy.mojo:469,474,551,552`）
+- 陽性対照（2 件とも成立）: (d) `_reject_lost` の 2 呼び出しをコメントアウトして `test_notify` を 54317 で 1 回 →
+  `test_a_lost_connection_is_reported_with_a_fixed_message` が **FAIL**（left = libpq の `server closed the connection
+  unexpectedly ... connection not open`、right = `notifications() called on a lost connection`。
+  `scratch/turn-004-notify-nocheck.log`）→ 復帰後 PASS。turn 1 の `probe-notify-bad.log` が示した「呼ぶたびに
+  `connection not open` が 1 行ずつ伸びる」が消えたことに対応。(e) U+10FFFF の根拠: UTF-8 DB（54317、`server_encoding: UTF8`）に
+  `SELECT E'\xf4\x8f\xbf\xbf'::text` を投げて **受理・4 バイト（244 143 191 191）で round-trip**（`scratch/turn-004-probe-u10ffff.log`）
+  → 格子の `_first_invalid("f48fbfbf") == -1` の対照として妥当。`\xf4\x90\x80\x80`（U+110000）はサーバーが拒否するので単体格子のみ
+- 検証と所要（単位付き）: `pixi run test` 両サーバー PASS（48 サマリすべて `0 failed`。`test_decode_binary` **88** 件 /
+  `test_errors` **9** 件 / `test_notify` **12** 件、所要は両サーバーで 2 s / 0 s / 3 s）、`pixi run package` 警告ゼロ、
+  `pixi run fmt` は 52 ファイル無変更、`pixi run check` **6/6 PASS、177 s**（閾値 247 s、基線 185 s を下回る。6/6 段の
+  マッチ 0 行）。`docker exec ... psql` は **pg17 / pg14 とも 0 行**。
+  チェックリストの T2 行は全行期待値（`errors_ENCODING`=3 / `errors_seven`=0 / `errors_eight`=2 / `errors_write_Encoding`=1 /
+  `init_exactly_seven`=0 / `init_ENCODING`=6 / `src_TYPE_MISMATCH`=106（≤ 106）/ `tests_TYPE_MISMATCH`=91 / `src_ENCODING`=27 /
+  `tests_ENCODING`=10 / `src_utf8_and_type_mismatch_same_line`=0 / `src_invalid_utf8_raise_sites`=4 / `test_errors_tests`=9 /
+  `async_reject_lost_def`=1 / `async_reject_lost_calls`=3 / `async_lost_connection_text`=3 / `test_decode_binary_f4908080`=1 /
+  `_f5808080`=1 / `_f48fbfbf`=1 / `test_decode_binary_tests`=88 / `test_notify_tests`=12 / `test_notify_lost_message_fixed`=2）。
+  生ログ: `scratch/turn-004-{test,check,checklist,notify-nocheck,probe-u10ffff}.log`
+- 想定外: (1) **PLAN 訂正 2 件**（TRACE.md「PLAN 訂正」節に記載）: docstring は決めた事項 3 の 16 行では足りず
+  **18 行**（`result.mojo` の `Raises:` 2 箇所が「`TYPE_MISMATCH` ... or when the cell is not valid UTF-8」と 1 項目で
+  述べていた。同一行 grep には当たらないので列挙から漏れていた）。`tests/test_notify.mojo` の対象行は T1 のずれで
+  `:492,534` → `:519,563`。(2) `tests/test_errors.mojo` と `test_notify.mojo` は `TestSuite.discover_tests[__functions_in_module()]`
+  方式で、`main()` へのテスト登録は不要だった（依頼文は手動登録を前提に書いていた）。(3) `src_TYPE_MISMATCH` は目安 105 ではなく
+  **106**（`decode_binary.mojo:46` を「`TYPE_MISMATCH` ... except the UTF-8 check, which raises `ENCODING`」に直したので
+  同じ行に両方が残る。期待値 ≤ 106 の範囲内）
+- やり直し: 0 回
+- 次への注意: 次は T3（`wait_notifications(n, timeout_ms)` + 契約外テスト 3 件 + 境界格子）。`_reject_lost` は既にあるので
+  `wait_notifications` が **3 つ目の呼び出し元**（`async_reject_lost_calls` 3 → ≥ 4）。入口検査の順は
+  `_reject_bad_timeout` → `n < 1` の `USAGE` → `_reject_connecting` → `_reject_lost`（決めた事項 5）。
+  `wait_notification` を `_collect_notifications("wait_notification", 1, …)` のラッパにすると turn 4 で追加した
+  `test_a_lost_connection_is_reported_with_a_fixed_message` が **`wait_notification()` の文言を完全一致で断定している**ので、
+  `method` を取り違えると落ちる（回帰が効く）。`test_notify` のテスト数は 12 → ≥ 21。`check` は 177 s が最新基線。
+  `env VAR=... pixi run ...` の形を使う（先頭の変数代入は不可）
