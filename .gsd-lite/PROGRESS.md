@@ -409,3 +409,28 @@
 - 次への注意: impl は **F2 だけ**（examples 6 本の docstring 1 文ずつ。`src/` / `tests/` / README は触らない）。期待結果は PLAN F2 の**表 1 つ**が唯一の正。
   `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` が 0 件になること（`run_tests.sh:10-11` の「NOT a postgres:// URI」は残す）。
   `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで。`check` の基線は 165〜189 s（閾値 247 s）。verify round 3 は「F2 の grep + `check` + チェックリスト同値」だけで、格子の再実行は不要（コード不変）
+
+## turn 13 — impl — F2 examples 6 本の docstring の URI 字句
+- やったこと: サブエージェント **推奨 0 本 / 実 0 本**（PLAN どおり親が全部）。`examples/` 6 本
+  （`basic` / `params` / `binary` / `async_query` / `listen_notify` / `bench_formats`）の docstring の
+  「`key=value ...` form only, never a `postgres://` URI」を「a `key=value ...` string or a
+  `postgresql://` URI, passed to `PQconnectdb` as is」に言い換え（`src/pq/connection.mojo:169-172` と同じ趣旨）。
+  コミット `4c20636`（6 本 + PLAN、+19 / -18）
+- 既存テストの期待値変更: **ゼロ**（`src/` / `tests/` / `README.md` / `bench_psycopg.py` は 1 行も触っていない）
+- (a) 実装: 5 本は同一の 3 行ブロックなので同一文に統一、`bench_formats.mojo:15-18` だけ前後の文が違うので
+  折り返し位置を合わせて 4 行に（全行 80 桁以内。`mojo format` は 1/6 段で無変更）
+- (b) 検証: `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` が **0 件**
+  （rc=1）。`tests/run_tests.sh:11-12` の「postgres:// URI）」はテスト側の真の制約なので**残っている**
+  （パターンの `never a` に当たらない）。`/home/parallels/.pixi/bin/pixi run check` **6/6 PASS**
+  （`final_check: PASS`、`FAIL` 0 行、`0 failed` のサマリ 47 件、6/6 段 `matched lines ...: 0`。
+  00:49:59 → 00:53:08 = **189 s**。基線 165〜189 s、閾値 247 s 以内。`scratch/turn-013-check.log`）。
+  チェックリスト（`scratch/turn-013-checklist.log`）は `turn-012-checklist.log` と **diff 0**（完全一致）で
+  `examples_pixi_run` = 7 / `readme_h2` = 10 / `readme_examples_links` = 10 / `hello_*` / `examples_raise_error` = 0
+  がすべて期待値
+- 想定外: なし
+- やり直し: 0 回
+- 次への注意: PLAN の全タスク（T1〜T7 / F1 / F2）が完了 → **verify round 3**。コードは不変（文書 6 行だけ）なので
+  VERIFICATION 申し送りどおり「F2 の `grep` 0 件 + `check` 6/6 + チェックリスト同値」の 3 点だけで、
+  堅牢性格子（`scratch/turn-012-robust-regress.sh`）と bench の再実行は不要。再実行できる証跡:
+  `scratch/turn-013-check.log`（189 s）/ `turn-013-checklist.log`（turn 12 と同値）。
+  `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで
