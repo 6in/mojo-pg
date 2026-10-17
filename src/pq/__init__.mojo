@@ -31,6 +31,14 @@ it is a wildcard that accepts **any** OID and returns the text unchanged; in
 binary it accepts only the six string-shaped OIDs in the table, because
 there is nothing sensible to hand back for the others.
 
+Every cell that becomes a `String`, a `StringSlice` or text handed to a
+decoder is checked as UTF-8 first: an invalid sequence is a `TYPE_MISMATCH`
+reading `invalid UTF-8 at byte N of column M`, with the cell's own bytes left
+out of the message. An embedded NUL is **not** invalid -- the length comes
+from `PQgetlength`, never from a NUL scan, so a `text` value holding a NUL
+arrives whole. What `pq` still does not do is set `client_encoding`; see
+`## Zero-copy access` for what that means for a non-UTF-8 database.
+
 | PostgreSQL | OID | Mojo type | text form | binary form |
 |---|---|---|---|---|
 | bool | 16 | `Bool` | `t` / `f` | 1 byte, 0 or 1 |
@@ -47,9 +55,9 @@ there is nothing sensible to hand back for the others.
 | time | 1083 | `Time` | `HH:MM:SS[.f]`, `24:00:00` included | int64 µs into the day |
 | timetz | 1266 | `TimeTz` | same plus `±HH[:MM[:SS]]` | int64 µs + int32 zone |
 | interval | 1186 | `Interval` | `IntervalStyle` `postgres` only | int64 µs + int32 days + int32 months |
-| text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is | as-is, `PQgetlength` bytes |
-| json | 114 | `String` | as-is | as-is |
-| jsonb | 3802 | `String` | as-is | leading version byte (1) stripped |
+| text, varchar, bpchar, name | 25, 1043, 1042, 19 | `String` | as-is, UTF-8 checked | same, `PQgetlength` bytes |
+| json | 114 | `String` | as-is, UTF-8 checked | same |
+| jsonb | 3802 | `String` | as-is, UTF-8 checked | same, leading version byte (1) stripped before the check |
 | bytea | 17 | `List[UInt8]` | `\\x` hex form only | the raw bytes |
 | anything else | -- | `String` in text, nothing in binary | as-is | `TYPE_MISMATCH`, pointing at `ResultFormat.TEXT` |
 
@@ -110,10 +118,13 @@ for row in res:
 - `get_text` accepts any OID in text format and only the six string-shaped
   OIDs in binary; `get_bytes` accepts every column in either format and hands
   back the region as it is, so a `bytea` is the eight bytes of `\\x00ff00` in
-  text format and the three bytes `00 ff 00` in binary. Neither validates
-  UTF-8, and `pq` never sets `client_encoding`: libpq defaults it to the
-  database's `server_encoding` (or `PGCLIENTENCODING`), and the tests only
-  check that this is `UTF8` on the test containers.
+  text format and the three bytes `00 ff 00` in binary. `get_text` checks the
+  region as UTF-8 and raises `TYPE_MISMATCH` with the byte offset when it is
+  not; `get_bytes` has no encoding to check. `pq` still never sets
+  `client_encoding`: libpq defaults it to the database's `server_encoding`
+  (or `PGCLIENTENCODING`), and the tests only check that this is `UTF8` on
+  the test containers -- against a non-UTF-8 database the check is what
+  fails, in place of a malformed slice.
 - Nothing in `pq` returns a `ref`; the origin travels with the slice.
 
 ## Parameters

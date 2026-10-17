@@ -320,6 +320,38 @@ def _async_backend_pid(mut conn: AsyncConnection) raises -> Int:
         raise Error(String(e))
 
 
+def _wait_until_active(mut conn: Connection, pid: Int, timeout_ms: Int) raises:
+    """Wait until `pg_stat_activity` reports backend `pid` as active.
+
+    Args:
+        conn: A synchronous connection to ask with, not the one being waited
+            on.
+        pid: The backend process ID to watch.
+        timeout_ms: Milliseconds allowed for the whole wait.
+
+    Raises:
+        Error: If the query failed, or if the backend was still not active
+            when the budget ran out.
+    """
+    var sql = String(
+        "SELECT count(*) FROM pg_stat_activity WHERE pid = ",
+        pid,
+        " AND state = 'active'",
+    )
+    var deadline = monotonic() + timeout_ms * 1_000_000
+    while True:
+        var res = _execute(conn, sql.copy())
+        var active: Int
+        try:
+            active = Int(res[0].get[Int64](0))
+        except e:
+            raise Error(String(e))
+        if active > 0:
+            return
+        if monotonic() >= deadline:
+            raise Error(String("backend ", pid, " never became active in time"))
+
+
 def _payload_at_the_limit() -> String:
     """Build the longest payload `NOTIFY` accepts.
 
@@ -387,7 +419,15 @@ def test_notification_waits_for_the_running_command() raises:
     _listen(listener, "pq_t5_during")
     var sender = _open(_conninfo())
     var sender_pid = _backend_pid(sender)
+    var listener_pid = _async_backend_pid(listener)
     _send(listener, "SELECT pg_sleep(0.3)")
+    # `send` only hands the bytes to libpq: the listening backend may not have
+    # read them yet, and while it has not it is still idle and delivers a
+    # notification immediately. So wait until the server itself reports the
+    # sleep as running before sending anything -- without this the assertion
+    # below fails whenever the NOTIFY commits first (measured: it does, under
+    # load).
+    _wait_until_active(sender, listener_pid, 2000)
     _ = _execute(sender, "NOTIFY pq_t5_during, 'during'")
     # The listening backend only delivers notifications between commands, so
     # nothing can have arrived while the sleep is still running.

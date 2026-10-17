@@ -31,7 +31,11 @@ view of the same storage, under the same origin rule.
 
 from std.ffi import c_int
 
-from pq.decode_binary import _string_payload, decode_binary
+from pq.decode_binary import (
+    _string_payload,
+    _validated_utf8,
+    decode_binary,
+)
 from pq.decode_text import decode_text
 from pq.errors import PgError, PgErrorKind, _reject_nul
 
@@ -533,6 +537,12 @@ struct Result(Iterable, Movable, Sized):
         A SQL NULL reads back as an empty string here; use `_is_null` to tell
         the two apart.
 
+        The length comes from `PQgetlength` rather than from a NUL scan, so a
+        `text` value holding an embedded NUL arrives whole instead of being
+        cut at the NUL, and the bytes are checked as UTF-8 before they become
+        a `String`: an invalid sequence is a `TYPE_MISMATCH` naming the byte
+        offset, not a silently mangled value.
+
         Args:
             row: Zero-based row index.
             col: Zero-based column index.
@@ -544,15 +554,24 @@ struct Result(Iterable, Movable, Sized):
         Raises:
             PgError: `TYPE_MISMATCH` when `PQgetvalue` returns NULL, which
                 only happens for an out-of-range coordinate that skipped
-                `_check_cell`.
+                `_check_cell`, or when the cell is not valid UTF-8.
         """
         var p = self._pq[].PQgetvalue(self._res, c_int(row), c_int(col))
-        if p:
-            return String(unsafe_from_utf8_ptr=p.value())
-        raise PgError(
-            PgErrorKind.TYPE_MISMATCH,
-            String("cell (", row, ", ", col, ") is out of range"),
+        if not p:
+            raise PgError(
+                PgErrorKind.TYPE_MISMATCH,
+                String("cell (", row, ", ", col, ") is out of range"),
+            )
+        var length = Int(
+            self._pq[].PQgetlength(self._res, c_int(row), c_int(col))
         )
+        var bytes = Span[UInt8, ImmUntrackedOrigin](
+            unsafe_ptr=Pointer[UInt8, ImmUntrackedOrigin](
+                unsafe_from_address=Int(p.value())
+            ),
+            length=length,
+        )
+        return String(_validated_utf8(bytes, col))
 
 
 struct Row[origin: ImmOrigin](Copyable):
@@ -710,7 +729,7 @@ struct Row[origin: ImmOrigin](Copyable):
             )
         var oid = self._res[].column_type_oid(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            return decode_binary[T](self._raw(col), oid)
+            return decode_binary[T](self._raw(col), oid, column=col)
         return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get[T: Copyable](self, col: String) raises PgError -> T:
@@ -775,7 +794,7 @@ struct Row[origin: ImmOrigin](Copyable):
             return None
         var oid = self._res[].column_type_oid(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            return decode_binary[T](self._raw(col), oid)
+            return decode_binary[T](self._raw(col), oid, column=col)
         return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get_optional[
@@ -825,13 +844,15 @@ struct Row[origin: ImmOrigin](Copyable):
            uninitialized value`), and there is no runtime guard for it.
            `_ = res^` is **not** a destroy: it is a keep-alive marker, so
            `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
-        3. The bytes are **not** validated as UTF-8, and `pq` never sets
+        3. The bytes are checked as UTF-8 before the slice is handed back, so
+           an invalid sequence raises `TYPE_MISMATCH` naming the byte offset
+           (the cell's own bytes are never put in the message) rather than
+           coming back as a malformed slice. What `pq` does **not** do is set
            `client_encoding`: libpq defaults it to the database's
-           `server_encoding` unless `PGCLIENTENCODING` says otherwise, so the
-           encoding is whatever the connection ended up with. The test suite
-           only checks that it is `UTF8` on the test containers; a connection
-           to a differently encoded database hands back whatever it hands
-           back.
+           `server_encoding` unless `PGCLIENTENCODING` says otherwise, so a
+           connection to a non-UTF-8 database turns every non-ASCII cell into
+           that `TYPE_MISMATCH`. The test suite checks the encoding is `UTF8`
+           on the test containers.
         4. No `ref` is returned, here or anywhere else in `pq`: the slice
            carries the origin, so there is no reference to outlive.
 
@@ -853,15 +874,15 @@ struct Row[origin: ImmOrigin](Copyable):
 
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL; `TYPE_MISMATCH`
-                when `col` is outside `0..Result.column_count() - 1`, or when
-                the column is binary and its OID is not one of the six, or
-                when a binary `jsonb` cell is empty or carries a version byte
-                other than 1.
+                when `col` is outside `0..Result.column_count() - 1`, when
+                the column is binary and its OID is not one of the six, when
+                a binary `jsonb` cell is empty or carries a version byte
+                other than 1, or when the cell is not valid UTF-8.
         """
         var bytes = self.get_bytes(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
             bytes = _string_payload(bytes, self._res[].column_type_oid(col))
-        return StringSlice[Self.origin](unsafe_from_utf8=bytes)
+        return _validated_utf8(bytes, col)
 
     def get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]:
         """Return column `col` of this row as a borrowed `Span` of bytes.

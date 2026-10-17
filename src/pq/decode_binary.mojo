@@ -37,7 +37,11 @@ number:
 
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
-UTF-8 is not validated, matching the text path's `Result._text`.
+The bytes are checked to be well-formed UTF-8 first, and a cell that is not
+raises `PgErrorKind.TYPE_MISMATCH` naming the byte offset and the column but
+never quoting the cell. `pq` still does not set `client_encoding`, so it is
+the server's `client_encoding` that decides whether cells arrive as UTF-8 at
+all.
 
 Every failure raises `PgError(PgErrorKind.TYPE_MISMATCH, ...)`; an OID
 mismatch message points the caller at `ResultFormat.TEXT` as the fallback.
@@ -219,6 +223,130 @@ def _string_payload[
     ):
         raise _binary_oid_error(oid, "String")
     return bytes
+
+
+def _utf8_first_invalid[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin]) -> Int:
+    """Return the offset of the first ill-formed UTF-8 sequence in `bytes`.
+
+    A direct walk of RFC 3629 table 3-7, so it rejects exactly what that
+    table rejects: an overlong encoding (`c0`/`c1`, `e0 80..9f`,
+    `f0 80..8f`), a UTF-16 surrogate (`ed a0..bf`), a code point above
+    U+10FFFF (`f4 90..` and `f5..ff`), a continuation byte outside
+    `80..bf`, a sequence cut short by the end of `bytes`, and a
+    continuation byte where a lead byte belongs. Used only to locate a
+    failure `StringSlice`'s own validation already found, so it trades
+    speed for being easy to check against the table.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The bytes to scan.
+
+    Returns:
+        -1 when every byte of `bytes` is part of a well-formed sequence,
+        otherwise the zero-based offset of the *start* of the first
+        ill-formed sequence.
+    """
+    var i = 0
+    var n = len(bytes)
+    while i < n:
+        var lead = bytes[i]
+        if lead < 0x80:
+            i += 1
+            continue
+        var trail: Int
+        var low = UInt8(0x80)
+        var high = UInt8(0xBF)
+        if lead >= 0xC2 and lead <= 0xDF:
+            trail = 1
+        elif lead == 0xE0:
+            trail = 2
+            low = 0xA0
+        elif lead == 0xED:
+            trail = 2
+            high = 0x9F
+        elif (lead >= 0xE1 and lead <= 0xEC) or lead == 0xEE or lead == 0xEF:
+            trail = 2
+        elif lead == 0xF0:
+            trail = 3
+            low = 0x90
+        elif lead >= 0xF1 and lead <= 0xF3:
+            trail = 3
+        elif lead == 0xF4:
+            trail = 3
+            high = 0x8F
+        else:
+            # `80..bf` is a stray continuation byte; `c0`/`c1` would be an
+            # overlong two-byte form; `f5..ff` is above U+10FFFF.
+            return i
+        if i + trail >= n:
+            return i
+        if bytes[i + 1] < low or bytes[i + 1] > high:
+            return i
+        for k in range(2, trail + 1):
+            if bytes[i + k] < 0x80 or bytes[i + k] > 0xBF:
+                return i
+        i += trail + 1
+    return -1
+
+
+def _validated_utf8[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin], column: Int) raises PgError -> StringSlice[
+    origin
+]:
+    """View `bytes` as UTF-8 text, raising when they are not UTF-8.
+
+    The fast path is the stdlib's own validator,
+    `StringSlice(from_utf8=...)`, which walks the bytes once and raises a
+    plain `Error` carrying no position. Only on that failure does
+    `_utf8_first_invalid` run, to turn the rejection into a byte offset
+    for the message, so a well-formed cell pays for one validation and
+    nothing else.
+
+    The message names the offset and the column but never quotes the
+    cell: a cell that is not UTF-8 cannot be put in an error message
+    without either corrupting the message or leaking the row's contents
+    into a log.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The text bytes of the cell, as `_string_payload` delimits
+            them -- for `jsonb` the version byte is already gone, so the
+            offset is relative to the JSON text.
+        column: Zero-based column index for the message, or -1 when the
+            caller does not know it, which prints `of column ?`.
+
+    Returns:
+        A `StringSlice` over `bytes`, borrowed from the same storage.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` with the message
+            `invalid UTF-8 at byte N of column M` when `bytes` are not
+            well-formed UTF-8.
+    """
+    try:
+        return StringSlice[origin](from_utf8=bytes)
+    except:
+        pass
+    var label = String("?") if column < 0 else String(column)
+    var offset = _utf8_first_invalid(bytes)
+    if offset < 0:
+        # Unreachable unless the scanner and the stdlib disagree; still a
+        # rejection, just without a position to name.
+        raise PgError(
+            PgErrorKind.TYPE_MISMATCH,
+            String("invalid UTF-8 of column ", label),
+        )
+    raise PgError(
+        PgErrorKind.TYPE_MISMATCH,
+        String("invalid UTF-8 at byte ", offset, " of column ", label),
+    )
 
 
 def decode_bool[
@@ -685,7 +813,9 @@ def decode_interval[
 
 def decode_binary[
     origin: ImmOrigin, //, T: Copyable
-](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> T:
+](
+    bytes: Span[UInt8, origin], oid: UInt32, column: Int = -1
+) raises PgError -> T:
     """Decode one binary-format PostgreSQL value into `T`.
 
     The column OID must match `T` exactly; no widening or narrowing
@@ -701,9 +831,11 @@ def decode_binary[
     compile-time error.
 
     A `jsonb` cell opens with a one byte format version, which must be 1;
-    the remaining bytes are the JSON text. `String` copies the bytes it is
-    handed verbatim, so an embedded NUL is preserved and UTF-8 is not
-    validated.
+    the remaining bytes are the JSON text. `String` copies the payload
+    bytes one for one, so an embedded NUL is preserved, but the payload
+    must be well-formed UTF-8: it is checked before the copy, and the
+    `jsonb` version byte is already gone by then, so a reported offset
+    counts from the start of the JSON text.
 
     Parameters:
         origin: Origin of the viewed bytes; inferred from `bytes`.
@@ -713,6 +845,9 @@ def decode_binary[
         bytes: The cell's binary-format bytes, as `PQgetvalue` and
             `PQgetlength` delimit them.
         oid: The column type OID reported by `PQftype`.
+        column: Zero-based column index, used only to name the column in
+            the `String` UTF-8 error. Defaults to -1, which prints
+            `of column ?`.
 
     Returns:
         The decoded value.
@@ -721,6 +856,10 @@ def decode_binary[
         PgError: `PgErrorKind.TYPE_MISMATCH` when `oid` does not match
             `T`, when a fixed-width cell has the wrong number of bytes, or
             when the wire value is outside the type's domain.
+        PgError: `PgErrorKind.TYPE_MISMATCH` with the message
+            `invalid UTF-8 at byte N of column M` when `T` is `String` and
+            the cell's payload is not well-formed UTF-8. The message names
+            the position only; it never quotes the cell.
     """
     comptime if T == Bool:
         if oid != OID_BOOL:
@@ -758,7 +897,8 @@ def decode_binary[
         var value = decode_float64(bytes)
         return rebind[T](value).copy()
     elif T == String:
-        var value = String(unsafe_from_utf8=_string_payload(bytes, oid))
+        var payload = _string_payload(bytes, oid)
+        var value = String(_validated_utf8(payload, column))
         return rebind[T](value).copy()
     elif T == List[UInt8]:
         if oid != OID_BYTEA:

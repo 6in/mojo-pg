@@ -949,8 +949,10 @@ def test_open_fixes_intervalstyle() raises:
 def test_client_encoding_is_utf8() raises:
     """The session encoding is UTF8, which `pq` assumes but never sets.
 
-    Text cells are handed to `String` without validation, so the assumption
-    has to hold somewhere; it holds because libpq defaults
+    Text cells are checked as UTF-8 on the way into `String`, so a
+    differently encoded database does not mangle values silently -- it turns
+    every non-ASCII cell into a `TYPE_MISMATCH`. The assumption that this
+    never fires still has to hold somewhere; it holds because libpq defaults
     `client_encoding` to the database's `server_encoding` unless
     `PGCLIENTENCODING` says otherwise, and the test containers are UTF-8.
     A connection to a differently encoded database would be the caller's
