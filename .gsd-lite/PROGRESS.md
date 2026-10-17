@@ -255,3 +255,50 @@
   - 未確認/契約外の積み残し（T8 (d) の表に入れる 4 件）: ① `PQcancel` が 0 を返す経路（契約外・turn 7） ② `PQsetSingleRowMode` が 0 を返す経路（契約外・turn 7）
     ③ `_after_send` で `PQflush` が -1（契約外・turn 7） ④ **`PQfreeCancel` の欠落（契約外・このターン。RSS では原理的に不可視、コードレビュー担保）**
   - `check` は 169 s（T4 169 s / T5 158 s と同水準）。T7 は bench 4 回ぶんが別途かかる
+
+## turn 9 — impl — T7 UTF-8 検証 + bench 記録 + docstring の「検証しない」文言の更新
+- やったこと: 推奨 1 本 / 実 **1 本**（サブエージェントが `decode_binary.mojo` のスキャナ + `test_decode_binary.mojo` の 8 件、
+  親が `result.mojo` / `__init__.mojo` / `test_connection.mojo` / `test_zero_copy.mojo` + bench 前後計測 + 統合検証）。
+  `_utf8_first_invalid`（RFC 3629 表 3-7 の直書き、最初の不正シーケンスの offset。正しければ -1）と `_validated_utf8`（速い経路は stdlib の
+  `StringSlice(from_utf8=)`、失敗時だけスキャナで位置を出して `invalid UTF-8 at byte N of column M`。セル本文は message に入れない）を
+  `decode_binary.mojo` に置き、`String` になる **3 経路**を通した: `decode_binary[String]`（`column: Int = -1` キーワード引数を足し `Row.get` / `get_optional` が列番号を渡す）/
+  `Result._text`（`PQgetvalue` + `PQgetlength` の `Span` を検証してから `String` 化）/ `Row.get_text`（戻りをそのまま返す）
+- **bench（D12。受け入れ条件ではない記録）**: 切替前 2 回 → 後 2 回（`scratch/turn-009-bench-{before,after}-{1,2}.log`。100,000 行 × 5 列 × 3 run）:
+  - text: decode **32〜33 ms → 41〜42 ms**（+9 ms、+28 %）、total **71〜76 ms → 83〜85 ms**
+  - binary: decode **7〜9 ms → 11〜13 ms**（+4 ms）、total **45〜47 ms → 49〜51 ms**
+  - 500,000 セルで +9 ms = **1 セルあたり約 18 ns**。stdlib の 1 回走査ぶんで、自前スキャナは正常系では走らない
+- **副産物（P25）**: `_text` が `PQgetlength` 基準になったので、NUL を含む text 値が NUL で切れなくなった（以前は C 文字列として読んでいた）
+- 既存テストの期待値変更: **ゼロ**。既存テストへの変更は 1 件だけで、期待値ではなく手順:
+  `tests/test_notify.mojo:385` `test_notification_waits_for_the_running_command` に `_wait_until_active`（`pg_stat_activity` が listener の backend を
+  `active` と報告するまで最大 2,000 ms 待つヘルパ）を挟んだ。理由: `send` は libpq にバイトを渡すだけで、listener の backend がまだクエリを読んでいなければ
+  **idle なので通知が即届く**。NOTIFY が先に commit するとこのテストの前提（「sleep 中は届かない」）が崩れる。T7 とは無関係の既存の競合で、
+  通しの 1 回目で実際に落ちた（`early` が 1 件、テスト全体が 9 ms で中断 = sleep が始まる前）。単体では 3 回連続 PASS だったので flake と確認してから直した。
+  P20 の主張（コマンド実行中は届かない）を弱めずに競合だけ消す形
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（**48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、
+  18:11:58 → 18:16:02 = **244 s**）、`pixi run check` **6/6 PASS**（18:16:11 → 18:19:18 = **187 s**。T6 の 169 s + 18 s）、`pixi run package` 警告ゼロ、
+  `pixi run fmt` は `test_notify.mojo` を 1 回整形（コミット前に反映）。`test_decode_binary` 単体は 88 件 **0.10 s**（サーバー不要）、`test_zero_copy` は 12 件 46 s
+- チェックリスト（T7 行）: `utf8_unsafe_span=0`（期待 0） / `result_unsafe_ptr=6`（6） / `utf8_from_utf8=2`（≥2） / `utf8_scanner_def=1`（1） /
+  `utf8_invalid_message=3`（≥1） / `docs_not_validated=0`（0） / `test_decode_binary_utf8_tests=8`（≥5） / `test_decode_binary_tests=88`（≥85）— **全行期待値**
+- 陽性対照（P26。サブエージェントが実測、親が差分で確認）: `_utf8_first_invalid` を直接呼び、stdlib が弾く 4 入力すべてで offset ≥ 0
+  （`6162c32863`→2 / `61e282`→1 / `c080`→0 / `eda080`→0）、正しい 2 入力（`68c3a9` と空）で -1。
+  併せて message にセル本文（`"ab"` と `0x28` の `"("`）が出ないことを 1 件で確かめている
+- PLAN 訂正 2 件（PLAN.md に追記済み）: ① T7 の対象一覧に `tests/test_notify.mojo` を追加（上記の競合修正）
+  ② チェックリスト T7 行に実測値と、`utf8_from_utf8=2` の内訳（実呼び出し `decode_binary.mojo:334` + docstring の引用 `:304`。実装箇所は 1 つ）を注記
+- 想定外: (1) 上記 `test_notify` の競合。T7 の変更とは無関係だが通しの 1 回目を落としたので、原因（libpq の送信と backend の実行開始のずれ）まで特定して直した。
+  (2) `test_zero_copy` が 1 テスト 3.4〜3.9 s かかる。T7 のせいかを疑い `git stash` で HEAD と A/B した（HEAD 41.4 s / 11 件、T7 後 46.3 s / 12 件 = 1 件ぶんの増分のみ）。
+  **接続あたりの固定費で、Phase 4 以前からの既存の性質**（他のファイルは 1 テスト 0.1 s 台なので、この 1 ファイルだけ `_connect` の作りが重い。原因未調査）
+- やり直し: 1 回（`pixi run test` の 1 回目が `test_notify` の競合で exit 1。原因特定 → ヘルパ追加 → 2 回目で green）
+- 次への注意:
+  - 確認済み: UTF-8 検証のコストは text decode に +28 %（1 セル 18 ns）で、`String` になる 3 経路すべてが `_validated_utf8` を通る。
+    サーバーからは不正 UTF-8 を作れない（`E'\xC3\x28'::bytea::text` は PG が拒否）ので、不正系は `test_decode_binary.mojo` の単体 8 件が唯一の担保。
+    `test_zero_copy.mojo` の追加 1 件はその旨を docstring に書いてある
+  - 未確認: `_validated_utf8` の「スキャナが -1 を返した（stdlib と食い違った）」分岐（`decode_binary.mojo:339-345`）は到達不能で未到達。
+    **誤った値が黙って返る経路ではない**（どちらに転んでも `TYPE_MISMATCH` を投げる。位置が出ないだけ）ので、**処分先は T8 (d) の「契約外」**
+  - T8 (d) の表に入れる未確認/契約外は **5 件**: ① `PQcancel` が 0 を返す経路（契約外・turn 7） ② `PQsetSingleRowMode` が 0 を返す経路（契約外・turn 7）
+    ③ `_after_send` で `PQflush` が -1（契約外・turn 7） ④ `PQfreeCancel` の欠落（契約外・turn 8。RSS では原理的に不可視、コードレビュー担保）
+    ⑤ **`_validated_utf8` のスキャナ不一致分岐（契約外・このターン）**
+  - サブエージェントからの契約外の提案（実装せず、記録のみ）: `f4 90 80 80` / `f5 80 80 80` の 4 バイト境界をスキャナの単体に足す案、
+    検証失敗に専用の `PgErrorKind.ENCODING` を作る案。どちらも Phase 5 以降の判断（契約は `TYPE_MISMATCH`）
+  - Mojo 1.1.0 のメモ（サブエージェント実測）: `len(StringSlice)` は不可（`byte_length()`）、`__origin_of` は廃止で `origin_of`、
+    `var x: Int`（初期値なし）＋全分岐代入は通る（`var x = 0` だと `never used` 警告が出る形があった）
+  - `check` は 187 s。T8 は `check` + `fmt` + `package` + examples 単体で 5 分前後を見込む（PLAN の「5 分を超えたら書く」の境目）

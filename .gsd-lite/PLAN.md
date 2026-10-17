@@ -75,7 +75,8 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 | `test_async` / `test_async_tests` / `test_notify` / `test_notify_tests` | §4.7 | absent | **exists / ≥ 8（T3）→ ≥ 20（T5）/ exists / ≥ 3（T4）→ ≥ 8（T5）** |
 | `example_async` / `example_notify` / `pixi_example_tasks` / `final_check_examples` / `final_check_run_logged_examples` | §4.6: examples 2 本、`pixi.toml:17-19` の並び、`final_check.sh:122-124` | absent / absent / 0 / 0 / 3 | **exists / exists / 2 / 2 / 5**（T4） |
 | `leak_tests` / `leak_Fourteen` / `leak_async_import` | §5.2: `test_leak.mojo:33`「Fourteen tests」→ Eighteen + 箇条書きに Phase 4 の段、`:55-60` の所要 | 14 / 1 / 0 | **18 / 0 / ≥ 1**（T6） |
-| `utf8_unsafe_span` / `result_unsafe_ptr` / `utf8_from_utf8` / `utf8_scanner_def` / `utf8_invalid_message` / `docs_not_validated` / `test_decode_binary_utf8_tests` | §4.10: `result.mojo:435,765`、`decode_binary.mojo:715,725`、docstring 4 箇所（`result.mojo:712`、`decode_binary.mojo:651`、`__init__.mojo:111`、`test_connection.mojo:952`） | 3 / 4 / 0 / 0 / 0 / 4 / 0 → **2 / 7**（T1・T2 後の実測） | **0 / 6 / ≥ 2 / 1 / ≥ 1 / 0 / ≥ 5**（T7。**訂正（T2 実装時）**: `result_unsafe_ptr` の現在値 4 → **7**、期待 3 → **6**。T2 が `_error_field` / `adopt_result` を `result.mojo` に移し、libpq のエラー文字列を読む `unsafe_from_utf8_ptr` が 3 行増えたため。残り 6 は `column_name` / `affected_rows` / `command_tag` + エラー文字列 3 で、いずれも列値ではないので UTF-8 検証の対象外。`utf8_unsafe_span` の現在値 3 → 2 は T1 の `_string_payload` 一元化による） |
+| `utf8_unsafe_span` / `result_unsafe_ptr` / `utf8_from_utf8` / `utf8_scanner_def` / `utf8_invalid_message` / `docs_not_validated` / `test_decode_binary_utf8_tests` | §4.10: `result.mojo:435,765`、`decode_binary.mojo:715,725`、docstring 4 箇所（`result.mojo:712`、`decode_binary.mojo:651`、`__init__.mojo:111`、`test_connection.mojo:952`） | 3 / 4 / 0 / 0 / 0 / 4 / 0 → **2 / 7**（T1・T2 後の実測） | **0 / 6 / ≥ 2 / 1 / ≥ 1 / 0 / ≥ 5**（T7 実測: 0 / 6 / 2 / 1 / 3 / 0 / 8 ＝ 全行期待値。**注（T7 実装時）**: `utf8_from_utf8` の 2 は
+`_validated_utf8` の実呼び出し 1 行（`decode_binary.mojo:334`）と、その docstring が形を引用する 1 行（`:304`）の合計。実装箇所は 1 つで、`String` になる 3 経路はすべてここを通る。**訂正（T2 実装時）**: `result_unsafe_ptr` の現在値 4 → **7**、期待 3 → **6**。T2 が `_error_field` / `adopt_result` を `result.mojo` に移し、libpq のエラー文字列を読む `unsafe_from_utf8_ptr` が 3 行増えたため。残り 6 は `column_name` / `affected_rows` / `command_tag` + エラー文字列 3 で、いずれも列値ではないので UTF-8 検証の対象外。`utf8_unsafe_span` の現在値 3 → 2 は T1 の `_string_payload` 一元化による） |
 | `src_def_ref_return` / `tests_files_count` / `test_file_count` | `ref` を返す公開 API を作らない（Phase 3 P19 の継続）/ テストファイル数 | 0 / 21 / 21 | **0 / 24 / 24**（T8 で確認。`test_poll` / `test_async` / `test_notify`） |
 
 ## Tasks
@@ -298,7 +299,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
   - 依存: T5
   - 並列サブ作業: なし（推奨本数: **0**。1 ファイル完結で実行待ちが支配）
 
-- [ ] T7: UTF-8 検証（§4.10 / D12 / RESEARCH §3-9）+ bench 記録 + docstring の「検証しない」文言の更新
+- [x] T7: UTF-8 検証（§4.10 / D12 / RESEARCH §3-9）+ bench 記録 + docstring の「検証しない」文言の更新
   - 完了基準:
     - (a) `src/pq/decode_binary.mojo` に `def _utf8_first_invalid[origin: ImmOrigin, //](bytes: Span[UInt8, origin]) -> Int`（RFC 3629 表 3-7 の約 30 行。overlong / サロゲート / 末尾切れ / 不正継続バイトを弾き、最初の不正位置を返す。全部正しければ -1）と
       `def _validated_utf8[origin: ImmOrigin, //](bytes: Span[UInt8, origin], column: Int) raises PgError -> StringSlice[origin]`（**決めた事項 13**: 速い経路 `StringSlice[origin](from_utf8=bytes)`（stdlib、位置なし）→ raise したら `_utf8_first_invalid` で N を求め
@@ -314,6 +315,8 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - (d) `pixi run bench`（`examples/bench_formats.mojo`）を切替**前**（T6 完了時点の木。`git stash` ではなく T7 着手前に 1 回走らせる）と切替**後**で各 2 回走らせ、text 列の decode 時間（Phase 3 実測: text total 75〜80 ms）を PROGRESS に単位付きで記録（受け入れ条件にしない。D12）
     - (e) `pixi run test` 両サーバー PASS（**既存テストの期待値変更ゼロ**。(c) の追加だけ）、`pixi run check` 6/6。チェックリストの T7 行が期待値
   - 対象: `src/pq/decode_binary.mojo`, `src/pq/result.mojo`, `src/pq/__init__.mojo`, `tests/test_decode_binary.mojo`, `tests/test_zero_copy.mojo`, `tests/test_connection.mojo`（docstring）
+    （**追加（T7 実装時）**: `tests/test_notify.mojo` — `test_notification_waits_for_the_running_command` が T7 とは無関係の競合で落ちた（`send` 直後は listener の backend がまだ idle で、
+    NOTIFY が先に commit すると「実行中の受信」になる）。`pg_stat_activity` が active を報告するまで待ってから NOTIFY する形に直した。PLAN の対象一覧には無かった）
   - 依存: T6
   - 並列サブ作業（推奨本数: **1**。スキャナ + 単体は 2 ファイル完結）:
     - A: (a) の `_utf8_first_invalid` + `_validated_utf8` + `decode_binary[String]` の差し替え + (c) の `test_decode_binary.mojo`（対象: `src/pq/decode_binary.mojo`, `tests/test_decode_binary.mojo`）
