@@ -231,3 +231,68 @@
   PostgreSQL は **17.11**、psycopg **3.3.4** + psycopg-c 3.3.4 impl=c、python **3.14.8**、libpq 18.6 conda-forge）。
   1 行要約の「N 倍」は decode で **約 3.7 倍**（42 / 11.3）。再現手順の「初回は環境作成で 1 分前後」は
   実測 3 s だったので「初回は bench 環境の作成が入る」程度の書き方にする。`check` の基線は 169 s に更新（閾値 247 s）
+
+## turn 8 — impl — T6 `README.md` + `LICENSE` + examples 5 本の docstring
+- やったこと: サブエージェント **推奨 1 本 / 実 1 本**（A: `LICENSE` 取得 + examples 5 本の docstring。
+  親: `README.md` + (d) 検証）。コミット `5c5a94d`（8 ファイル、+628 / -18）
+- 既存テストの期待値変更: **ゼロ**（`tests/` は 1 行も触っていない。`src/` も不変）
+- (a) `LICENSE`: `urllib.request.urlretrieve` で 1 回で取得（`scratch/turn-008-fetch-license.py`）。
+  **202 行 / 11,358 bytes**（公式値と完全一致）、`grep -c APPENDIX` = **1**、`license_apache` = 4。
+  CRLF なし（LF のみ）。無改変で置いた
+- (b) `README.md`: 日本語 **10 節**（`readme_h2` = 10）。コード片 **6 本**（basic / params ×2（バインド・
+  トランザクション）/ binary / async_query / listen_notify）、各 9〜15 行、直前に抜粋元ファイル名。
+  **逐語一致を機械確認**: `scratch/turn-008-readme-excerpts.py` → `blocks=6 missing_total=0`
+  （ログ `scratch/turn-008-readme-excerpts.log`）。原文のインデントのまま載せている
+- (d) 型表の目視突き合わせ: `scratch/turn-008-typetable.py` で `src/pq/__init__.mojo:42-62` と機械比較 →
+  **ヘッダ + 19 データ行で件数一致、OID 列 19 行すべて一致、Mojo 型列も一致**。差分 4 件はすべて
+  日本語化した散文のみ（`int8` 行の `(also readable as `Int`)` → `（`Int` でも読める）`、
+  最終行 `anything else` → `上記以外` / `--` → `—` / 「テキストでは `String`、バイナリでは無し」）。
+  OID と Mojo 型は 1 つも変えていない。`readme_type_oids` = **17**（期待 ≥ 17）
+- (d) `PgErrorKind` の突き合わせ: README の 8 行が `src/pq/errors.mojo` の宣言順
+  （`LIBPQ_LOAD` 0 / `CONNECTION` 1 / `SERVER` 2 / `NULL_VALUE` 3 / `TYPE_MISMATCH` 4 / `USAGE` 5 /
+  `TIMEOUT` 6 / `ENCODING` 7）と一致。印字名も `write_to` の 8 文字列（`LibpqLoad` … `Encoding`）と一致
+- (c) docstring: 5 本とも `Run it with \`pixi run example-<task>\`.` の 1 行を既存の
+  「The server comes from ...」段落の先頭に追加（`bench_formats.mojo:15` と同形）。
+  「何を見せるか」「前提」「`PgError` は印字して非 0」は 5 本とも既にあり**足していない**。
+  タスク名は `pixi.toml:17-21` で確認（`async_query` → `example-async`、`listen_notify` → `example-notify`
+  とファイル名と不一致の 2 本があるため推測せず確認）。`examples_pixi_run` = **7**
+- README のベンチ数値の原本: `scratch/turn-007-bench.log` の **pass 1**。転記した 12 セル
+  （Mojo text 40/43/44・42/42/44・83/86/88、Mojo binary 38/39/39・**12/11/11**・50/50/51、
+  psycopg text 40/42/42・44/45/41・84/87/83、psycopg binary 35/38/36・35/35/34・71/73/70）は
+  ログと 1 つずつ照合して一致。1 行要約は decode 約 **3.7 倍**（42 → 11）、合計約 **1.7 倍**（83 → 50）
+- 検証と所要: `pixi run fmt` = `52 files left unchanged`（統合後 1 回）。
+  `pixi run check` **6/6 PASS**（`final_check: PASS`、`FAIL` 0 行。00:03:59 → 00:07:06 = **187 s**。
+  基線 169 s、閾値 247 s 以内）。4/6 段で 5 本の examples が docstring 変更後も全部走った
+  （`column_format(0) = Binary` / `rows = 2` / `backend_pid = 165867` まで出ている）。
+  `pixi run hello-libpq` = `PQlibVersion = 180006 (PostgreSQL 18.6)`。
+  チェックリストの T6 行は**全行期待値**（`readme`/`license` = exists、`readme_h2` = 10、
+  `readme_copyright` = 1、`readme_unverified_windows` = 3、`readme_ENCODING` = 3、
+  `readme_wait_notifications` = 2、`readme_db_reset` = 2、`readme_bench_psycopg` = 2、
+  `readme_PQ_MOJO_LIBPQ` = 1、`readme_type_oids` = 17、`readme_examples_links` = 9、
+  `license_appendix` = 1、`license_lines` = 202、`examples_pixi_run` = 7）。
+  T7 の期待値も現時点で `src_def_ref_return` = 0 / `tests_files_count` = 24 / `test_file_count` = 24。
+  生ログ: `scratch/turn-008-{checklist,readme-excerpts,typetable,check,hello}.log`
+- 想定外: (1) **PLAN 訂正 2 件**（PLAN T6 (a)(b) に追記）: ① 完了基準の `head -3 LICENSE` は実物と
+  1 行ずれていた — 公式 `LICENSE-2.0.txt` は**先頭が空行**なので期待の 3 行は 2〜4 行目に出る。
+  `head -3` → `head -4` に訂正（ファイルは無改変を優先。行数 202 / バイト数 11,358 が公式値と完全一致
+  しているので全文同一の裏は取れている）。② (b) の「節立て 11 節」は決めた事項 11 の列挙が 1〜10 の
+  **10 節**なので「10 節」に訂正（チェックリストの `readme_h2 ≥ 10` は充足）。
+  (2) サブエージェントへの依頼文に書いたビルド確認コマンドに `-I src` が無く
+  `error: unable to locate module 'pq'` になった。`pixi.toml:24` の `build` タスクと同じ
+  `mojo build -I src examples/<f>.mojo` で 5 本ともエラー・警告なしで通った（判断はサブ側で正しく修正済み）。
+  (3) `check` が 187 s（前ターン 169 s）。閾値 247 s 内なので追わない
+- やり直し: **1 回**（README のコード片。最初に 8 スペース分デインデントして書き、さらに
+  async 例で `try`/`except` を省いた縮約形にしてしまった。P18 の「抜粋した行がそのまま存在する」を
+  満たさないので、6 本すべて**原文のインデントのまま・行単位で逐語**に書き直し、
+  `scratch/turn-008-readme-excerpts.py` で機械確認するところまでやった）
+- 次への注意: 次は **T7（統合。最後のタスク）**。サブエージェント **0 本（親が全部）**。
+  **`pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで**。
+  T7 で使う値: `check` の基線は **187 s**（閾値 247 s）、コンテナは起動済み（pg17 54317 / pg14 54314 /
+  blackhole 54399）だが (a) は `pixi run db-reset` から始める。
+  (b) の格子は `scratch/turn-001-examples-robust.sh` を `turn-009-examples-robust.sh` にコピーして
+  `bench-psycopg` の badpw / badport 2 本 + `hello_libpq nolib` を足して **17 本以上**。
+  `bench-psycopg` は `bench` 環境なので `pixi run bench-psycopg` のまま `PQ_TEST_CONNINFO` を付ける。
+  (d)(e) は `TRACE.md` に 2 節追加（受け入れ基準対応表 / 未確認行の処分表）。
+  (e) の「未確認」行は turn 3 以降の PROGRESS を `grep -n '未確認' .gsd-lite/PROGRESS.md` で拾う。
+  (f) のチェックリストは `turn-008-checklist.log` が直前の全行の現在値（T6 行まで全部期待値なので、
+  T7 では `turn-009-checklist.log` を取り直して全行を突き合わせるだけ）
