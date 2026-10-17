@@ -302,3 +302,33 @@
   - Mojo 1.1.0 のメモ（サブエージェント実測）: `len(StringSlice)` は不可（`byte_length()`）、`__origin_of` は廃止で `origin_of`、
     `var x: Int`（初期値なし）＋全分岐代入は通る（`var x = 0` だと `never used` 警告が出る形があった）
   - `check` は 187 s。T8 は `check` + `fmt` + `package` + examples 単体で 5 分前後を見込む（PLAN の「5 分を超えたら書く」の境目）
+
+## turn 10 — impl — T8 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
+- やったこと: 推奨 0 本 / 実 **0 本**。`src/pq/__init__.mojo` の `## Asynchronous use` 節に**公開 API の全表**
+  （16 行、`AsyncConnection` の全メソッド × 返り値 × raise する `PgErrorKind`）を足し、`.gsd-lite/TRACE.md` を新設して
+  §1 チェックリスト最終実行 / §2 受け入れ基準の対応表 / §3「未確認」行の処分表（10 件）を置いた
+- (a) 名前の一致: HANDOFF §7.2 の 8 名（`start` / `poll_connect` / `socket` / `send` / `poll_result` / `notifications` / `cancel` / `wait_*`）は
+  すべて実装済み・表に記載。`PgErrorKind` 節の 7 件と `TIMEOUT` の説明は既存のまま一致。docstring は `check` 3/6 段が機械判定（**0 missing**）
+- (b) チェックリスト再実行: **全 85 行が期待値**（`absent` 0 件）。`test_file_count=24`、`src_def_ref_return=0`、
+  `tests_files_count=24`。生出力は `TRACE.md` §1（85 行）
+- (c)(d) TRACE.md §2 / §3 に表。REQ §5.1 の 4 件・§5.2 の 4 項目・§5.3 の 3 項目・§5.4 の 5 項目・§4.8〜§4.10 を
+  「担うテスト関数 / コマンド」と「turn N で PASS」で対応づけた。§3 は 10 件を **テスト追加 1 / 契約外 7 / verify 申し送り 2** に振り分け。
+  「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べた行は**残っていない**（各ターンで判定済み。このターンで追加したテストは 0 件）
+- 既存テストの期待値変更: **ゼロ**（このターンはテストを 1 行も触っていない。変更は `__init__.mojo` の docstring と `.gsd-lite/` のみ）
+- 検証（所要つき）: `pixi run fmt` → `52 files left unchanged`（差分なし）、`pixi run package` 警告ゼロ、
+  `pixi run test` 両サーバー **48 サマリ全部 0 failed**・exit 0（18:26:15 → 18:31:29 = **314 s**）、SKIP 集計行が各サーバーに 1 本ずつ、
+  `pixi run check` **6/6 PASS**（18:31:40 → 18:34:40 = **180 s**。`final_check: PASS`、6/6 段の一致行 0）、
+  `pixi run example-async`（`n = 1` / `empty polls while waiting = 19`）と `pixi run example-notify`（`channel = pq_example` / `payload = hello from pq` / `backend_pid = 1541121`）が単体実行で成功
+- PLAN 訂正 1 件（PLAN.md に追記済み）: T8 (c) の「`grep -c 'Copyable' src/pq/async_conn.mojo` が `Notification` の 1 行だけ」→ **2**。
+  `AsyncConnection` の docstring が「`Movable` and not `Copyable`」と述べる `:43` を数え落としていた。`struct AsyncConnection(Movable)`（`:277`）に `Copyable` は無いので要件自体は満たす
+- 想定外: なし
+- やり直し: 0 回
+- 次への注意:
+  - 確認済み: Phase 4 の全 8 タスク完了。`pixi run test` 314 s / `pixi run check` 180 s（PLAN の見込み 330〜360 s / 260〜300 s より速い。
+    実測が見込みを下回ったのは leak が `check` では 1 サーバーのみのため）。テストファイル 24 本、`test_async` 29 件 / `test_notify` 9 件 / `test_poll` 9 件
+  - verify への申し送り（TRACE.md §3 の「verify 申し送り」2 件）: ① `poll.mojo` の Windows 分岐は未コンパイル・未検証
+    （モジュール docstring に **unverified** 明記。Phase 5 の「Windows 用コードパスのレビュー」が引き取る）
+    ② `test_zero_copy` が 1 テスト 3.4〜3.9 s（Phase 4 以前からの既存の性質。A/B 済み。Phase 5 のベンチマークが引き取る）
+  - verify が照合すべき一覧: 既存テストの期待値変更は Phase 4 全体で **ゼロ**（turn 9 の `test_notify.mojo:385` への
+    `_wait_until_active` 挿入だけが既存テストへの変更で、期待値ではなく手順。理由は turn 9 に記載）
+  - 未確認: なし（TRACE.md §3 で 10 件すべてを処分済み）
