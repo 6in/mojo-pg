@@ -239,7 +239,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: (d) `examples/async_query.mojo` + `examples/listen_notify.mojo` + `pixi.toml` + `tests/final_check.sh`（対象: その 4 ファイル）
     - 親: (a)(b)(c)(e)(f)(g)
 
-- [ ] T5: テスト格子（**`src/` は原則触らない**。テストが露わにしたバグの修正だけ許す）— `tests/test_async.mojo` 第 2 弾 + `tests/test_notify.mojo` 完成 【REQ §9 の実験: 「src を触らずテスト 2 ファイル」型を **1 本** で】
+- [x] T5: テスト格子（**`src/` は原則触らない**。テストが露わにしたバグの修正だけ許す）— `tests/test_async.mojo` 第 2 弾 + `tests/test_notify.mojo` 完成 【REQ §9 の実験: 「src を触らずテスト 2 ファイル」型を **1 本** で】
   - 完了基準:
     - (a) `tests/test_async.mojo` 第 2 弾（RESEARCH §4 の検証欄をそのまま。12 件以上）:
       ① **USAGE 格子**（P9 / P34。メッセージは決めた事項 8 の自前文言で、libpq の `another command is already in progress` / `no connection to the server` を**含まない**）: 結果待ち中 send（`send("SELECT pg_sleep(0.2)")` 直後の `send("SELECT 1")` → `USAGE` `"called while Busy"`（`SENDING` の可能性もあるので `"called while"` + kind で断定し、状態名は `Busy` か `Sending` のどちらか）；
@@ -247,9 +247,18 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
       `poll_result` 1 回呼んだ後の `set_single_row_mode()` → `USAGE`（P13）；`consume_input()` 後の `set_single_row_mode()` → `USAGE`；接続中（`start` 直後）の `cancel()` / `consume_input()` / `poll_result()` / `notifications()` / `fetch_all(100)` → 全部 `USAGE` `"called while Connecting"`；
       `IDLE` の `poll_result()` → `None`、`fetch_all(100)` → 空 `List`（例外なし）；`wait_readable(-2)` → `USAGE` `"timeout_ms must be"`。
       **陽性対照**（P9）: `send` の状態検査を一時的に外したコピーで「結果待ち中 send」が `CONNECTION` + libpq 文言になることを 1 回実測し PROGRESS に貼る（コピーは `scratch/turn-NNN-usage-positive.mojo`、`src/` は戻す）；
-      ② **cancel 4 格子**（P16）: idle（T4 ②で済）/ connecting（①で済）/ busy（T4 ①で済）/ **切断後**: `pg_terminate_backend` で切ってから `cancel()` → `CONNECTION`；
+      ② **cancel 4 格子**（P16）: idle（T4 ②で済）/ connecting（①で済）/ busy（T4 ①で済）/ **切断後**: `pg_terminate_backend` で切ってから `cancel()` → `CONNECTION`
+      （**訂正（T5 実装時）**: `fetch_all` で結果を取り切ると下記 ④ の修正により状態が `IDLE` になり、`cancel()` は契約どおりの no-op になって `CONNECTION` が出ない。
+      切断を**`consume_input()` で観測する**——これが P21 / P32 のとおり状態を `BUSY` のまま残す唯一の入口——と `BUSY` かつ接続が死んだ状態が作れるので、そこで `cancel()` を呼ぶ。
+      `consume_input()` は 1 回目では失敗しない（カーネルが farewell と EOF を届けるのに 1〜2 往復かかる。実測 2〜3 回）のでリトライループにする）；
       ③ **tx 内 cancel**（P15 / async2 D）: `send("BEGIN")` → `fetch_all` → `send("SELECT pg_sleep(10)")` → `wait_readable(100)` → `cancel()` → `fetch_all` が `57014` → `transaction_status() == PQTRANS_INERROR` → `send("SELECT 1")` → `fetch_all` が `SERVER 25P02` → `send("ROLLBACK")` → `fetch_all` → `PQTRANS_IDLE`；
-      ④ **切断**（P21 / P32）: 別の同期 `Connection` から `SELECT pg_terminate_backend(<async の pg_backend_pid>)`（pid は async で `SELECT pg_backend_pid()` を先に取る）→ async `send("SELECT pg_sleep(5)")` の `fetch_all(5000)` が `SERVER 57P01` **または** `CONNECTION`（競合。両方許容）→ その後 `send("SELECT 1")` が `USAGE`（`BUSY` のまま）または `CONNECTION`、`poll_result()` を `None` まで呼ぶと途中で `CONNECTION`（sqlstate 空）が出て最終的に `state() == IDLE`、`socket() == -1`、`status() == CONNECTION_BAD`、`send` が `CONNECTION` `"no connection"`（libpq 文言を含んでよい: 自前検査は状態だけで接続生死は libpq に任せる。決めた事項 8）；
+      ④ **切断**（P21 / P32）: 別の同期 `Connection` から `SELECT pg_terminate_backend(<async の pg_backend_pid>)`（pid は async で `SELECT pg_backend_pid()` を先に取る）→ async `send("SELECT pg_sleep(5)")` の `fetch_all(5000)` が `SERVER 57P01` **または** `CONNECTION`（競合。両方許容）→ その後 `send("SELECT 1")` が `USAGE`（`BUSY` のまま）または `CONNECTION`、`poll_result()` を `None` まで呼ぶと途中で `CONNECTION`（sqlstate 空）が出て最終的に `state() == IDLE`、`socket() == -1`、`status() == CONNECTION_BAD`、`send` が `CONNECTION` `"no connection"`（libpq 文言を含んでよい: 自前検査は状態だけで接続生死は libpq に任せる。決めた事項 8）
+      （**訂正（T5 実装時）**: このテストが `src/pq/async_conn.mojo` のバグを露わにした。`poll_result` は `PQconsumeInput` が 0 のとき常に `BUSY` を保っていたため、
+      接続が死ぬと終端 NULL が永遠に来ず `poll_result` ループが**無限に回り**、以降の `send` がすべて `USAGE "called while Busy"` になっていた（実測: 5 回連続で `Connection` + `Busy`）。
+      修正は `poll_result` 専用の私用 `_consume_or_end_command`: `PQconsumeInput` が 0 かつ `PQstatus == CONNECTION_BAD` なら `_state = IDLE` にしてから `CONNECTION` を投げる。
+      公開 `consume_input()` は P21 / P32 のとおり `BUSY` を保つまま（上記 ② がこれを使う）。
+      修正後は `fetch_all` の drain がそのまま `IDLE` まで進むので、テストは `while state != IDLE: poll_result` で残りを片付けてから `poll_result() == None`・`socket() == -1`・
+      `status() == CONNECTION_BAD`・`send` が `CONNECTION "no connection to the server"` を見る形にした。`fetch_all` 直後の状態は競合（`PQstatus` が BAD になるタイミング）なので断定しない）；
       ⑤ **16 MB flush**（P12）: `send(String("SELECT length('", "x" * 16000000, "')"))` → `flush()` を `True` までループ（0 回以上。`False` なら `wait_writable(2000)`）→ `fetch_all(10000)` の `get[Int32](0) == 16000000`。`state()` が `SENDING` だったかは**断定しない**；
       ⑥ **single-row 多文 / prepared**（P13）: `send("SELECT 1; SELECT 2")` + `set_single_row_mode()` → `fetch_all` が **4 件**（1 行, 0 行, 1 行, 0 行）；`send_prepare("sr", "SELECT generate_series(1,$1::int4)")` → `send_prepared("sr", [Int32(2)])` + `set_single_row_mode()` → 3 件；
       ⑦ **multi-host**（P3）: `connect_blocking("host=127.0.0.1,127.0.0.1 port=1,<port> user=pq password=pq dbname=pq_test", 5000)` が成功（`<port>` は `_conninfo()` から取る）；

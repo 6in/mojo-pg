@@ -168,3 +168,55 @@
   - 未確認: `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）は未実測。切断済み接続で `PQgetCancel` が非 NULL を返すか 0 を返すかは
     research プローブ L 行の挙動次第で、**処分先は T5 ②「切断後 cancel → CONNECTION」**（既に PLAN にある）。`PQsetSingleRowMode` が 0 を返す分岐も未到達（契約上起こらない想定）
   - `check` は 169 s で 5 分に届かず。T5 で 16 MB クエリ + 切断テストが乗るので再計測する
+
+## turn 7 — impl — T5 テスト格子（test_async 第 2 弾 / test_notify 完成）
+- やったこと: 推奨 1 本 / 実 **1 本**（サブエージェントに `tests/test_notify.mojo` の 6 件、親が `tests/test_async.mojo` の 16 件 + 陽性対照 + 期待値取り直し + 検証）。
+  `test_async.mojo` は 13 → **29 件**（USAGE 格子 6 件 / cancel 切断後 / tx 内 cancel / 切断 / 16 MB flush / single-row 多文・prepared / multi-host / 接続失敗 3 種 /
+  未読結果ありの drop / パラメータのコピー / NUL 4 経路）、`test_notify.mojo` は 3 → **9 件**（実行中受信 / payload 7999 byte と UTF-8 / commit 配送 / 自己通知 / `_pending` 即返し / 切断）
+- **`src/` の差分: バグ修正 1 件**（T5 の「テストが露わにしたバグ」枠。`src/pq/async_conn.mojo`、+20 / -3 行）:
+  `poll_result` が `PQconsumeInput` の失敗時に常に `BUSY` を保っていたため、**接続を失うと終端 NULL が永遠に来ず `poll_result` ループが無限に回り**、
+  以降の `send` がすべて `USAGE "called while Busy"` になっていた（プローブ `scratch/turn-007-probe-disconnect.mojo` で 5 回連続 `Connection` + `Busy` を実測）。
+  修正は `poll_result` 専用の私用 `_consume_or_end_command`: `PQconsumeInput` が 0 かつ `PQstatus == CONNECTION_BAD` なら `_state = IDLE` にしてから `CONNECTION` を投げる。
+  公開 `consume_input()` は P21 / P32 のとおり `BUSY` を保つまま（T5 ② の切断後 cancel がこの入口を使う）。`poll_result` の docstring に 1 文追記
+- 陽性対照（P9。`scratch/turn-007-usage-positive.mojo` を 2 回）: `send(var sql)` の `_require_state("send", AsyncState.IDLE)` を外すと
+  結果待ち中の 2 回目の `send` が **`Connection` / `"another command is already in progress"`**（libpq の文言）になる。検査を戻すと **`Usage` / `"send() called while Busy"`**。
+  どちらの実行でも `state()` は `Busy` のまま。`src/` は `git checkout src/pq/async_conn.mojo` で戻し `git status` が clean を確認（コミット済みの修正は保持）
+- 期待値の取り直し（REQ §9 常設。`scratch/turn-007-probe-expect.mojo`、同期 `Connection` のみ）: `25P02` = `current transaction is aborted, commands ignored until end of transaction block` /
+  `26000` = `prepared statement "nope" does not exist` / `could not translate host name "nonexistent.invalid" to address: Name or service not known` /
+  `Connection refused` / `password authentication failed for user "pq"` — すべてテストの期待と一致。
+  **`57P01` は取り直しで値が違った**: 自分の backend を `pg_terminate_backend(pg_backend_pid())` で落とすと `Connection` / `server closed the connection unexpectedly` になり、
+  `Server 57P01 terminating connection due to administrator command` は**別接続から落としたとき**だけ出る（`scratch/turn-007-probe-disconnect.mojo` で確認）。テストは別接続から落とす形なので期待どおり
+- 既存テストの期待値変更: **ゼロ**（既存 13 + 3 件は無変更。`src/` の変更は上記バグ修正のみで、既存テストの期待値には触れていない）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（24 ファイル × 2 = **48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、17:22:28 → 17:26:16 = **228 s**）、`pixi run check` **6/6 PASS**（17:27:04 → 17:29:42 = **158 s**）、
+  `pixi run package` 警告ゼロ、`pixi run fmt` は `test_async.mojo` を 1 回整形（コミット前に反映）。
+  `test_async` 単体は **3.5〜3.6 s**（PG17。内訳は `pg_sleep(2)` 2,030 ms + connect タイムアウト 561 ms + busy send 269〜306 ms + 16 MB 88〜95 ms + tx cancel 109〜222 ms）、
+  `test_notify` 単体は **1.0〜1.2 s**。`run_tests.sh` の計測では `test_async` が 15 s（PG17）/ 7 s（PG14）、`test_notify` が 6 s / 3 s（コンパイル込み）
+- チェックリスト（T5 行）: `test_async_tests=29`（≥20） / `test_notify_tests=9`（≥8） / `src_PQexec_calls=4` — **期待値**。
+  併せて `src_def_ref_return=0` / `tests_files_count=24`・`test_file_count=24` / `tests_print_SKIP=5` / `async_public_defs=27` / `async_called_while=7` /
+  `src_PQfinish_calls=5` / `src_PQfreemem_calls=3` / `src_PQfreeCancel_calls=1`（T8 の期待値に到達済み）
+- PLAN 訂正 2 件（どちらも上記バグ修正の帰結。PLAN.md の T5 (a) ②④ に追記済み）:
+  - ④: 修正後は `fetch_all` の drain がそのまま `IDLE` まで進む。`fetch_all` 直後の状態は `PQstatus` が BAD になるタイミング次第の競合なので断定せず、
+    `while state != IDLE: poll_result`（各回 `CONNECTION` sqlstate 空）で片付けてから `poll_result() == None` / `socket() == -1` / `status() == CONNECTION_BAD` /
+    `send` が `CONNECTION "no connection to the server"` を見る形にした
+  - ②: `fetch_all` 後は `IDLE` なので `cancel()` は契約どおりの no-op になり `CONNECTION` が出ない。切断を **`consume_input()` で観測する**（`BUSY` を保つ唯一の入口）と
+    「`BUSY` かつ接続が死んでいる」状態が作れる。`consume_input()` は 1 回目では失敗しない（実測 2〜3 回必要。サブエージェント側の `notifications()` も同じ 2〜3 回）のでリトライループにした
+- 想定外: (1) 上記のバグ（切断時に状態機械が `BUSY` で固まる）。T3 の「次への注意」で `fetch_all` の drain 打ち切りは確認済みと書いたが、**手書きの `poll_result` ループ側が無限に回る**のは見落としていた。
+  (2) `prefix^ + chr(0)` が `prefix ^ (+chr(0))` と解釈されて `'String' does not implement the '__pos__' method`（`var` 引数にしたのが原因。`tests/test_connection.mojo` と同じ借用引数に直した）。
+  (3) `pg_terminate_backend(pg_backend_pid())` の自己終了は `57P01` ではなく `CONNECTION`（上記「期待値の取り直し」）
+- やり直し: 3 回（(2) のコンパイルエラー 1 回、切断テストが落ちてバグ修正 1 回、修正で `fetch_all` の終状態が変わって T5 ②④ のテストを書き直し 1 回。いずれも 1 回で直った）
+- 次への注意:
+  - 確認済み: `single_row_mode` は多文 `send` では**文ごと**に働く（`SELECT 1; SELECT 2` + `set_single_row_mode` = 4 件: 1 行 / 0 行 / 1 行 / 0 行）。
+    16 MB の文は `flush()` ループで書き切れる（`state()` が `SENDING` だったかは断定しない）。multi-host（`port=1,<port>`）は `connect_blocking` で成功する。
+    接続拒否ポートは `start` が成功して `poll_connect` 側で `Connection refused`（`wait_writable` は writable を先に見るので POLLERR 文言にならない）。
+    切断後の `notifications()` も `CONNECTION` が出るまで 2〜3 回かかる（サブエージェント実測）
+  - 未確認: `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）は**依然未到達**。T5 ② の切断後 cancel は `PQgetCancel` が NULL を返す側（`_connection_error`）に当たった。
+    「誤った値が黙って返る経路」でも「状態機械が壊れる経路」でもない（cancel の失敗は必ず `CONNECTION` になる）ので、**処分先は T8 (d) の「契約外」**（libpq に `PQcancel` を 0 で返させる条件を作れない）。
+    `PQsetSingleRowMode` が 0 を返す分岐も同様に未到達・契約外
+  - `_after_send` で `PQflush` が **-1** を返したときに状態を `IDLE` のままにしている件（turn 6 の未確認）は T5 ④ でも再現できなかった（送信は一瞬で終わる）。
+    **T8 (d) で「契約外（libpq が -1 を返す条件を作れない）」に分類する**
+  - サブエージェントからの契約外の提案（実装せず、記録のみ）: `AsyncConnection.wait_notifications(n, timeout_ms)` の追加、`notifications()` 側での `PQstatus == CONNECTION_BAD` 先行チェック、
+    テスト追加候補（`UNLISTEN` 後に来ないこと / LISTEN していないチャンネルの無視 / `LISTEN "Mixed Case"`）。いずれも Phase 5 以降の判断
+  - `test_notify.mojo` ⑥ は libpq の notice `FATAL: terminating connection due to administrator command` を stderr に出すが、`final_check.sh` 6/6 段の grep
+    （`warning:|WARNING:|implicit ROLLBACK failed`）には当たらないので 6/6 は PASS のまま（実測済み）
+  - `check` は 158 s（T4 の 169 s とほぼ同じ。16 MB と切断が乗っても増えなかった）。T6 の leak 4 ループで +15 s 程度を見込む
