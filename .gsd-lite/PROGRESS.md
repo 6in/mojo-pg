@@ -434,3 +434,18 @@
   堅牢性格子（`scratch/turn-012-robust-regress.sh`）と bench の再実行は不要。再実行できる証跡:
   `scratch/turn-013-check.log`（189 s）/ `turn-013-checklist.log`（turn 12 と同値）。
   `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで
+
+## turn 14 — verify — 合格（指摘 0 件）/ round 3 / `main` にローカルマージ済み（`--no-ff`）
+- やったこと: F2 の差分（examples 6 本の docstring、+18 / -17）をレビューし、PLAN F2 の表どおり `grep -rn 'never a .postgres://. URI' …` **0 件**、
+  README §7 / `connection.mojo:169-172` / `run_tests.sh:10-13` と矛盾なし、80 桁超 0 行。`db-up`（3 台 Healthy）→ `pixi run check` **6/6 PASS**
+  （`final_check: PASS`、rc 0、`0 failed` 47 件、`FAIL` / `Traceback` 0 行、6/6 段 `matched lines` 0。00:55:46 → 00:58:52 = **186 s**、閾値 247 s）、
+  チェックリスト 82 key は `turn-013-checklist.log` と `diff` 空、`pg_database` は pg17 / pg14 とも 0 行。VERIFICATION §6 を書いて branch にコミット（`c88173e`）→
+  `git checkout main` → `git merge --no-ff gsd-lite/phase5-polish-bench-readme`（衝突なし、38 ファイル）。ブランチは残した。サブエージェント 0 本。
+  格子（`turn-012-robust-regress.sh`）と bench の再実行は省略（コード不変。PLAN F2 の表で任意）。生ログ: `scratch/turn-014-{check,checklist}.log`
+- 想定外: なし（lean-ctx MCP は未接続だが PROGRESS の対象外）
+- やり直し: 0 回
+- 次への注意: 次は **reflect**。材料: verify は 3 ラウンド（round 1 = 堅牢性 2 クラス + README 字句、round 2 = round 1 が同文をリポジトリ全体で grep しなかったことによる docstring 6 本の差し戻し、
+  round 3 = 合格）。round 2 の F2 は「字句の指摘はクラスで名指しし `grep -rn` で全件を同梱する」（REQ §9 verify）を round 1 が守っていれば F1 に同梱できた 1 ターン分。
+  他に reflect の材料: `check` の所要は 165〜215 s で揺れた（閾値 247 s 内）、impl の格子 17 本は「DB 側の失敗」だけで出力経路・入力エンコードの面が無かった（verify round 1 が補った）、
+  `test_zero_copy` の「3.4 s」は単位の読み違いで性能問題は無かった（research turn 1）。REQ §9 の「テスト 2 ファイル型を 1 本」の USD 比較も reflect の宿題。
+  作業ツリーは `main` 上（マージ済み）。次マイルストーンの discuss が `main` から始める
