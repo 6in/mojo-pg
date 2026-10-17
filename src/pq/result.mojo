@@ -31,22 +31,8 @@ view of the same storage, under the same origin rule.
 
 from std.ffi import c_int
 
-from pq.decode_binary import (
-    _JSONB_VERSION,
-    _binary_length_error,
-    _binary_oid_error,
-    _binary_value_error,
-    decode_binary,
-)
-from pq.decode_text import (
-    OID_BPCHAR,
-    OID_JSON,
-    OID_JSONB,
-    OID_NAME,
-    OID_TEXT,
-    OID_VARCHAR,
-    decode_text,
-)
+from pq.decode_binary import _string_payload, decode_binary
+from pq.decode_text import decode_text
 from pq.errors import PgError, PgErrorKind, _reject_nul
 
 from ._ffi.functions import LibpqFFI
@@ -744,24 +730,7 @@ struct Row[origin: ImmOrigin](Copyable):
         """
         var bytes = self.get_bytes(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            var oid = self._res[].column_type_oid(col)
-            if oid == OID_JSONB:
-                if len(bytes) < 1:
-                    raise _binary_length_error("jsonb", len(bytes), 1)
-                if bytes[0] != _JSONB_VERSION:
-                    raise _binary_value_error(
-                        "jsonb",
-                        String("version byte is ", bytes[0], ", expected 1"),
-                    )
-                bytes = bytes[1:]
-            elif (
-                oid != OID_TEXT
-                and oid != OID_VARCHAR
-                and oid != OID_BPCHAR
-                and oid != OID_NAME
-                and oid != OID_JSON
-            ):
-                raise _binary_oid_error(oid, "String")
+            bytes = _string_payload(bytes, self._res[].column_type_oid(col))
         return StringSlice[Self.origin](unsafe_from_utf8=bytes)
 
     def get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]:

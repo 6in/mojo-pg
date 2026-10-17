@@ -563,14 +563,20 @@ def _read_text_slice(conn: Connection, params: List[Param]) raises -> Int:
         raise Error(String(e))
 
 
-def _skip_on_macos() -> Bool:
+def _skip_on_macos(name: StaticString) -> Bool:
     """Report whether RSS sampling is unavailable, printing a skip notice.
+
+    The notice is in the `SKIP <name>: <reason>` form `tests/run_tests.sh`
+    counts, so the caller has to name itself.
+
+    Args:
+        name: Name of the calling test function.
 
     Returns:
         True on macOS (the caller must return without sampling).
     """
     if CompilationTarget.is_macos():
-        print("SKIP: RSS sampling is Linux-only")
+        print("SKIP ", name, ": RSS sampling is Linux-only", sep="")
         return True
     return False
 
@@ -714,7 +720,7 @@ def test_is_leaking_accepts_flat_samples() raises:
 
 
 def test_connect_query_close_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_connect_query_close_does_not_leak"):
         return
     var conninfo = _conninfo()
     # The row is PAYLOAD_BYTES wide so the PGresult a missing PQclear would
@@ -733,7 +739,7 @@ def test_connect_query_close_does_not_leak() raises:
 
 
 def test_failed_open_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_failed_open_does_not_leak"):
         return
     # libpq takes the last value given for a repeated key, so appending
     # `password=...` overrides the real one.
@@ -757,7 +763,7 @@ def test_failed_open_does_not_leak() raises:
 
 
 def test_escape_literal_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_escape_literal_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # Still an apostrophe to quote, but PAYLOAD_BYTES long: what PQescapeLiteral
@@ -775,7 +781,7 @@ def test_escape_literal_does_not_leak() raises:
 
 
 def test_failed_execute_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_failed_execute_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # A raised exception carrying a PAYLOAD_BYTES message: the failing
@@ -807,7 +813,7 @@ def test_failed_execute_does_not_leak() raises:
 
 
 def test_execute_params_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_execute_params_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # Two owners have to free per iteration here, not one: the `_ParamBuffers`
@@ -830,7 +836,7 @@ def test_execute_params_does_not_leak() raises:
 
 
 def test_prepared_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_prepared_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # Four results per iteration: PQprepare's, PQdescribePrepared's,
@@ -853,7 +859,7 @@ def test_prepared_does_not_leak() raises:
 
 
 def test_transaction_commit_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_transaction_commit_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
@@ -874,7 +880,7 @@ def test_transaction_commit_does_not_leak() raises:
 
 
 def test_transaction_drop_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_transaction_drop_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
@@ -903,7 +909,7 @@ def test_transaction_drop_does_not_leak() raises:
 
 
 def test_binary_execute_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_binary_execute_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # Three owners per iteration: the `_ParamBuffers` holding the encoded
@@ -923,7 +929,7 @@ def test_binary_execute_does_not_leak() raises:
 
 
 def test_zero_copy_does_not_leak() raises:
-    if _skip_on_macos():
+    if _skip_on_macos("test_zero_copy_does_not_leak"):
         return
     var conn = _connect(_conninfo())
     # `get_text` hands back a slice of the `PGresult`'s own storage, so the

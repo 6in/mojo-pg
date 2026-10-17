@@ -60,7 +60,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 | `datetime_is_utc_calls` / `datetime_asia_tokyo` | REQ §6-4: `tests/test_extended_datetime.mojo:764-797` の非 UTC `else` 分岐を専用接続のケースに | 2 / 0 | **2 / ≥ 1**（T1。`:568` の `_is_utc` は別テストで残る） |
 | `compose_blackhole` / `compose_54399` | D10: `tests/docker-compose.yml` に `blackhole` サービス | 0 / 0 | **1 / 1**（T1） |
 | `run_tests_SKIP` / `run_tests_pipefail` | §4.8: `tests/run_tests.sh` の SKIP 集計と終了コード保全 | 0 / 0 | **≥ 2 / ≥ 1**（T1） |
-| `tests_print_SKIP` / `leak_old_SKIP_colon` | §4.8: `print("SKIP <name>: <reason>")` の形。`test_extended_datetime.mojo:840-879` の 2 件、`test_leak.mojo:573` の形式、T1 (d) の Tokyo 分岐、T3 のタイムアウトテスト | absent / 1 | **≥ 5 / 0**（T1 で ≥ 3、T3 で +1、T5 以降 +α） |
+| `tests_print_SKIP` / `leak_old_SKIP_colon` | §4.8: `print("SKIP <name>: <reason>")` の形。`test_extended_datetime.mojo:840-879` の 2 件、`test_leak.mojo:573` の形式、T1 (d) の Tokyo 分岐、T3 のタイムアウトテスト。**`print("SKIP ` は 1 行に収める**（折り返すとパターンが当たらない） | absent / 1 | **≥ 5 / 0**（T1 で ≥ 3、T3 で +1、T5 以降 +α）。**注（T1 実装時）**: `tests_print_SKIP` は `test_async.mojo` / `test_notify.mojo` が無いあいだスクリプトが `absent(...)` を返すので、T3 までは `grep -c 'print("SKIP ' tests/test_extended_datetime.mojo tests/test_leak.mojo` で手で数える（T1 実測 3 + 1 = 4） |
 | `string_payload_def` / `string_payload_calls` / `jsonb_version_checks` / `oid_varchar_checks` | §4.9: `decode_binary.mojo:706-726` と `result.mojo:746-765` の重複を `_string_payload` に | 0 / 0 / 4 / 2 | **1 / 2 / ≤ 2 / 1**（T1。`_JSONB_VERSION` は定義 + 使用 1 箇所、`oid != OID_VARCHAR` は 1 箇所） |
 | `test_decode_binary_tests` | §4.9 の単体 1 件（T1）+ §4.10 の UTF-8 5 件 + 陽性対照 1 件（T7） | 78 | **≥ 79**（T1）→ **≥ 85**（T7） |
 | `test_extended_datetime_tests` | REQ §6-3 の timetz テスト 1 件は `test_decode_binary.mojo` 側。ここは変化なし | 19 | **19**（T1。`test_timestamp_params_round_trip` は書き換えで件数不変） |
@@ -80,7 +80,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 
 ## Tasks
 
-- [ ] T1: 持ち越し整理（REQ §6 の 4 件）+ `blackhole` compose + TestSuite の SKIP 集計（§4.8）+ jsonb / 文字列系 OID 判定の一元化（§4.9）
+- [x] T1: 持ち越し整理（REQ §6 の 4 件）+ `blackhole` compose + TestSuite の SKIP 集計（§4.8）+ jsonb / 文字列系 OID 判定の一元化（§4.9）
   - 完了基準:
     - (a) REQ §6-1: `src/pq/params.mojo:641-645`（`_ParamBuffers.__init__` docstring Raises）の「longer than libpq's `paramLengths` can carry (1073741823 bytes)」と `:670` の
       `" bytes; libpq takes at most 1073741823)"` を「PostgreSQL の `MaxAllocSize`（1 GB = 1073741823 bytes）を超える値はサーバーが受け取れない」の言い方に
@@ -95,7 +95,9 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - (d) REQ §6-4: `tests/test_extended_datetime.mojo:775-795` の非 UTC `else` 分岐（binary だけ読む）を消し、代わりに**専用接続**
       `_connect(_conninfo() + " options='-c TimeZone=Asia/Tokyo'")` で `_assert_param_roundtrip(conn_tokyo, "SELECT $1::timestamptz", [TimestampTz(762525296789000)], TimestampTz(762525296789000), "2024-02-29 21:34:56.789+09")`
       を**無条件に** 1 ケース回す（UTC 12:34:56.789 の +09 は 21:34:56.789。impl は `psql` 相当（同期 `Connection`）で `SELECT '2024-02-29 12:34:56.789+00'::timestamptz` を同じ `options` 接続で取り直して期待文字列を確かめる）。
-      `_is_utc(conn)` が偽のときの主接続のケースは `print("SKIP test_timestamp_params_round_trip: main connection TimeZone is not UTC")` を出して飛ばす（§4.8 の形）
+      `_is_utc(conn)` が偽のときの主接続のケースは `print("SKIP test_timestamp_params_round_trip: TimeZone is not UTC")` を出して飛ばす（§4.8 の形。
+      **訂正（T1 実装時）**: 元の文言「main connection TimeZone is not UTC」は 80 桁を超えて `mojo format` が `print(` と文字列を別行に割るため、
+      チェックリストのパターン `print("SKIP ` が当たらなくなる。文言を縮めて 1 行に収めた）
     - (e) D10 / RESEARCH §2.5 / P30: `tests/docker-compose.yml` に `blackhole`（`image: alpine/socat`、`command: -u TCP-LISTEN:5432,fork,reuseaddr OPEN:/dev/null`、`ports: "127.0.0.1:54399:5432"`。
       `scratch/turn-001-blackhole-compose.yml` の 5 行そのまま。healthcheck 不要）。`pixi run db-up` 後に `docker compose -f tests/docker-compose.yml ps` で `blackhole` が `Up`（running）。
       陽性対照: `python3 -c` は使わず、T3 のタイムアウトテストで実測する（ここでは `Up` の確認だけ）
@@ -104,9 +106,11 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
       `test_leak`（`:90` の `"$leak_bin"`）も同じ `tee` + 集計に通す。FAIL にはしない（`final_check.sh` は変更しない）。
       **陽性対照**: `PQ_TEST_CONNINFO='host=127.0.0.1 port=1 user=pq password=pq dbname=pq_test' bash tests/run_tests.sh` の終了コードが**非 0**（`tee` が終了コードを飲んでいない）。
       実行時間は接続拒否が即時なので数十秒。結果（exit code）を PROGRESS に書く
-    - (g) §4.8: `tests/test_extended_datetime.mojo:842-844` / `:877-879` の早期 `return` の直前に `print("SKIP test_interval_infinity_on_pg17_and_later: server is older than 17")` /
-      `print("SKIP test_interval_infinity_rejected_before_pg17: server is 17 or later")`。`tests/test_leak.mojo:566-575` `_skip_on_macos` に `name: StaticString` 引数を足して
-      `print("SKIP ", name, ": RSS sampling is Linux-only", sep="")` にし、11 箇所の呼び出し（`grep -c '_skip_on_macos()' tests/test_leak.mojo` = 11）に自関数名を渡す。
+    - (g) §4.8: `tests/test_extended_datetime.mojo:842-844` / `:877-879` の早期 `return` の直前に `print("SKIP test_interval_infinity_on_pg17_and_later: server < 17")` /
+      `print("SKIP test_interval_infinity_rejected_before_pg17: server 17+")`（**訂正（T1 実装時）**: 元の文言「server is older than 17」/「server is 17 or later」は
+      80 桁を超えて `mojo format` が割るため縮めた。上記 (d) と同じ理由）。`tests/test_leak.mojo:566-575` `_skip_on_macos` に `name: StaticString` 引数を足して
+      `print("SKIP ", name, ": RSS sampling is Linux-only", sep="")` にし、**10** 箇所の呼び出し（`grep -c '_skip_on_macos()' tests/test_leak.mojo` = 10。
+      **訂正（T1 実装時）**: PLAN の 11 は数え違い。実測 10）に自関数名を渡す。
       `pixi run test` のログに `-- 127.0.0.1:54317 skipped 1`（PG17: `rejected_before_pg17` が SKIP）と `-- 127.0.0.1:54314 skipped 1`（PG14: `on_pg17_and_later`）が出る（Linux では leak の SKIP は出ない）
     - (h) §4.9 / RESEARCH §3-10: `src/pq/decode_binary.mojo` に `def _string_payload[origin: ImmOrigin, //](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> Span[UInt8, origin]`
       （jsonb 3802: `len < 1` → `_binary_length_error("jsonb", len, 1)`、`bytes[0] != _JSONB_VERSION` → `_binary_value_error("jsonb", "version byte is N, expected 1")`、`bytes[1:]` を返す。

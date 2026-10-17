@@ -7,9 +7,9 @@ send, written here as a hex string and turned into bytes by `_hex`.
 from std.math import isinf, isnan
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
-from pq.decode_binary import decode_binary
+from pq.decode_binary import _string_payload, decode_binary
 from pq.decode_text import parse_bytea_hex
-from pq.errors import PgErrorKind
+from pq.errors import PgError, PgErrorKind
 from pq.types_datetime import (
     Date,
     Interval,
@@ -333,6 +333,62 @@ def test_jsonb_rejects_version_two() raises:
 
 def test_jsonb_rejects_empty() raises:
     assert_equal(_error_kind[String]("", 3802), PgErrorKind.TYPE_MISMATCH)
+
+
+# --- the shared string payload (decode_binary[String] / Row.get_text) --------
+
+
+def _payload(digits: String, oid: UInt32) raises -> String:
+    """Return the text `_string_payload` picks out of a binary cell.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: Column type OID reported by the server.
+
+    Returns:
+        The payload bytes, copied into a `String`.
+
+    Raises:
+        Error: If `_string_payload` raised a `PgError`.
+    """
+    var bytes = _hex(digits)
+    try:
+        return String(unsafe_from_utf8=_string_payload(Span[UInt8](bytes), oid))
+    except e:
+        raise Error(String(e))
+
+
+def _payload_error(digits: String, oid: UInt32) raises -> PgError:
+    """Return the `PgError` `_string_payload` raises for a cell.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: An OID `_string_payload` refuses.
+
+    Returns:
+        The raised error.
+
+    Raises:
+        Error: If `_string_payload` returned a payload instead of raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = _string_payload(Span[UInt8](bytes), oid)
+    except e:
+        return e^
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def test_string_payload_is_the_one_place_the_oid_is_judged() raises:
+    # The one function `decode_binary[String]` and `Row.get_text` both read
+    # the cell through, so they cannot drift apart: `jsonb` loses its version
+    # byte, the other five string-shaped OIDs are their own payload, and
+    # anything else is the same `TYPE_MISMATCH` naming the OID.
+    assert_equal(_payload("017b7d", 3802), "{}")
+    assert_equal(_payload("7b7d", 25), "{}")
+    var rejected = _payload_error("7b7d", 23)
+    assert_equal(rejected.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("oid 23" in rejected.message, rejected.message)
 
 
 # --- bytea (OID 17) ----------------------------------------------------------
@@ -761,6 +817,17 @@ def test_timetz_rejects_zones_of_sixteen_hours() raises:
     _assert_value_rejected[TimeTz](
         "0000000a0eebb000" + "ffff1f00", 1266, "zone -57600"
     )
+
+
+def test_timetz_range_checks_the_time_of_day() raises:
+    # `24:00:00` with a zone is a value the server stores and prints, so the
+    # upper bound is inclusive; one microsecond past it is not a `timetz`.
+    _assert_value_rejected[TimeTz](
+        "000000141dd76001" + "00000000", 1266, "is out of range"
+    )
+    var end_of_day = _ok[TimeTz]("000000141dd76000" + "ffff8170", 1266)
+    assert_equal(end_of_day.micros, Int64(86400000000))
+    assert_equal(end_of_day.offset_secs, Int32(-32400))
 
 
 def test_timetz_rejects_wrong_length_and_oid() raises:

@@ -171,6 +171,56 @@ def _check_length[
         raise _binary_length_error(pg_type, len(bytes), expected)
 
 
+def _string_payload[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> Span[
+    UInt8, origin
+]:
+    """Return the text bytes of a binary-format string-shaped cell.
+
+    The one place that decides which binary OIDs carry UTF-8 text and where
+    that text starts: the six string-shaped OIDs 25 (`text`), 1043
+    (`varchar`), 1042 (`bpchar`), 19 (`name`), 114 (`json`) and 3802
+    (`jsonb`). A `jsonb` cell opens with a one byte format version, which
+    must be 1 and is not part of the payload; the other five are their own
+    payload. Both `decode_binary[String]` and `Row.get_text` read the cell
+    through here, so they raise the same errors with the same messages.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+        oid: The column type OID reported by `PQftype`.
+
+    Returns:
+        A slice of `bytes` holding the text, borrowed from the same storage.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `oid` is not one of the
+            six, or when a `jsonb` cell is empty or carries a version byte
+            other than 1.
+    """
+    if oid == OID_JSONB:
+        if len(bytes) < 1:
+            raise _binary_length_error("jsonb", len(bytes), 1)
+        if bytes[0] != _JSONB_VERSION:
+            raise _binary_value_error(
+                "jsonb",
+                String("version byte is ", bytes[0], ", expected 1"),
+            )
+        return bytes[1:]
+    if (
+        oid != OID_TEXT
+        and oid != OID_VARCHAR
+        and oid != OID_BPCHAR
+        and oid != OID_NAME
+        and oid != OID_JSON
+    ):
+        raise _binary_oid_error(oid, "String")
+    return bytes
+
+
 def decode_bool[
     origin: ImmOrigin, //
 ](bytes: Span[UInt8, origin]) raises PgError -> Bool:
@@ -570,8 +620,9 @@ def decode_timetz[
     The cell is an eight byte microsecond offset into the day followed by a
     four byte zone offset in seconds, counted **positive west** of UTC the
     way PostgreSQL counts it, so `+09` arrives as -32400. The zone is range
-    checked against the 16 hours PostgreSQL allows; the time of day is not,
-    since the server pairs a `24:00:00` with a zone and both are valid.
+    checked against the 16 hours PostgreSQL allows; the time of day is range
+    checked too, `0..86400000000` inclusive, since `24:00:00` with a zone is
+    valid.
 
     Parameters:
         origin: Origin of the viewed bytes; inferred from `bytes`.
@@ -584,11 +635,14 @@ def decode_timetz[
 
     Raises:
         PgError: `PgErrorKind.TYPE_MISMATCH` when `bytes` is not exactly
-            twelve bytes, or when the zone is 16 hours or wider.
+            twelve bytes, when the offset is outside a day, or when the
+            zone is 16 hours or wider.
     """
     _check_length(bytes, "timetz", 12)
     var micros = bitcast[DType.int64, 1](_be_bits(bytes[0:8]))
     var zone = bitcast[DType.int32, 1](UInt32(_be_bits(bytes[8:12])))
+    if micros < 0 or micros > _MAX_TIME_MICROS:
+        raise _binary_value_error("timetz", String(micros, " is out of range"))
     if zone <= -_MAX_OFFSET_SECONDS or zone >= _MAX_OFFSET_SECONDS:
         raise _binary_value_error(
             "timetz", String("zone ", zone, " is out of range")
@@ -704,25 +758,7 @@ def decode_binary[
         var value = decode_float64(bytes)
         return rebind[T](value).copy()
     elif T == String:
-        if oid == OID_JSONB:
-            if len(bytes) < 1:
-                raise _binary_length_error("jsonb", len(bytes), 1)
-            if bytes[0] != _JSONB_VERSION:
-                raise _binary_value_error(
-                    "jsonb",
-                    String("version byte is ", bytes[0], ", expected 1"),
-                )
-            var value = String(unsafe_from_utf8=bytes[1:])
-            return rebind[T](value).copy()
-        if (
-            oid != OID_TEXT
-            and oid != OID_VARCHAR
-            and oid != OID_BPCHAR
-            and oid != OID_NAME
-            and oid != OID_JSON
-        ):
-            raise _binary_oid_error(oid, "String")
-        var value = String(unsafe_from_utf8=bytes)
+        var value = String(unsafe_from_utf8=_string_payload(bytes, oid))
         return rebind[T](value).copy()
     elif T == List[UInt8]:
         if oid != OID_BYTEA:

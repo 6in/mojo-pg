@@ -639,10 +639,11 @@ struct _ParamBuffers(Movable):
 
         Raises:
             PgError: `PgErrorKind.USAGE` when a text parameter contains
-                an embedded NUL byte, or when any parameter is longer
-                than libpq's `paramLengths` can carry (1073741823
-                bytes). Both name the one-based position as `$N`; the
-                value itself is never put in the message.
+                an embedded NUL byte, or when any parameter is larger
+                than PostgreSQL's `MaxAllocSize` (1 GB = 1073741823
+                bytes), which the server cannot receive whatever libpq
+                does with it. Both name the one-based position as `$N`;
+                the value itself is never put in the message.
         """
         var size = len(params)
         self.types = List[UInt32](capacity=size + 1)
@@ -667,7 +668,8 @@ struct _ParamBuffers(Movable):
                         i + 1,
                         " is too large (",
                         len(params[i]._data),
-                        " bytes; libpq takes at most 1073741823)",
+                        " bytes; PostgreSQL accepts at most 1073741823,",
+                        " its MaxAllocSize)",
                     ),
                 )
             if params[i]._null:
