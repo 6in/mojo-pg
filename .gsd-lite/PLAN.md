@@ -282,7 +282,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: (b) `tests/test_notify.mojo` の追記（対象: その 1 ファイル）
     - 親: (a) `tests/test_async.mojo` の追記 + 陽性対照 + (c)(d)
 
-- [ ] T6: `test_leak` に Phase 4 ループ 4 本 + 陽性対照 2 件（REQ §5.2 / §5.3）
+- [x] T6: `test_leak` に Phase 4 ループ 4 本 + 陽性対照 2 件（REQ §5.2 / §5.3）
   - 完了基準:
     - (a) `tests/test_leak.mojo` に 4 テスト（既存の `_assert_stable` / `_sample` / `MAIN_ITERATIONS` の流儀。1 接続を使い回す。P29）:
       `test_async_execute_does_not_leak`（`AsyncConnection.connect_blocking` 1 本で `send(SELECT repeat('x', PAYLOAD_BYTES))` → `fetch_all(5000)` を **10,000 回**。`pg_sleep` 無し）、

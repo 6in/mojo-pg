@@ -30,7 +30,7 @@ by its own unit tests there.
 The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
 `postgres://` URI: these tests append ` password=...` to it).
 
-Fourteen tests, in the order they run:
+Eighteen tests, in the order they run:
 
 - Four `is_leaking` unit tests. They need no database and are declared first
   so a broken verdict fails before any loop runs.
@@ -51,19 +51,33 @@ Fourteen tests, in the order they run:
   free of its own -- the point is the opposite: a decoder or a slice that
   retained the `PGresult`, or a `_ParamBuffers` the new encoders kept alive,
   would show up here and nowhere else.
+- Four Phase 4 loops: `async-execute`, `async-cancel`, `notify-receive` and
+  `async-drop`. `AsyncConnection` has to free in three places the synchronous
+  `Connection` never reaches: the `PGcancel` that `cancel` borrows and hands
+  back with `PQfreeCancel`, the `PGnotify` each notification arrives in that
+  `notifications` copies out of and `PQfreemem`s, and the results still
+  unread when a connection is dropped, which leaves `PQfinish` as the only
+  thing that can clear them. The first loop covers none of those: it is the
+  plain `send` / `fetch_all` round trip, so a `PGresult` the asynchronous
+  collector failed to adopt is caught there rather than hiding behind one of
+  the other three.
 
 This file is slow by design: measured per server once the binary is built, the
-Phase 1 connect loop alone is ~35 s, the other three Phase 1 loops ~4 s, the
-four Phase 2 loops ~18 s, and the two Phase 3 loops ~6 s, for ~65 s in total
-on top of the one-off `mojo build`. The Phase 2 and Phase 3 loops are cheap
-next to the connect loop because they reuse one connection; `Connection.open`
-is what costs ~3.5 ms a time.
+Phase 1 connect loop alone is ~36 s, the other three Phase 1 loops ~4 s, the
+four Phase 2 loops ~18 s, the two Phase 3 loops ~6 s and the four Phase 4
+loops ~7 s, for ~72 s in total on top of the one-off `mojo build`. The
+Phase 2, Phase 3 and first Phase 4 loops are cheap next to the connect loop
+because they reuse one connection; `Connection.open` is what costs ~3.5 ms a
+time, and the `async-drop` loop pays that again per iteration because the drop
+*is* what it measures. `async-cancel` pays a second connection per iteration
+too: a cancel request travels on one of its own.
 """
 
 from std.os import getenv
 from std.sys.info import CompilationTarget
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
+from pq.async_conn import AsyncConnection, Notification
 from pq.connection import Connection
 from pq.errors import PgError
 from pq.params import Param
@@ -172,6 +186,17 @@ comptime ERROR_WARMUP = 200
 
 comptime ERROR_SAMPLES = 4
 """RSS samples taken after a failure-path loop's warmup."""
+
+comptime NOTIFY_PAYLOAD_BYTES = 7000
+"""Payload bytes every `NOTIFY` in the Phase 4 notify loop carries.
+
+A `PGnotify` is one allocation holding the struct, the channel name and the
+payload, so the payload is the only part of it this test can size. PostgreSQL
+caps a payload at 7999 bytes (`tests/test_notify.mojo` covers the cap itself),
+an eighth of `PAYLOAD_BYTES` and the most this path can churn per iteration.
+At `ERROR_ITERATIONS` iterations a forgotten `PQfreemem` still strands ~7 MB,
+far past `TOLERANCE_PAGES`.
+"""
 
 comptime PHASE3_SQL = (
     "SELECT repeat('x', "
@@ -563,6 +588,190 @@ def _read_text_slice(conn: Connection, params: List[Param]) raises -> Int:
         raise Error(String(e))
 
 
+def _async_connect(var conninfo: String) raises -> AsyncConnection:
+    """Open an asynchronous connection and wait out its handshake.
+
+    Args:
+        conninfo: A libpq `key=value ...` conninfo string.
+
+    Returns:
+        The connection, in state `Idle`.
+
+    Raises:
+        Error: If `connect_blocking` raised a `PgError`.
+    """
+    try:
+        return AsyncConnection.connect_blocking(conninfo^, 5000)
+    except e:
+        raise Error(String(e))
+
+
+def _async_send(mut conn: AsyncConnection, var sql: String) raises:
+    """Queue `sql` on an idle asynchronous connection.
+
+    Args:
+        conn: The idle connection.
+        sql: One or more SQL statements.
+
+    Raises:
+        Error: If `send` raised a `PgError`.
+    """
+    try:
+        conn.send(sql^)
+    except e:
+        raise Error(String(e))
+
+
+def _async_fetch_all(
+    mut conn: AsyncConnection, timeout_ms: Int
+) raises -> List[Result]:
+    """Collect every result of the command in flight.
+
+    Args:
+        conn: The connection with a command in flight.
+        timeout_ms: Milliseconds allowed for the whole command.
+
+    Returns:
+        One `Result` per statement.
+
+    Raises:
+        Error: If `fetch_all` raised a `PgError`.
+    """
+    try:
+        return conn.fetch_all(timeout_ms)
+    except e:
+        raise Error(String(e))
+
+
+def _async_cancel(mut conn: AsyncConnection) raises:
+    """Ask the server to abandon the command in flight.
+
+    Args:
+        conn: The connection with a command in flight.
+
+    Raises:
+        Error: If `cancel` raised a `PgError`.
+    """
+    try:
+        conn.cancel()
+    except e:
+        raise Error(String(e))
+
+
+def _collect_cancelled(
+    mut conn: AsyncConnection, timeout_ms: Int
+) raises -> Int:
+    """Collect the results of a command a `cancel` was racing.
+
+    Either outcome is correct and both have to be accepted: the cancel request
+    travels on its own connection, so it can reach the backend before the
+    statement finishes (`57014`) or after it already answered (a result).
+
+    Args:
+        conn: The connection the cancel was sent on.
+        timeout_ms: Milliseconds allowed for the collection.
+
+    Returns:
+        The number of results collected; 0 when the cancel won.
+
+    Raises:
+        Error: If the command failed for any reason other than being
+            cancelled.
+    """
+    try:
+        var results = conn.fetch_all(timeout_ms)
+        var count = len(results)
+        _ = results^
+        return count
+    except e:
+        if e.sqlstate != "57014":
+            raise Error(String(e))
+        return 0
+
+
+def _async_listen(mut conn: AsyncConnection, var channel: String) raises:
+    """Subscribe an asynchronous connection to `channel`.
+
+    Args:
+        conn: The idle connection.
+        channel: An unquoted channel name.
+
+    Raises:
+        Error: If the `LISTEN` failed.
+    """
+    _async_send(conn, "LISTEN " + channel)
+    var results = _async_fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+
+
+def _async_wait_notification(
+    mut conn: AsyncConnection, timeout_ms: Int
+) raises -> Optional[Notification]:
+    """Wait for one notification.
+
+    Args:
+        conn: The listening connection.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The oldest notification, or None when the budget ran out.
+
+    Raises:
+        Error: If `wait_notification` raised a `PgError`.
+    """
+    try:
+        return conn.wait_notification(timeout_ms)
+    except e:
+        raise Error(String(e))
+
+
+def _async_wait_readable(mut conn: AsyncConnection, timeout_ms: Int) raises:
+    """Wait for the connection's socket to have something to read.
+
+    Args:
+        conn: The connection with a command in flight.
+        timeout_ms: Milliseconds to wait at most.
+
+    Raises:
+        Error: If `wait_readable` raised a `PgError`, timeout included.
+    """
+    try:
+        conn.wait_readable(timeout_ms)
+    except e:
+        raise Error(String(e))
+
+
+def _async_consume_input(mut conn: AsyncConnection) raises:
+    """Move whatever the server has sent into libpq's buffer.
+
+    Args:
+        conn: The connection with a command in flight.
+
+    Raises:
+        Error: If `consume_input` raised a `PgError`.
+    """
+    try:
+        conn.consume_input()
+    except e:
+        raise Error(String(e))
+
+
+def _notify_payload() -> String:
+    """Build the exact-length payload the Phase 4 notify loop sends.
+
+    `_payload` rounds up to the next power of two, which would overrun the
+    7999 bytes PostgreSQL allows a `NOTIFY` payload, so this grows a byte at a
+    time instead.
+
+    Returns:
+        `NOTIFY_PAYLOAD_BYTES` `x` bytes.
+    """
+    var out = String()
+    while out.byte_length() < NOTIFY_PAYLOAD_BYTES:
+        out += "x"
+    return out^
+
+
 def _skip_on_macos(name: StaticString) -> Bool:
     """Report whether RSS sampling is unavailable, printing a skip notice.
 
@@ -947,6 +1156,117 @@ def test_zero_copy_does_not_leak() raises:
             _sample("zero-copy", samples)
     _assert_stable("zero-copy", samples, MAIN_SAMPLES)
     _ = conn^
+
+
+# --- the Phase 4 loops -------------------------------------------------------
+#
+# `AsyncConnection` collects its results through `PQgetResult` and owns two
+# libpq allocations the synchronous side never sees -- a `PGcancel` and a
+# `PGnotify` -- so each of the three frees it is responsible for gets a loop,
+# plus one for the ordinary round trip. Only the drop loop reconnects per
+# iteration, because the drop is the thing being measured.
+
+
+def test_async_execute_does_not_leak() raises:
+    if _skip_on_macos("test_async_execute_does_not_leak"):
+        return
+    var conn = _async_connect(_conninfo())
+    # The same PAYLOAD_BYTES row as the synchronous main loop, but adopted by
+    # `fetch_all` rather than `execute`: results arrive one `PQgetResult` at a
+    # time and the terminating NULL has to be collected as well, so a
+    # collector that stopped at the first result would strand a `PGresult`
+    # here -- and only here, since the other three loops free something else.
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + ")"
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        _async_send(conn, sql.copy())
+        var results = _async_fetch_all(conn, 5000)
+        _ = results^
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("async-execute", samples)
+    _assert_stable("async-execute", samples, MAIN_SAMPLES)
+    _ = conn^
+
+
+def test_async_cancel_does_not_leak() raises:
+    if _skip_on_macos("test_async_cancel_does_not_leak"):
+        return
+    var conn = _async_connect(_conninfo())
+    # `cancel` is the only caller of `PQgetCancel` and `PQfreeCancel`, and the
+    # `PGcancel` it borrows is a few hundred bytes -- nothing this loop can
+    # inflate, and far too little for RSS to see at ERROR_ITERATIONS
+    # iterations: with `PQfreeCancel` deleted this loop still came in flat
+    # (measured, four identical samples). So this is not where a missing
+    # `PQfreeCancel` is caught; it runs the pair ERROR_ITERATIONS times to
+    # show the path is stable and leaves the free itself to review.
+    # `tests/test_async.mojo` covers what `cancel` does; what matters here is
+    # that it is called in a loop at all.
+    var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
+    var samples = List[Int]()
+    for i in range(ERROR_ITERATIONS):
+        _async_send(conn, "SELECT 1")
+        _async_cancel(conn)
+        _ = _collect_cancelled(conn, 5000)
+        if _is_sample_due(i, ERROR_WARMUP, every):
+            _sample("async-cancel", samples)
+    _assert_stable("async-cancel", samples, ERROR_SAMPLES)
+    _ = conn^
+
+
+def test_notify_receive_does_not_leak() raises:
+    if _skip_on_macos("test_notify_receive_does_not_leak"):
+        return
+    var listener = _async_connect(_conninfo())
+    var channel = String("pq_leak_notify")
+    _async_listen(listener, channel.copy())
+    # The notifications come from a synchronous connection, as they must: a
+    # backend delivers them at commit, and this one autocommits each NOTIFY.
+    var sender = _connect(_conninfo())
+    var notify = "NOTIFY " + channel + ", '" + _notify_payload() + "'"
+    var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
+    var samples = List[Int]()
+    for i in range(ERROR_ITERATIONS):
+        var sent = _execute(sender, notify.copy())
+        _ = sent^
+        # Reading the payload length is what proves the `PGnotify` was there
+        # to free: `notifications` copies both strings out of it and frees it
+        # before returning, so a forgotten `PQfreemem` strands
+        # NOTIFY_PAYLOAD_BYTES per iteration.
+        var received = _async_wait_notification(listener, 2000)
+        assert_true(Bool(received), "no notification within 2 s")
+        assert_equal(
+            received.value().payload.byte_length(), NOTIFY_PAYLOAD_BYTES
+        )
+        if _is_sample_due(i, ERROR_WARMUP, every):
+            _sample("notify-receive", samples)
+    _assert_stable("notify-receive", samples, ERROR_SAMPLES)
+    _ = sender^
+    _ = listener^
+
+
+def test_async_drop_with_pending_results_does_not_leak() raises:
+    if _skip_on_macos("test_async_drop_with_pending_results_does_not_leak"):
+        return
+    var conninfo = _conninfo()
+    # Two statements in flight, the first PAYLOAD_BYTES wide, and neither
+    # result ever collected: dropping the connection leaves the `PQfinish` in
+    # `__deinit__` as the only thing that can clear them, which is exactly
+    # what that one-line destructor relies on. The `consume_input` first puts
+    # the results in libpq's own buffer, so the drop has something to free
+    # rather than just a socket to close.
+    var sql = "SELECT repeat('x', " + String(PAYLOAD_BYTES) + "); SELECT 2"
+    var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
+    var samples = List[Int]()
+    for i in range(ERROR_ITERATIONS):
+        var conn = _async_connect(conninfo.copy())
+        _async_send(conn, sql.copy())
+        _async_wait_readable(conn, 5000)
+        _async_consume_input(conn)
+        _ = conn^
+        if _is_sample_due(i, ERROR_WARMUP, every):
+            _sample("async-drop", samples)
+    _assert_stable("async-drop", samples, ERROR_SAMPLES)
 
 
 def main() raises:
