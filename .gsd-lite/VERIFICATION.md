@@ -1,5 +1,6 @@
 # VERIFICATION — phase5-polish-bench-readme
 
+- round 3: 2026-10-18 / turn 14 / Claude Code（claude-fable-5-1）。判定 **合格 → `main` にローカルマージ**（F2 の回帰 + `check` + チェックリスト同値。§6）
 - round 2: 2026-10-18 / turn 12 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F2 の 1 タスク。文書のみ 6 行）→ impl に差し戻し**。F1 は合格（§5）
 - round 1: 2026-10-18 / turn 10 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F1 の 1 タスク）→ impl に差し戻し**
 - 対象: `git diff main...HEAD`（コード 20 ファイル: `src/pq` 7 / `tests` 4 / `examples` 8 / `pixi.toml` / `pixi.lock` / `README.md` / `LICENSE`）。
@@ -120,3 +121,34 @@ round 2 は上表の再確認と F1 の回帰（表の 6 行）だけを行い�
 - Mojo の examples は stdout の読み手が先に消えると SIGPIPE で rc 141 になる（stdlib の `print` は SIGPIPE を無視しない）。トレースバックは出ない。パイプで `head` に繋ぐ用途の標準挙動
 - `bench_psycopg.py` の `_run` 内 `sys.exit(1)`（件数不一致）は `SystemExit` で明示 flush を飛ばすので、**「サーバーが件数を間違える」と「stdout が書けない」が同時に起きた場合だけ** `Exception ignored` + rc 120 に戻る。PLAN F1 (a) が「`_run` の `sys.exit(1)` は変えない」と定めた経路で、実害は無い
 - `_discard_stdout()` の `os.open(os.devnull)` が失敗する（fd 枯渇）と `OSError` が素通りして Traceback になる。stdout が書けない状況との二重故障のみ
+
+## 6. round 3（turn 14）— F2 の回帰だけ。合格
+
+- 対象差分: round 2 以降の変更は `examples/` 6 本の docstring（`4c20636`、+18 / -17。`basic` / `params` / `binary` / `async_query` / `listen_notify` / `bench_formats`）だけ。
+  `src/` / `tests/` / `README.md` / `bench_psycopg.py` / `pixi.toml` は不変（`git diff a619168..HEAD -- examples/` と `git show --stat` で確認）。サブエージェント 0 本
+- 生ログ: `scratch/turn-014-{check,checklist}.log`
+
+### 6.1 PLAN F2 の表との突き合わせ — すべて期待どおり
+
+| 検査 | 実測 |
+|---|---|
+| `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` | **0 件**（rc 1）。`tests/run_tests.sh:10-13` の「NOT a postgres:// URI」（テスト側の真の制約）は残っている |
+| 6 ファイルの該当 1 文 | 全部「a `key=value ...` string or a `postgresql://` URI, passed to `PQconnectdb` as is」。`Run it with \`pixi run <task>\`.` の行は不変。6 本とも 80 桁超の行 0（`awk 'length > 80'`） |
+| 文書間の整合 | README §7 `:363-366`（テストだけ `key=value` 形式、`examples/` は `PQconnectdb` 素通しで URI 可）/ `src/pq/connection.mojo:169-172`（`open` は conninfo か `postgresql://` URI を `PQconnectdb` どおりに受ける）/ `bench_psycopg.py:11`（URI を否定しない「(`key=value ...` form)」のまま、表どおり不変）と矛盾なし |
+| `/home/parallels/.pixi/bin/pixi run check`（`db-up` 済みの木。コンテナ 3 台 Healthy） | **6/6 PASS**（`final_check: PASS`、rc 0、`FAIL` / `Traceback` 0 行、`0 failed` のサマリ 47 件、6/6 段 `matched lines in build/final_check.log: 0`）。00:55:46 → 00:58:52 = **186 s**（閾値 247 s） |
+| チェックリスト（`turn-002-checklist.sh`、82 key） | `turn-013-checklist.log` と **`diff` 空**（完全一致。`examples_pixi_run` 7 / `readme_h2` 10 / `readme_examples_links` 10 / `hello_*` / `examples_raise_error` 0） |
+| `docker exec … pg_database`（`pq_test_%`） | pg17 / pg14 とも **0 行** |
+| 堅牢性格子 / bench の再実行 | 省略（表どおり任意。コードが不変なので round 2 の `turn-012-robust-regress.log` 42 レコードがそのまま有効） |
+
+### 6.2 マージ
+
+- リモートなし（`git remote get-url origin` → `No such remote`）→ (a) ローカルマージ。`main` には branch 側に無いコミットが無く（`git log HEAD..main` 空）、作業ツリーはクリーン
+- `git checkout main` → `git merge --no-ff gsd-lite/phase5-polish-bench-readme`。ブランチは残す
+
+### 6.3 残留リスク（全ラウンドの統合。§4 / §5.4 に追加なし）
+
+- Windows 実機は未検証（REQ §3 スコープ外。TRACE 照合表 + README §8 + `loader.mojo` docstring で開示済み）
+- Mojo の `print` は stdout の書き込み失敗を無視し、読み手が先に消えると SIGPIPE（rc 141）。トレースバックは出ない（stdlib の挙動）
+- `bench_psycopg.py` は「件数不一致 + stdout 書けない」「fd 枯渇 + stdout 書けない」の二重故障でのみ `Exception ignored` / Traceback に戻る
+- `_collect_notifications` は `wait_readable` の `CONNECTION` で抜ける経路では `out` を復元しないが、切断後は取り出す手段が無く実害なし
+- `check` の所要は 165〜215 s で揺れる（閾値 247 s 以内）
