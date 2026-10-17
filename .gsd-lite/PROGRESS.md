@@ -97,3 +97,41 @@
   `test_a_lost_connection_is_reported_with_a_fixed_message` が **`wait_notification()` の文言を完全一致で断定している**ので、
   `method` を取り違えると落ちる（回帰が効く）。`test_notify` のテスト数は 12 → ≥ 21。`check` は 177 s が最新基線。
   `env VAR=... pixi run ...` の形を使う（先頭の変数代入は不可）
+
+## turn 5 — impl — T3 `AsyncConnection.wait_notifications(n, timeout_ms)` + 契約外テスト 3 件 + 境界格子
+- やったこと: `async_conn.mojo` に private `_collect_notifications(method, n, timeout_ms)` を置き、`wait_notification` を
+  その `n = 1` ラッパに、公開 `wait_notifications(n, timeout_ms)` を `n < 1` の `USAGE` 付きで追加。予算切れは集まった分を
+  返し例外にせず（D8）、途中の往復が落ちたら集めた分を `_pending` の先頭に戻してから raise。`__init__.mojo` の API 表 1 行 +
+  `## Asynchronous use` 1 文、`test_notify.mojo` に 12 件、`test_async.mojo` に 2 行。コミット `9425933`。
+  サブエージェント 推奨 1 本 / 実 1 本（A = `tests/test_notify.mojo` の 11 件 + ヘルパ 3 件）
+- 既存テストの期待値変更: **ゼロ**（追加のみ。`test_notify.mojo` は A の 274 行が全部追記で削除 0、既存 12 件は不変。
+  `test_async.mojo` は `_wait_notifications_error` の def 1 件と既存 2 テストへの 1 行追加だけで、既存の断定は 1 行も変えていない）
+- 陽性対照（判別しなかった 1 件と、それを受けて足した 1 件）: PLAN T3 (c)⑧ は `_collect_notifications` の `except` から
+  `out` を `_pending` に戻す 7 行を消しても **PASS**（`scratch/turn-005-notify-norestore.log`）。このマシンは 2 件を 1 往復で
+  届けるため `ok` は `notifications()` 内側の `self._pending = found^` で保全され、⑧ は `out` 保全を判別しない
+  （PLAN ⑧ の注が予見した経路）。そこで ⑨ `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を追加:
+  第 3 の接続から `SELECT pg_sleep(0.3); NOTIFY ...（不正 UTF-8）` を await せず送り、listener が `wait_notifications(2, 3000)`
+  に入った後に commit させて 1 往復目を `ok` だけにする。restore 7 行なしで **FAIL**（`turn-005-notify-norestore2.log`）、ありで PASS。
+  対照の前後に `diff` で `async_conn.mojo` がバックアップと同一に戻ったことを確認済み
+- 検証と所要（単位付き）: `pixi run test` 両サーバー PASS（48 サマリすべて `0 failed`、`FAIL` の行 0。`test_notify` **24** 件 /
+  `test_async` **31** 件、所要は両サーバーで 5 s / 7 s）、`pixi run package` 警告ゼロ、`pixi run fmt` 52 ファイル無変更、
+  `pixi run check` **6/6 PASS、177 s**（基線 177 s と同値、閾値 247 s 以内）。`docker exec ... psql` は **pg17 / pg14 とも 0 行**。
+  チェックリストの T3 行は全行期待値（`async_wait_notifications_def`=1 / `async_n_must_be`=1 / `async_reject_lost_calls`=3（訂正後）/
+  `async_reject_lost_def`=1 / `async_lost_connection_text`=4 / `init_wait_notifications`=2 / `test_notify_wait_notifications_calls`=11 /
+  `test_async_wait_notifications`=6 / `test_notify_mixed_case`=3 / `test_notify_unlisten`=2 / `test_notify_n_must_be`=2 /
+  `test_notify_tests`=24 / `test_async_tests`=31 / `src_def_ref_return`=0 / `tests_files_count`=24）。
+  生ログ: `scratch/turn-005-{test,check,checklist,notify-norestore,notify-norestore2}.log`
+- 想定外: (1) **PLAN 訂正 3 件**（TRACE.md「PLAN 訂正（turn 5）」節）: `async_reject_lost_calls` の T3 期待値 ≥ 4 → **3（不変）**
+  （PLAN の表は `wait_notifications` が 3 つ目の呼び出し元になると見込んでいたが、PLAN (a) 自身が「`_collect_notifications` の中で
+  `_reject_lost(method)` を 1 回」「`wait_notification` は薄いラッパ」と定めている。実装どおりなら def 1 + `notifications` 1 +
+  `_collect_notifications` 1 = 3）；(c) の格子 **8 件 → 9 件**（上記の陽性対照が理由）；(c) の前提「既存テスト 11 件」→ **12 件**。
+  (2) A の報告どおり `_reject_bad_timeout` は下限違反（`-2`）でも上限と同一文面を出すので、格子の `-2` に
+  `_assert_timeout_too_large` がそのまま使える（新 API も同じ関数を通しているので一致する）
+- やり直し: 0 回
+- 次への注意: 次は T4（Windows コードパスのレビュー。`poll.mojo` の `_poll_once` を `Tuple[Int, Int, Int]` 化 +
+  `loader.mojo` の `_default_candidates` + TRACE に照合表 12 行 + `else` 分岐の複製ビルド）。**サブエージェント 0 本（親が全部）**。
+  雛形は `scratch/turn-001-probe-lang.mojo`（`comptime if` 連鎖で `StaticString` を返す形、コンパイル済み）。
+  `test_poll` 11 件は**不変**が完了基準なので `poll failed` の文言を断定しているテストが無いことを
+  `grep -n 'poll failed' tests/test_poll.mojo` で再確認してから message を変える。(d) の複製ビルドは通らなくてもよく、
+  結果を TRACE に 1〜3 行書けば進める（REQ §3: Windows でのコンパイルは対象外）。`check` は 177 s が基線。
+  陽性対照を取るために src を一時的に壊すときは、先に `cp` でバックアップし、戻した後 `diff` で同一を確認する（turn 5 で有効だった）

@@ -12,6 +12,25 @@ PROGRESS.md は 1 ターン 40 行上限なので、生の値・表・転記は�
   `ENCODING` に分けた。決めた事項 3 の 16 行の列挙に漏れていただけで、要件・決定（D9）には反しない）
 - turn 4 / PLAN 訂正: T2 (c) の対象行番号 `tests/test_notify.mojo:492,534` → **`:519,563`**（T1 で同ファイルが +32 行ずれた。
   `tests/test_decode_binary.mojo:470,481,489,497,538` は不変）
+- turn 5 / PLAN 訂正: 追従先チェックリストの `async_reject_lost_calls` の T3 期待値 **≥ 4 → 3（不変）**（PLAN の表は
+  `wait_notifications` が `_reject_lost` の 3 つ目の呼び出し元になると見込んでいたが、PLAN T3 (a) / 決めた事項 5 自身が
+  「入口検査は `_collect_notifications` の中で `_reject_lost(method)` を 1 回」「`wait_notification` は `_collect_notifications`
+  の薄いラッパ」と定めている。実装どおりに書くと呼び出し元は `notifications`（直接）と `_collect_notifications`（両公開待ちの
+  共通入口）の **2 箇所 + def 1 = 3**。表の見込みが (a) の設計と食い違っていただけで、要件・決定には反しない。
+  挙動は既存テスト `test_a_lost_connection_is_reported_with_a_fixed_message` が `wait_notification() called on a lost
+  connection` の完全一致で担保しており、`method` 経由で正しく届いている）
+- turn 5 / PLAN 訂正: T3 (c) の格子 **8 件 → 9 件**（⑧ `test_wait_notifications_keeps_collected_ones_when_a_later_one_is_rejected`
+  に加えて `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を足した。根拠は陽性対照の実測:
+  `_collect_notifications` の `except` から `out` を `_pending` に戻す 7 行を消しても ⑧ は **PASS した**
+  （`scratch/turn-005-notify-norestore.log`）。PLAN ⑧ の注が予見したとおりこのマシンは 2 件を 1 往復で届け、`ok` は
+  `notifications()` 内側の `self._pending = found^` で保全されるため、⑧ は `out` 保全を判別しない。
+  追加版は**第 3 の接続**から `SELECT pg_sleep(0.3); NOTIFY ...（不正 UTF-8）` を await せずに送り、listener が
+  `wait_notifications(2, 3000)` に入った後に commit させることで 1 往復目が `ok` だけを運ぶ形を強制する。
+  restore 7 行なしで **FAIL**（`scratch/turn-005-notify-norestore2.log`）、ありで PASS。
+  要件・決定の追加ではなく、決めた事項 5 が定めた「`out` を `_pending` の先頭に戻す」の検証手段を足しただけ）
+- turn 5 / PLAN 訂正: T3 (c) の前提「`tests/test_notify.mojo` の既存テストは 11 件」→ **12 件**
+  （T2 で足した `test_a_lost_connection_is_reported_with_a_fixed_message` を数え落としていた。
+  `test_notify_tests` = 12 + 12 = **24**。期待値 ≥ 21 の範囲内）
 
 ## `test_zero_copy` の所要
 

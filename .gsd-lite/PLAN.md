@@ -72,7 +72,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
 | `src_utf8_and_type_mismatch_same_line` | P8: `__init__.mojo:35,122,285`、`async_conn.mojo:281,1373`（同一行に両方）。複数行 docstring は impl が `grep -n -B2 -A2 'UTF-8' src/pq/*.mojo` で目視 | **0**（T2） |
 | `src_invalid_utf8_raise_sites` | 文言は変えない（D9） | **4**（T2。不変） |
 | `test_errors_tests` | `tests/test_errors.mojo` に `ENCODING` の 1 件 | **9**（T2） |
-| `async_reject_lost_def` / `async_reject_lost_calls` / `async_lost_connection_text` | §4.6: `_reject_lost(method)` ヘルパ（決めた事項 4）。def 1 + `notifications` / `wait_notification` / `wait_notifications` の 3 呼び出し | **1 / ≥ 3（T2）→ ≥ 4（T3）/ ≥ 1** |
+| `async_reject_lost_def` / `async_reject_lost_calls` / `async_lost_connection_text` | §4.6: `_reject_lost(method)` ヘルパ（決めた事項 4）。def 1 + `notifications` 直接 1 + `_collect_notifications`（両公開待ちの共通入口。T3 (a)）1 | **1 / ≥ 3（T2）→ 3（T3。不変。TRACE の PLAN 訂正 turn 5）/ ≥ 1** |
 | `test_decode_binary_f4908080` / `_f5808080` / `_f48fbfbf` / `test_decode_binary_tests` | §4.6 テスト: `tests/test_decode_binary.mojo:510-523` の格子に 3 行（def は増やさない） | **1 / 1 / 1 / 88**（T2） |
 | `test_notify_tests` / `test_notify_lost_message_fixed` | §4.6: BAD 後の文言固定テスト 1 件（T2）、`wait_notifications` 8 件 + 契約外 3 件（T3） | **≥ 12（T2）→ ≥ 21（T3）/ ≥ 1（T2）** |
 | `async_wait_notifications_def` / `async_n_must_be` / `init_wait_notifications` | §4.6.1: `async_conn.mojo` の新 API + `__init__.mojo` の API 表 + `## Asynchronous use` | **1 / 1 / ≥ 2**（T3） |
@@ -164,7 +164,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
       親が src を入れるまでコンパイルは通らないので、A は書くだけで親が統合後に回す）
     - 親: (a)(b)(d) の src 側 + `__init__.mojo` + (f)
 
-- [ ] T3: `AsyncConnection.wait_notifications(n, timeout_ms)`（§4.6.1 / D8）+ 契約外テスト 3 件（UNLISTEN / 未 LISTEN / `"Mixed Case"`）+ 境界格子
+- [x] T3: `AsyncConnection.wait_notifications(n, timeout_ms)`（§4.6.1 / D8）+ 契約外テスト 3 件（UNLISTEN / 未 LISTEN / `"Mixed Case"`）+ 境界格子
   - 完了基準:
     - (a) 決めた事項 5: `async_conn.mojo` に private `_collect_notifications(mut self, method: StaticString, n: Int, timeout_ms: Int) raises PgError -> List[Notification]`
       （`wait_notification`（`:1537-1588`）の本体を「`n` 件集まるまで」に一般化。`notifications()` が返した `found` のうち `out` に入り切らない分を **`_pending` に先頭から append**（現状 `:1572-1573` と同じ順序。P10）。
@@ -192,7 +192,10 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
       （単独 tx）→ `_pause_until_readable(listener, 500)` で `ok` が socket に届くのを待つ → sender が `NOTIFY ch, E'ab\\xC3\\x28'`（別 tx）→ `_wait_notifications_error(listener, 2, 1500)` が `ENCODING`
       → 直後の `_notifications(listener)` が `ok` の 1 件を返す（失われていない）。末尾で `_drop_ascii_database()`。
       **注**: ⑧ は「1 往復目で `ok` が `out` に入り、2 往復目で raise」の形でないと `out` の保全を検証できない（同一 tx で 2 件送ると `notifications()` 1 回の中で処理され `out` は空のまま）。
-      2 往復に分かれないマシンでは `ok` が `notifications()` 内の `found` → `_pending` 経由で保全されるので、どちらの経路でも断定は同じ「`ok` が残る」
+      2 往復に分かれないマシンでは `ok` が `notifications()` 内の `found` → `_pending` 経由で保全されるので、どちらの経路でも断定は同じ「`ok` が残る」。
+      **turn 5 の訂正（格子 8 件 → 9 件）**: 陽性対照で ⑧ は restore なしでも PASS（= `out` 保全を判別しない）と分かったため、
+      ⑨ `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を追加した（第 3 の接続から `pg_sleep` 付きで
+      不正 UTF-8 を遅延 commit させ 1 往復目を `ok` だけにする。restore なしで FAIL）。詳細は `TRACE.md` の「PLAN 訂正（turn 5）」
     - (d) 契約外テスト 3 件（`tests/test_notify.mojo`）: `test_unlisten_stops_delivery`（LISTEN `pq_t5_un` → NOTIFY → `wait_notification(2000)` が届く → `_send(listener, "UNLISTEN pq_t5_un")` + `_fetch_all` →
       NOTIFY → `wait_notification(300)` が **None**）；`test_a_channel_not_listened_to_is_not_delivered`（LISTEN `pq_t5_a` → NOTIFY `pq_t5_b` → `wait_notification(300)` が None → NOTIFY `pq_t5_a` → 届く（対照））；
       `test_mixed_case_channel_keeps_its_case`（`_listen(listener, "\"Mixed Case\"")`（`_listen` は `"LISTEN " + channel` なので引用符つきで渡す。`:164-176`）→ sender `NOTIFY "Mixed Case", 'x'` →
@@ -201,7 +204,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
       `_assert_connecting_usage(_wait_notifications_error(conn, 1, 100), "wait_notifications")` を 1 行、`test_a_budget_above_c_int_max_is_usage_at_every_entry`（`:1403-1417`）に
       `_assert_timeout_too_large(_wait_notifications_error(conn, 1, 4294967296))` を 1 行（def は増やさない。`test_async_tests` = 31 のまま）
     - (f) `pixi run test` 両サーバー PASS（既存テストの期待値変更ゼロ）、`pixi run package` 警告ゼロ、`pixi run check` 6/6。チェックリストの T3 行（`async_wait_notifications_def` / `async_n_must_be` /
-      `async_reject_lost_calls` ≥ 4 / `init_wait_notifications` / `test_notify_wait_notifications_calls` / `test_async_wait_notifications` / `test_notify_mixed_case` / `test_notify_unlisten` / `test_notify_n_must_be` /
+      `async_reject_lost_calls` = 3（訂正済み） / `init_wait_notifications` / `test_notify_wait_notifications_calls` / `test_async_wait_notifications` / `test_notify_mixed_case` / `test_notify_unlisten` / `test_notify_n_must_be` /
       `test_notify_tests` ≥ 21）が期待値。`test_notify` の `took Ns` を PROGRESS に（見込み +5 s / サーバー）
   - 対象: `src/pq/async_conn.mojo`, `src/pq/__init__.mojo`, `tests/test_notify.mojo`, `tests/test_async.mojo`
   - 依存: T2
