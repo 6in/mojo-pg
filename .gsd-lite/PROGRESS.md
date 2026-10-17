@@ -13,3 +13,16 @@
 - 次への注意: plan は RESEARCH §6 のタスク分割（T1〜T6）と §4 の P1〜P20 を完了基準に写す。`fetch_all` のテストは `close(PQsocket)` 方式（`pg_terminate_backend` では差分が出ない）。
   `notifications()` 先行チェックのテストは「message が伸びない」を断定。`_after_send` -1 は到達不能（libpq ソースで根拠あり）→ コードレビュー担保。
   時間を書くときは**単位を明記**（TestSuite は ms）。bench は `check` 直後に測らない。`pixi.lock` は bench 環境ぶん増える（コミット対象）
+
+## turn 2 — plan — 7 タスク（T1 持ち越し整理 / T2 ENCODING + 先行チェック / T3 wait_notifications + 契約外テスト / T4 Windows / T5 bench / T6 README + LICENSE / T7 統合）
+- やったこと: REQ / DECISIONS / RESEARCH / 直近 2 件の reflect / HANDOFF §5.1・§8・§10 と `src/pq` `tests` `examples` `pixi.toml` の実物を読み、PLAN.md（検証コマンド、チェックリスト 29 行、
+  決めた事項 20、採否表 9 行、P1〜P20 の対応先）を作成。チェックリストは実行可能スクリプト `scratch/turn-002-checklist.sh`（82 key）にして現在の木で 1 回実行（`scratch/turn-002-checklist.log`）。
+  行番号・件数はすべて grep / Read の結果（`TYPE_MISMATCH` の基線 src 125 / tests 97 は RESEARCH と一致）。サブエージェント 0 本
+- 想定外: (1) RESEARCH §6 の T2 は src 5 + tests 3 ファイルに `wait_notifications` の 11 件が乗る規模で、1 ターンを超える見込み → T2 / T3 に分けて 7 タスクにした。
+  (2) `examples/` の docstring で `pixi run` を書いているのは `bench_formats` の 1 本だけ（RESEARCH §2.9 は「実行方法が無いのは hello_libpq」と書いたが、`pixi run <task>` の明記は 6 本に無い）→ T1 / T6 で 7 本に揃える。
+  (3) チェックリストの `ENCODING` パターンが `PGCLIENTENCODING` / `ENCODING 'SQL_ASCII'` に当たったので `PgErrorKind.ENCODING` 等に絞った（スクリプト修正 1 回）。
+  (4) `curl` と `md5sum` は allowlist に無い → LICENSE は `pixi run python <scratch .py>` で取得（決めた事項 12）
+- やり直し: 1 回（チェックリストの `ENCODING` パターンを絞って再実行。上記 (3)）
+- 次への注意: impl は先頭の未完了タスク T1 から。T1 (b) は修正前に 1 回走らせて `TIMEOUT` で落ちることを見る（陽性対照）。T1 (d) は `_open(_conninfo())`（`pq_test` 側）から発行し、
+  `conn.transaction()` の中では発行しない。`close(PQsocket)` 後〜`__del__` の間に fd を開かない。PLAN 訂正は `TRACE.md`「PLAN 訂正（turn N）」節に 1 件 1 行（表のセルに書かない）。
+  時間は単位付き（TestSuite は ms）。bench（T5）は `check` 直後に測らない
