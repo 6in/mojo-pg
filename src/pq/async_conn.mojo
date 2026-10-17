@@ -56,11 +56,14 @@ from pq._ffi.types import (
     CStr,
     CStrArray,
     IntPtr,
+    MutCStr,
+    MutRawPtr,
     OidPtr,
     PGRES_POLLING_OK,
     PGRES_POLLING_READING,
     PGRES_POLLING_WRITING,
     PGconnPtr,
+    PGnotify,
 )
 from pq._platform.poll import poll_socket
 from pq.connection import _SESSION_SETUP_SQL
@@ -1091,6 +1094,50 @@ struct AsyncConnection(Movable):
             return False
         raise self._connection_error()
 
+    def set_single_row_mode(mut self) raises PgError:
+        """Ask for the command in flight to answer one row at a time.
+
+        Must be called after a `send*` and before anything has looked at the
+        incoming data -- `poll_result`, `consume_input` and `is_busy` all close
+        the window, and so does the handshake not being finished. libpq's own
+        `PQsetSingleRowMode` keeps answering 1 after the first result has been
+        collected, where switching mode no longer does anything, so the window
+        is tracked here instead of being asked of libpq.
+
+        In single-row mode a `SELECT` of three rows answers with three results
+        of one row each and then a fourth that carries none, which is the end
+        of that statement rather than the end of the command.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when the call is outside the window,
+                with `set_single_row_mode() must follow send() before any
+                result is read (state <State>)`.
+        """
+        if not self._single_row_allowed:
+            raise self._single_row_error()
+        if self._pq[].PQsetSingleRowMode(self._conn) == 0:
+            # Not reachable while the flag above is honest: libpq refuses only
+            # outside the window this struct already guards.
+            raise self._single_row_error()
+
+    def _single_row_error(self) -> PgError:
+        """Build the `USAGE` error for a `set_single_row_mode` out of its window.
+
+        Returns:
+            A `PgError` naming the state the call was made in.
+        """
+        return PgError(
+            PgErrorKind.USAGE,
+            String(
+                (
+                    "set_single_row_mode() must follow send() before any result"
+                    " is read (state "
+                ),
+                self._state,
+                ")",
+            ),
+        )
+
     def consume_input(mut self) raises PgError:
         """Read whatever has arrived on the socket into libpq's buffer.
 
@@ -1174,6 +1221,120 @@ struct AsyncConnection(Movable):
             self._state = AsyncState.IDLE
             return None
         return adopt_result(self._pq, self._conn, res)
+
+    def cancel(self) raises PgError:
+        """Ask the server to abandon the command in flight.
+
+        The request travels on a second, short-lived connection, so it does
+        not queue behind the command it cancels and returns in a millisecond
+        or two. What it does *not* do is end the command on this connection:
+        the server stops working and answers with SQLSTATE `57014`
+        (`canceling statement due to user request`), which is collected with
+        `poll_result` / `fetch_all` like any other failure. Inside an explicit
+        transaction that leaves `transaction_status()` at `PQTRANS_INERROR`,
+        so a `ROLLBACK` is still owed.
+
+        A cancel with nothing in flight is deliberately not an error: a result
+        can arrive in the instant between deciding to cancel and calling, and
+        there is nothing harmful about the race. An `IDLE` connection
+        therefore does nothing here.
+
+        Note that the cancel request is **not encrypted**: PostgreSQL 18's
+        documentation marks `PQcancel` deprecated and insecure for that
+        reason. The replacement, `PQcancelBlocking`, needs libpq 17 or newer,
+        which `pq`'s floor of libpq 14 does not guarantee; moving to it is a
+        later decision.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `cancel() called while
+                Connecting` during the handshake, or
+                `PgErrorKind.CONNECTION` when the cancel object cannot be
+                built or the request cannot be delivered -- a connection the
+                server has already dropped, for one.
+        """
+        self._reject_connecting("cancel")
+        if self._state == AsyncState.IDLE:
+            return
+        var handle = self._pq[].PQgetCancel(self._conn)
+        if handle.is_null():
+            raise self._connection_error()
+        var errbuf = List[UInt8](capacity=256)
+        for _i in range(256):
+            errbuf.append(UInt8(0))
+        var sent = self._pq[].PQcancel(
+            handle,
+            MutCStr(unsafe_from_address=Int(errbuf.unsafe_ptr())),
+            c_int(256),
+        )
+        # Read the buffer before freeing the handle: PQfreeCancel may reuse the
+        # memory the message was written into.
+        var reason = String(
+            unsafe_from_utf8_ptr=CStr(
+                unsafe_from_address=Int(errbuf.unsafe_ptr())
+            )
+        )
+        self._pq[].PQfreeCancel(handle)
+        _ = errbuf^
+        if sent == 0:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                reason if reason != "" else String("PQcancel failed"),
+            )
+
+    def notifications(mut self) raises PgError -> List[Notification]:
+        """Collect every `LISTEN` / `NOTIFY` message that has arrived.
+
+        Notifications ride along with whatever else the server sends, so this
+        reads the socket first and then empties libpq's queue. It may be
+        called in any state but `Connecting`: a notification sent while a
+        command was running is collected once that command's results have
+        been read, and one sent while the connection was idle is collected
+        here directly.
+
+        One call is not a promise of every notification the server has sent --
+        they arrive when they arrive -- so a test or a loop that needs *n* of
+        them calls this (or `wait_notification`) until it has *n*.
+
+        Returns:
+            The notifications, oldest first, each with owned strings. Empty
+            when none had arrived.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `notifications() called while
+                Connecting`, or `PgErrorKind.CONNECTION` when the connection
+                is lost, carrying libpq's own message.
+        """
+        self._reject_connecting("notifications")
+        if self._pq[].PQconsumeInput(self._conn) == 0:
+            raise self._connection_error()
+        var found = self._pending.copy()
+        self._pending.clear()
+        while True:
+            var raw = self._pq[].PQnotifies(self._conn)
+            if raw.is_null():
+                break
+            var message = Pointer[PGnotify, MutUntrackedOrigin](
+                unsafe_from_address=raw._addr
+            )[]
+            # Both strings are copied out before the PGnotify is freed: libpq
+            # hands over the allocation, text and all.
+            found.append(
+                Notification(
+                    channel=String(
+                        unsafe_from_utf8_ptr=CStr(
+                            unsafe_from_address=message.relname
+                        )
+                    ),
+                    payload=String(
+                        unsafe_from_utf8_ptr=CStr(
+                            unsafe_from_address=message.extra
+                        )
+                    ),
+                    backend_pid=Int(message.be_pid),
+                )
+            )
+            self._pq[].PQfreemem(MutRawPtr(unsafe_from_address=raw._addr))
+        return found^
 
     def _wait_for(
         self, readable: Bool, remaining: Int, timeout_ms: Int
@@ -1286,3 +1447,53 @@ struct AsyncConnection(Movable):
         if first_error:
             raise first_error.take()
         return results^
+
+    def wait_notification(
+        mut self, timeout_ms: Int
+    ) raises PgError -> Optional[Notification]:
+        """Wait for one `LISTEN` / `NOTIFY` message and return it.
+
+        The `notifications` / wait loop written once, with a budget for the
+        whole wait. Running out of it is **not** an error here, unlike every
+        other budget in this struct: nothing arriving is the ordinary outcome
+        of listening, so it answers None.
+
+        A round trip can deliver several notifications at once while this
+        returns one, so the surplus is held and the next call answers from it
+        without waiting.
+
+        Args:
+            timeout_ms: Milliseconds to wait in total. `0` looks once without
+                waiting, `-1` waits forever.
+
+        Returns:
+            The oldest notification, or None when the budget ran out first.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `wait_notification() called
+                while Connecting` or when `timeout_ms` is below `-1`, or
+                `PgErrorKind.CONNECTION` when the connection is lost.
+        """
+        _reject_bad_timeout(timeout_ms)
+        self._reject_connecting("wait_notification")
+        var deadline = monotonic() + timeout_ms * 1_000_000
+        while True:
+            var found = self.notifications()
+            if len(found) > 0:
+                for i in range(1, len(found)):
+                    self._pending.append(found[i].copy())
+                return found[0].copy()
+            var remaining = -1
+            if timeout_ms >= 0:
+                var left = deadline - monotonic()
+                # Round up, as `fetch_all` does: a sub-millisecond remainder
+                # is still time the caller allowed.
+                remaining = (left + 999_999) // 1_000_000 if left > 0 else 0
+                if remaining <= 0:
+                    return None
+            try:
+                self.wait_readable(remaining)
+            except e:
+                if e.kind == PgErrorKind.TIMEOUT:
+                    return None
+                raise e^

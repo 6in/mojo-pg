@@ -215,9 +215,32 @@ print(results[0][0].get[Int32](1))
   a hand-written loop just keeps calling `poll_result` until `IDLE`. The
   connection is usable for the next `send` either way.
 
-`cancel`, `set_single_row_mode` and the `LISTEN` / `NOTIFY` side --
-`notifications` and `wait_notification` -- are documented here once they
-land.
+- **Cancelling.** `cancel` asks the server to drop the command in flight
+  over a second, short-lived connection, so it answers in a millisecond or
+  two. The command itself still has to be collected: it comes back as
+  `PgErrorKind.SERVER` with SQLSTATE `57014`. Inside an explicit
+  transaction that leaves `transaction_status()` at `PQTRANS_INERROR`, where
+  every further statement is `25P02` until a `ROLLBACK` is sent. A `cancel`
+  with nothing in flight does nothing rather than raising.
+- **One row at a time.** `set_single_row_mode` right after a `send*` turns
+  each row of each statement into a result of its own, followed by one
+  carrying no rows: `SELECT generate_series(1,3)` becomes four results. The
+  window closes as soon as anything reads from the connection, and calling
+  it outside the window is `USAGE`.
+- **`LISTEN` / `NOTIFY`.** `send("LISTEN channel")` like any other command,
+  then collect with `notifications` (everything that has arrived, possibly
+  nothing) or `wait_notification` (one, with a budget). Neither promises
+  that one call sees every notification already sent, so a reader that needs
+  *n* of them keeps calling. `wait_notification` answers None when its
+  budget runs out -- nothing arriving is a normal outcome, not a `TIMEOUT`.
+
+```mojo
+conn.send("LISTEN jobs")
+_ = conn.fetch_all(5000)
+var note = conn.wait_notification(2000)
+if note:
+    print(note.value().channel, note.value().payload)
+```
 
 ## `PgErrorKind`
 

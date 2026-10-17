@@ -472,6 +472,36 @@ def _wait_readable_allowing_timeout(
             raise Error(String(e))
 
 
+def _cancel(mut conn: AsyncConnection) raises:
+    """Ask the server to abandon whatever `conn` is running.
+
+    Args:
+        conn: The connection to cancel on.
+
+    Raises:
+        Error: If `cancel` raised a `PgError`.
+    """
+    try:
+        conn.cancel()
+    except e:
+        raise Error(String(e))
+
+
+def _set_single_row_mode(mut conn: AsyncConnection) raises:
+    """Switch the command just sent on `conn` to one result per row.
+
+    Args:
+        conn: The connection with a freshly sent command.
+
+    Raises:
+        Error: If `set_single_row_mode` raised a `PgError`.
+    """
+    try:
+        conn.set_single_row_mode()
+    except e:
+        raise Error(String(e))
+
+
 def _text_at(res: Result, row: Int, col: Int) raises -> String:
     """Read one column of one row as text.
 
@@ -739,6 +769,75 @@ def test_send_while_connecting_is_usage() raises:
     # particular libpq's own "no connection to the server" is absent.
     assert_equal(error.sqlstate, "")
     assert_false(error.message.find("no connection") >= 0)
+
+
+# --- T4 ---
+
+
+def test_cancel_stops_a_running_statement() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    _send(conn, "SELECT pg_sleep(10)")
+    # One wait so the statement is really running on the server; it times out,
+    # which is the point -- pg_sleep(10) answers nothing for ten seconds.
+    _wait_readable_allowing_timeout(conn, 100)
+    var started = monotonic()
+    _cancel(conn)
+    var error = _fetch_all_error(conn, 5000)
+    var took = _elapsed_ms(started)
+    assert_true(error.kind == PgErrorKind.SERVER, String(error))
+    assert_equal(error.sqlstate, "57014")
+    assert_true(error.message.find("canceling statement") >= 0, error.message)
+    # The cancel travels on its own connection, so it does not queue behind
+    # the ten-second sleep it is cancelling.
+    assert_true(took < 1000, "cancel and collect took " + String(took) + " ms")
+    assert_true(conn.state() == AsyncState.IDLE)
+    # And the connection itself is untouched.
+    _send(conn, "SELECT 42")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    assert_equal(_int32_at(results[0], 0, 0), Int32(42))
+
+
+def test_cancel_while_idle_is_a_no_op() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    # A result can arrive in the instant between deciding to cancel and
+    # calling, so cancelling nothing is a race that has to be harmless.
+    _cancel(conn)
+    assert_true(conn.state() == AsyncState.IDLE)
+    _send(conn, "SELECT 1")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    assert_equal(_int32_at(results[0], 0, 0), Int32(1))
+
+
+def test_single_row_mode_splits_the_rows() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    _send(conn, "SELECT generate_series(1,3)")
+    _set_single_row_mode(conn)
+    var results = _fetch_all(conn, 5000)
+    # Three rows, three results, plus the empty one that ends the statement.
+    assert_equal(len(results), 4)
+    for i in range(3):
+        assert_equal(results[i].row_count(), 1)
+        assert_equal(_int32_at(results[i], 0, 0), Int32(i + 1))
+    assert_equal(results[3].row_count(), 0)
+    assert_true(conn.state() == AsyncState.IDLE)
+
+
+def test_single_row_mode_error_after_a_row() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    # The first row divides by 1 and arrives; the second divides by 0.
+    _send(conn, "SELECT 1/(2-generate_series(1,2))")
+    _set_single_row_mode(conn)
+    var error = _fetch_all_error(conn, 5000)
+    assert_true(error.kind == PgErrorKind.SERVER, String(error))
+    assert_equal(error.sqlstate, "22012")
+    # fetch_all drained the rest before raising, so the connection is usable.
+    assert_true(conn.state() == AsyncState.IDLE)
+    _send(conn, "SELECT 1")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    assert_equal(_int32_at(results[0], 0, 0), Int32(1))
 
 
 # --- 第 2 弾は T5 ---

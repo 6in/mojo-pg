@@ -208,7 +208,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: `tests/test_async.mojo`（対象: その 1 ファイル。決めた事項 2・6〜9 の契約どおりに書き、親が統合後にコンパイルを通す。**ヘルパ名は上記 (c) のとおり**。T5 が同じファイルに追記するので `# --- 第 2 弾は T5 ---` の区切りコメントを末尾に）
     - 親: `async_conn.mojo`（**最初に `AsyncState` / `PollState` / `start` / `poll_connect` / `connect_blocking` + テスト①をコンパイルして通してから**残りを書く。Phase 2 reflect Minus 3）+ (b)(d)(e)
 
-- [ ] T4: `cancel()` / `notifications()` / `wait_notification()` / `set_single_row_mode()`（`async_conn.mojo` 後半）+ `tests/test_async.mojo` 追記（受け入れ §5.1-2）+ `tests/test_notify.mojo` 最小（受け入れ §5.1-3）+ examples 2 本 + `pixi.toml` / `final_check.sh`
+- [x] T4: `cancel()` / `notifications()` / `wait_notification()` / `set_single_row_mode()`（`async_conn.mojo` 後半）+ `tests/test_async.mojo` 追記（受け入れ §5.1-2）+ `tests/test_notify.mojo` 最小（受け入れ §5.1-3）+ examples 2 本 + `pixi.toml` / `final_check.sh`
   - 完了基準:
     - (a) `src/pq/async_conn.mojo` に **決めた事項 10**（`cancel`）、**決めた事項 11**（`notifications` / `wait_notification` と `_pending` キュー）、**決めた事項 12**（`set_single_row_mode` のクライアント側ガード）。
       `cancel()`: `BUSY` / `SENDING` のときだけ `PQgetCancel`（NULL → `CONNECTION` with `PQerrorMessage`）→ `PQcancel(c, errbuf, 256)`（errbuf は `List[UInt8](capacity=256)` を 256 個の 0 で埋めた `unsafe_ptr()`）→ **errbuf を `String` に読んでから** `PQfreeCancel`（P17）→ 0 なら `CONNECTION`（message は errbuf の文言）。
