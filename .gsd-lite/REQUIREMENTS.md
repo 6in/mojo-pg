@@ -1,225 +1,277 @@
-# REQUIREMENTS — phase3-binary-all-types
+# REQUIREMENTS — phase4-async-cancel-notify
 
-- 作成: 2026-10-16（discuss）
-- 対象リポジトリ: このリポジトリ（in-repo 形）。base = `main`（Phase 2 マージ済み `e60b46f`）
-- 前提文書: `HANDOFF.md` §6（型マッピング）/ §9 Phase 3 / §10 Phase 3 / §11、
-  `.gsd-lite/archive/phase2-params-prepared-tx/`（前マイルストーンの成果物）、
-  `.gsd-lite/reflect/20261016-0246-phase2-params-prepared-tx.md`（直近の振り返り）
+- 対象: HANDOFF.md §9 Phase 4（非同期）。§7「非同期設計」と §10「Phase 4」の受け入れ条件が原本
+- 前マイルストーン: `phase3-binary-all-types`（`.gsd-lite/archive/phase3-binary-all-types/`、reflect
+  `.gsd-lite/reflect/20261017-0254-phase3-binary-all-types.md`）
+- この文書は WHAT。WHY は `DECISIONS.md`
 
 ## 1. 目的
 
-`Result` をバイナリ結果形式でも読めるようにし、HANDOFF §6 の全型（numeric / date / timestamp / timestamptz /
-uuid / json / jsonb）をテキスト・バイナリの両形式で `Row.get[T]` できるようにする。同じ型をパラメータとしても
-送れるようにし、日時系の time / timetz / interval も加える。
+Mojo（1.1.0）から libpq の非ブロッキング API を使い、**明示的に状態を進める** `AsyncConnection` を提供する。
+非同期接続・非同期クエリ送信 / 結果受信・キャンセル・LISTEN/NOTIFY を、OS のソケット poll（`_platform/poll`）と
+組み合わせて同じスレッドで進められるようにする。Mojo 言語の `async` には依存しない（HANDOFF §7.3）。
 
 ## 2. スコープ（このマイルストーンでやること）
 
-- バイナリ結果形式: `execute(sql, params)` / `PreparedStatement.execute(params)` で結果形式を選べる（§4.1）
-- `decode_binary`: 既存 8 型（bool / int2 / int4 / int8 / float4 / float8 / text 系 / bytea）のバイナリ解釈（§4.2）
-- 拡張型（§4.3）: numeric → `Decimal`、date → `Date`、timestamp → `Timestamp`、timestamptz → `TimestampTz`、
-  uuid → `UUID`、json / jsonb → `String`、time → `Time`、timetz → `TimeTz`、interval → `Interval`。
-  テキスト形式・バイナリ形式の両方で `get[T]` / `get_optional[T]` できる
-- 拡張型のパラメータ送信: `Param` が上記の自前型を受け付けてバイナリで送る（§4.4）
-- zero-copy Row アクセス（HANDOFF §11。§4.5。成立条件つき）
-- text vs binary の簡易ベンチ（§4.6。合否判定なし）
-- 持ち越し整理（§6）
-- Phase 1 / 2 と同じ堅牢性・品質基準（§5.2 / §5.4）
+- HANDOFF §9 Phase 4 の全部: `_platform/poll`、`AsyncConnection`、キャンセル、LISTEN/NOTIFY（D1）
+- 隣接項目 4 件（D2）: 持ち越し整理（§6）、TestSuite の SKIP 集計（§4.8）、jsonb / 文字列系 OID 判定の一元化（§4.9）、
+  UTF-8 検証の方針決定（§4.10）
+- 堅牢性の受け入れ基準を入れる（§5.2、差し戻し対象。D3）
 
 ## 3. スコープ外（やらないこと）
 
-- Phase 4 以降: 非同期 API、LISTEN/NOTIFY、キャンセル、README 整備、Windows コードパス、psycopg 比較ベンチ
-- 配列型（`_int4` 等）、range / multirange、hstore、enum、複合型、その他 §6 に無い型（Phase 6 候補）
-- `Decimal` の算術演算（HANDOFF §11: `String` 相互変換と比較だけ）
-- タイムゾーン名の解決（`TimestampTz` は UTC 保持。ローカル時刻への変換 API は作らない）
-- 列ごとの結果形式指定（libpq の `PQexecParams` は全列一括のため）
-- 既存の「widening なし」規則の変更（int2 列を `Int32` で読む等は引き続き `TYPE_MISMATCH`）
-- HANDOFF §3 の対象外（ワイヤプロトコル自前実装、プール、COPY、パイプライン、ORM、Mojo async 統合）
+- Phase 5: ベンチマーク（psycopg 比較）、README、examples の総点検、Windows コードパスの**レビュー**（コードは今回書く。§4.2）
+- Mojo の `async` / `await` 統合、イベントループの提供（状態機械 API の上に載せるアダプタは作らない。HANDOFF §7.3）
+- HANDOFF §3 の対象外（ワイヤプロトコル自前実装、プール、COPY、パイプラインモード、ORM）
+- 同期 `Connection` へのキャンセル追加（同一スレッドでブロック中に呼べないため。別スレッド / シグナルは対象外）
+- 配列型・range・その他 §6 に無い型（Phase 6 候補）
 - CI（Phase 1 D7 と同じ。受け入れはローカル `pixi run test`）
+
+（以下の節はラウンドの進行に合わせて追記する）
 
 ## 4. 機能要件
 
-### 4.1 結果形式の選択（`connection.mojo` / `prepared.mojo` / `result.mojo`）
-- `ResultFormat`（`pq` 直下で公開。`TEXT = 0` / `BINARY = 1`。`PgErrorKind` と同じ定数 struct 形式）
-- `Connection.execute(sql, params, result_format: ResultFormat = ResultFormat.TEXT)` と
-  `PreparedStatement.execute(params, result_format = ResultFormat.TEXT)` に**キーワード引数**を足す。既定はテキストで後方互換。
-  `execute(sql)` 単体は `PQexec`（テキスト固定）のまま。バイナリが欲しければ `execute(sql, [], result_format=BINARY)`
-- `Row.get[T]` / `get_optional[T]` は列の `PQfformat` を見てテキスト / バイナリの decode を自動で切り替える
-  （呼び出し側は形式を意識しない）。`Result.column_format(i) -> ResultFormat` を公開する
-- バイナリ形式の列に対する `T` と OID の対応は §4.2 / §4.3 の表のとおり**厳密**。それ以外は `TYPE_MISMATCH`:
-  - `get[String]` はバイナリでは文字列系 OID（text / varchar / bpchar / name / json / jsonb）のみ。
-    その他の OID（未対応型を含む）は `TYPE_MISMATCH` で、メッセージに OID と「text 形式で取り直せ」を含める
-  - `get[List[UInt8]]` は bytea（17）のみ（生バイトの逃げ道にしない）
-  - 新しい `PgErrorKind` は足さない（6 つのまま）
-- テキスト形式の規則は Phase 1 のまま（`get[String]` は任意 OID、widening なし）
+### 4.1 `_platform/poll`（新規 `src/pq/_platform/poll.mojo`。D7）
 
-### 4.2 `decode_binary`（既存 8 型。HANDOFF §6 の「バイナリ形式」列）
-| OID | `T` | バイナリ |
-|---|---|---|
-| 16 bool | `Bool` | 1 byte（0 / 1。それ以外は `TYPE_MISMATCH`） |
-| 21 int2 | `Int16` | 2 byte BE |
-| 23 int4 | `Int32` | 4 byte BE |
-| 20 int8 | `Int64` / `Int` | 8 byte BE |
-| 700 float4 | `Float32` | IEEE 754 4 byte BE（NaN / ±Inf / -0.0 をそのまま） |
-| 701 float8 | `Float64` | IEEE 754 8 byte BE |
-| 25 / 1043 / 1042 / 19 | `String` | UTF-8 そのまま（長さは `PQgetlength`。NUL を含み得るので `PQgetvalue` の C 文字列扱いをしない） |
-| 17 bytea | `List[UInt8]` | 生バイト（`PQgetlength` の長さ） |
-- 長さが型の固定長と一致しない列は `TYPE_MISMATCH`（メッセージに期待長と実長）
-- `decode_binary.mojo` に `decode_binary[T](ptr, length, oid)` を置き、`decode_text` と同じ 1 箇所で型表を持つ。
-  `Row.get` の分岐は「format を見てどちらかを呼ぶ」だけにする
+- `poll_socket(fd: Int, want_read: Bool, want_write: Bool, timeout_ms: Int) raises PgError -> PollEvents`
+  （名前は plan が決めてよい）。Linux / macOS は libc `poll()` を `external_call` で呼び、`struct pollfd` を Mojo の struct で定義する
+  （`fd: Int32`、`events: Int16`、`revents: Int16`。レイアウトは両 OS で同じ。`POLLIN` / `POLLOUT` / `POLLERR` / `POLLHUP` / `POLLNVAL` の値は
+  OS で異なる → research が確定）
+- Windows は `WSAPoll`（`ws2_32.dll`）と `SOCKET`（ポインタ幅）の分岐を `@parameter if`（コンパイル時 OS 判定。手段は research）で**書くが未検証**。
+  モジュール docstring に「未検証」と明記。Phase 5 がレビュー
+- `timeout_ms`: `0` は即時、`-1` は無期限（libc `poll` と同じ）、それ以外は正のミリ秒。負の `-1` 以外は `USAGE`
+- `EINTR` は残り時間で再試行する（単調時計で測る。手段は research）
+- 戻り: 発生イベント（readable / writable / error / hangup / timeout）。`POLLNVAL` は `USAGE`（閉じたソケット）
 
-### 4.3 拡張型（`types.mojo` 等の新モジュール。すべて `pq` 直下で公開、`Copyable & Movable & Equatable & Writable`）
-| PostgreSQL | OID | Mojo 型 | 内部表現 | テキスト | バイナリ |
-|---|---|---|---|---|---|
-| numeric | 1700 | `Decimal` | `sign` / `weight: Int16` / `dscale: Int16` / `digits: List[Int16]`（base-10000）+ NaN / +Inf / -Inf（PG14 以降）フラグ | 10 進文字列を自前 parse / format（`1.50`、`-0.001`、`1e5` 形式は受けない） | ndigits, weight, sign, dscale, digits（`numeric_send` と同じ）。**サーバーは ±Infinity を dscale=32 で送ってくる**（research turn 1 実測。NaN は 0）。decode は sign が special なら weight / dscale を無視、encode は 0 を送る（サーバーは受理し 32 に正規化して返す）。往復テストは値比較 |
-| date | 1082 | `Date` | `days: Int32`（2000-01-01 起点） | `YYYY-MM-DD`（紀元前 ` BC` 付きは受ける） | int32 |
-| timestamp | 1114 | `Timestamp` | `micros: Int64`（2000-01-01 00:00:00 起点） | `YYYY-MM-DD HH:MM:SS[.ffffff]` | int64 |
-| timestamptz | 1184 | `TimestampTz` | `micros: Int64`（UTC） | 同上 + オフセット（`+09`、`+09:30`、`-03:00:30`）を解釈して UTC に正規化 | int64（UTC） |
-| time | 1083 | `Time` | `micros: Int64`（0〜86400000000） | `HH:MM:SS[.ffffff]` | int64 |
-| timetz | 1266 | `TimeTz` | `micros: Int64` + `offset_secs: Int32`（PG と同じ符号規則。西が正） | `HH:MM:SS[.ffffff]±HH[:MM[:SS]]` | int64 + int32 |
-| interval | 1186 | `Interval` | `micros: Int64` / `days: Int32` / `months: Int32` | IntervalStyle `postgres` 形式（`1 year 2 mons 3 days 04:05:06.789`、負値 `-1 days +02:00:00` 含む）。**PG17 以降は `infinity` / `-infinity` もある**（research turn 1 訂正。PG14 には無い: `'infinity'::interval` は 22007） | int64 + int32 + int32（この順。PG17 の ±infinity は 3 フィールド全部 `MAX` / 全部 `MIN` が番兵） |
-| uuid | 2950 | `UUID` | 16 byte（`InlineArray[UInt8, 16]` 相当） | `8-4-4-4-12`（大文字小文字どちらも受ける。出力は小文字） | 16 byte |
-| json | 114 | `String` | — | そのまま | そのまま |
-| jsonb | 3802 | `String` | — | そのまま | 先頭 1 byte のバージョン（= 1。それ以外は `TYPE_MISMATCH`）を剥がしてテキスト |
-- 日時系の `±infinity`: PG と同じ番兵（`Int64.MAX` / `Int64.MIN`、date は `Int32.MAX` / `Int32.MIN`、interval は 3 フィールド全部 MAX / 全部 MIN = PG17 の番兵）を保持し
-  `is_infinite()` / `is_finite()` を持つ（research turn 1 訂正: interval も含める。PG14 では interval の無限値は発生しないので、PG14 向けテストは送らない）。
-  テキストは `infinity` / `-infinity` と相互変換
-- テキスト形式の細部（research turn 1 で実測）: timestamptz の ` BC` は**オフセットの後**（`0001-01-01 00:00:00+00 BC`）。オフセットは `+09` / `+05:30` / `+05:53:28` の 3 幅。
-  小数秒は末尾ゼロを削った 1〜6 桁（`.5` = 500000 µs）。年は 4 桁ゼロ埋めで 4 桁超はそのまま（`10000-01-01`）。interval の複数形は値 ≠ 1 のとき（`-1 days`）、
-  `+` 接頭辞は「前に出した成分が負で、この成分が正」のとき（`-1 years +1 day`）、時刻部の時は 2 桁以上で上限なし（`36:00:00`）。詳細は RESEARCH §2.2.3
-- 日時系の分解アクセサ `year() / month() / day() / hour() / minute() / second() / microsecond()` と構築子
-  `Date.from_ymd(y, m, d) raises` / `Timestamp.from_ymd_hms(...)` / `TimestampTz.from_utc(...)`（範囲外は `USAGE`）。
-  `Interval` は `months / days / micros` の 3 フィールドのまま（正規化はサーバーに任せる）
-- `write_to` / `String(x)` は PG のテキスト形式と同じ文字列を返す（往復テストはこれを使う）
-- `==` の意味: 日時系は内部整数の比較。`Decimal` は **PG の `numeric_eq` と同じ値比較**（`1.0 == 1.00` は真。`dscale()` は別途読める）。
-  NaN 同士は PG と同じく「等しい」（`numeric` の NaN は比較で等しい）
-- `Decimal` の `String` 相互変換: `Decimal("1.50")` / `String(d)` が無損失（`dscale` を保つ）。`Decimal` 同士の算術は作らない
-- テキスト形式の解釈前提（§4.7 で固定）: `DateStyle = 'ISO, YMD'`、`IntervalStyle = 'postgres'`。
-  非 ISO の文字列（`01/02/2024` 等）は `TYPE_MISMATCH`
+### 4.2 `AsyncConnection`（新規 `src/pq/async_conn.mojo`。`pq` 直下で公開。D5）
 
-### 4.4 拡張型のパラメータ送信（`params.mojo` / `encode_binary.mojo`）
-- `Param` に `Decimal` / `Date` / `Timestamp` / `TimestampTz` / `Time` / `TimeTz` / `Interval` / `UUID` の `@implicit` ctor と
-  `Optional[...]` 版（Phase 2 D14 と同じ）を足す。すべて**バイナリ**で送り、OID は §4.3 の値を `paramTypes` に入れる
-- json / jsonb は `String` として送る（型は SQL 側のキャストに任せる。専用型は作らない）
-- `encode_binary.mojo` に各型の `encode_*` を足し、`decode_binary` との往復テストを単体で持つ（サーバー不要）
+- `Movable` のみ（`Connection` と同じ）。`__del__` で `PQfinish`（結果が残っていても libpq が片付ける。drain しない）
+- `_pq: Pointer[LibpqFFI, MutUntrackedOrigin]` と `_conn: PGconnPtr` を持つ（`Connection` と同じ持ち方）
+- **結果変換の共有**: `Connection._take_result`（PGresult → `Result` / `PgError`、失敗経路の `PQclear`）をモジュール関数
+  （例 `result.mojo` か新規 `_result_adopt.mojo` の `adopt_result(pq, conn, res)`）に抜き出し、`Connection` と `AsyncConnection` の両方が呼ぶ。
+  同期側の公開 API と挙動（kind の判定、診断フィールドの複製）は不変で、既存テストの期待値を変えない。`PGRES_SINGLE_TUPLE` も成功として扱う
+  （§4.4）
+- 接続:
+  - `AsyncConnection.start(var conninfo: String) raises PgError -> AsyncConnection`（`PQconnectStartParams` +
+    `PQsetnonblocking(1)`。`PQstatus == CONNECTION_BAD` なら即 `CONNECTION`）
+  - `AsyncConnection.start(params: Dict[String, String])` も同形で提供
+  - `poll_connect() raises PgError -> PollState`（`PQconnectPoll` の `PGRES_POLLING_READING / WRITING / OK / FAILED` を
+    `NeedRead / NeedWrite / Ready / Failed` に写す。`Failed` は戻り値ではなく `CONNECTION` を投げる。**要実測**: `PQconnectPoll` は最初に
+    `PGRES_POLLING_WRITING` を返す）
+  - 接続直後の GUC 固定（D13）: `PQconnectPoll` が `PGRES_POLLING_OK` を返したら `poll_connect` は内部で同期側と同じ
+    `_SESSION_SETUP_SQL`（`SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'`。`connection.mojo` の定数を共有）を `PQsendQuery` し、
+    その結果を NULL まで取り切るまで `NeedRead` / `NeedWrite` を返し続ける。取り切ったら `Ready`。SET が失敗したら `CONNECTION`（同期側と同じ kind）。
+    利用者には接続ポーリングの一部に見え、`state()` は `Connecting` のまま
+  - `socket() -> Int`（`PQsocket`。未接続 / 切断で `-1`。例外にしない）
+- 送信（D9。いずれも送信後に `PQflush` を呼び、0 なら送信完了、1 なら `NeedWrite` を返す / `flush() raises -> Bool` でも進められる）:
+  - `send(var sql: String) raises PgError`（`PQsendQuery`。複数ステートメントを `;` で送れる唯一の経路）
+  - `send(var sql: String, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT) raises PgError`
+    （`PQsendQueryParams`。Phase 2 の `Param` 列と Phase 3 の `result_format` をそのまま使う。**要実測**: libpq はパラメータバッファを
+    `PQsendQueryParams` の中でコピーする → 戻った時点で解放可）
+  - `send_prepare(var name: String, var sql: String, param_types: List[UInt32] = []) raises PgError`（`PQsendPrepare`）
+  - `send_prepared(var name: String, params: List[Param], result_format: ResultFormat = ResultFormat.TEXT) raises PgError`
+    （`PQsendQueryPrepared`。同期側 `PreparedStatement` は使わず名前文字列で指定）
+  - `set_single_row_mode() raises PgError`（`PQsetSingleRowMode`。送信直後・最初の `poll_result` 前にだけ呼べる。0 が返れば `USAGE`。
+    `_ffi` にバインディングを追加）
+  - 送信中（`PQflush` が 1 のまま）または結果待ち中に再度 `send*` を呼ぶと `USAGE`（メッセージに現在の状態名）。未接続（`poll_connect`
+    が `Ready` を返す前）も `USAGE`
+- 受信:
+  - `consume_input() raises PgError`（`PQconsumeInput`。0 なら `CONNECTION`）
+  - `is_busy() -> Bool`（`PQisBusy`）
+  - `poll_result() raises PgError -> Optional[Result]`（D14）: `PQconsumeInput`（0 なら `CONNECTION`）→ `PQisBusy` が真なら `None`
+    （まだ来ていない。呼ぶ側は `wait_readable` して再試行）→ 偽なら `PQgetResult`。非 NULL なら `adopt_result` した `Result`、NULL なら `None` を返し
+    状態を `Idle` に遷移。「待つべきか完了か」は呼ぶ側が `state()`（`Busy` なら待つ、`Idle` なら完了）または `is_busy()` で区別する。
+    `Idle` で呼んだら `None`（例外にしない）
+  - `state() -> AsyncState`（D15）: `Connecting` / `Idle` / `Sending`（`PQflush` が 1 を返したまま）/ `Busy`（結果待ち）。
+    `AsyncState` は `Equatable, TrivialRegisterPassable, Writable` の Int newtype で `pq` 直下に公開。`USAGE` のメッセージはこの名前を使う
+    （例 `send() called while Busy`）。`status()`（`PQstatus`）と `transaction_status()` も同期側と同じく公開
+  - エラー結果（`PGRES_FATAL_ERROR` 等）は `adopt_result` が `PgError` として投げる。投げた後も状態機械は壊れず、次の `poll_result` で残りの
+    結果（通常は直後に NULL）を取り切れる
+- キャンセル（D6）:
+  - `cancel() raises PgError`（`PQgetCancel` → `PQcancel(errbuf 256)` → `PQfreeCancel`。`PQgetCancel` が NULL / `PQcancel` が 0 なら
+    `CONNECTION`、errbuf の文言を message に）。呼べるのは結果待ち中。アイドル時は何もしない（`USAGE` にしない。競合で無害）
+  - 中断された結果は `poll_result` が SQLSTATE `57014` の `PgError`（kind `SERVER`）として返す
+- 通知（D1）:
+  - `Notification(Copyable, Movable, Equatable, Writable)`: `channel: String`、`payload: String`、`backend_pid: Int`
+  - `notifications() raises PgError -> List[Notification]`（`PQconsumeInput` → `PQnotifies` を NULL まで → 各 `PGnotify` を
+    `PQfreemem`。`PGnotify` の `relname` / `extra` / `be_pid` を所有型にコピー）
+- ブロッキング補助（D8。タイムアウトは `TIMEOUT`。`timeout_ms` の意味は §4.1）:
+  - `wait_readable(timeout_ms: Int) raises PgError` / `wait_writable(timeout_ms: Int) raises PgError`（`_platform/poll`。
+    タイムアウトで `TIMEOUT`、`POLLERR` / `POLLHUP` で `CONNECTION`）
+  - `AsyncConnection.connect_blocking(var conninfo: String, timeout_ms: Int) raises PgError -> AsyncConnection`
+    （`start` → `poll_connect` ループ。経過時間は全体で `timeout_ms`。`Dict` 版も）
+  - `fetch_all(timeout_ms: Int) raises PgError -> List[Result]`（`send*` の後、NULL まで回す。途中でエラー結果が来たら**残りを取り切ってから**
+    その `PgError` を投げる。全体で `timeout_ms`）
+  - `wait_notification(timeout_ms: Int) raises PgError -> Optional[Notification]`（`notifications()` が空なら `wait_readable` して再試行。
+    タイムアウトは `None`（例外にしない。待っても来ないのは正常））
+- `AsyncConnection` には `transaction()` / `prepare()` / `execute()` を**作らない**（§3）。BEGIN 等は `send` で送る
 
-### 4.5 zero-copy Row アクセス（best-effort。HANDOFF §11）
-- 候補 API: `Row[origin].get_text(col) raises -> StringSlice[origin]`、`Row[origin].get_bytes(col) raises -> Span[UInt8, origin]`
-  （`Result` の `PQgetvalue` 領域を指す。NULL は `NULL_VALUE`。`get_text` はテキスト形式または文字列系 OID のバイナリ列のみ）
-- **成立条件**: research がプローブで「`Result` を破棄した後にその slice を使うコードがコンパイルエラーになる」ことを確かめる。
-  不成立（origin が付けられない / `Result` の移動を防げない）なら RESEARCH に根拠を書いてスコープから外し、
-  REQ §2 のこの項を「見送り」に書き換える。unsafe な代替 API は公開しない
-- **research turn 1 の判定: 成立**（RESEARCH §2.3.1）。「破棄」の形は **`Result` を消費する移動**（`var r2 = res^` / 関数へ `res^` を渡す）で、
-  その後の slice 使用は `error: use of uninitialized value 'res'` になる。**`_ = res^` はエラーにならず、`Result` の破棄が slice の最後の使用の後まで延びる**
-  （安全だがエラーではない。Mojo の `_ = x^` は生存マーカー）。docstring はこの区別を書く
-- 成立した場合、§5.2 の「`Result` より長生きしない」はコンパイルエラーの陽性対照（**消費する移動の形**。PROGRESS にエラーメッセージを貼る）で示す
+### 4.3 `PollState`（`pq` 直下で公開）
 
-### 4.6 text vs binary の簡易ベンチ（`examples/bench_formats.mojo`、`pixi run bench`）
-- 10 万行 × 5 列（int4, int8, float8, text, timestamp）を `generate_series` で作り、text / binary で全行 `get[T]` した所要を表示
-- 合否判定は**しない**（HANDOFF §8 の「バイナリが速い」は Phase 5 で psycopg と並べて判定）。数値は PROGRESS と verify に記録する
-- `examples/` の規約どおり単体で実行でき、`PQ_TEST_CONNINFO` が無ければ 54317 に繋ぐ
+- `Equatable, TrivialRegisterPassable, Writable` の Int newtype（`ResultFormat` と同じ流儀）。定数 `NeedRead` / `NeedWrite` / `Ready`
+  （`Failed` は例外になるので定数は作らない）
 
-### 4.7 接続時の GUC 固定（`connection.mojo`）
-- `Connection.open` は接続成功直後に `PQexec("SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'")` を 1 回送る
-  （1 往復、約 1 ms）。失敗したら `PQfinish` してから `PgError(kind=Connection または Server)` を投げる（接続オブジェクトを返さない）
-- `TimeZone` は触らない。timestamptz / timetz のテキストはオフセットを解釈して UTC に正規化する
-- Phase 4 の非同期接続も同じ SET を最初のクエリステップとして送る（申し送り。今回は実装しない）
-- `test_connection` に「`SHOW DateStyle` が `ISO, YMD`」を 1 件足す
+### 4.4 `PgErrorKind.TIMEOUT`（`errors.mojo`。D11）
 
-### 4.8 `_ffi`
-- 追加バインドは不要の見込み（`PQfformat` / `PQgetlength` / `PQftype` は Phase 1 で済み）。必要になったら HANDOFF §5.2 の表に従って足す
+- `comptime TIMEOUT = Self(6)` を追加。`write_to` の名前表にも追加。意味: 「`timeout_ms` 以内に待っている状態変化が来なかった。接続は使える」
+- `adopt_result`（§4.2）は `PGRES_SINGLE_TUPLE` を `PGRES_TUPLES_OK` と同じ成功扱いにする（同期側では到達しないので挙動不変）
+
+### 4.5 `_ffi` の追加
+
+- `PQsetSingleRowMode` のバインディング（`libpq-fe.h:528`）。他は Phase 1 で既存（§8）
+- `PGnotify` 構造体は `_ffi/types.mojo` に既存。レイアウト（`relname: char*`、`be_pid: int`、`extra: char*`、`next: PGnotify*`）を
+  research が `libpq-fe.h` と照合し、**要実測**で `NOTIFY` 1 件を受けて確認する
+
+### 4.6 examples と pixi タスク
+
+- `examples/async_query.mojo`: 非同期接続 → `send("SELECT pg_sleep(2), 1")` → `poll_result` が `None` のあいだカウンタを進めつつ `wait_readable(100)`
+  → 結果と最終カウンタを表示。`pixi run example-async`
+- `examples/listen_notify.mojo`: `AsyncConnection` で `LISTEN ch` → 同期 `Connection` で `NOTIFY ch, 'payload'` → `wait_notification(2000)` で受信表示。
+  `pixi run example-notify`
+
+### 4.7 テスト（`tests/test_async.mojo` / `tests/test_notify.mojo` / `tests/test_poll.mojo` / `test_leak.mojo` 追記。分割は plan）
+
+- §5.1 の 4 件を 1 件ずつテストにする。`pg_sleep(2)` のカウンタは「`poll_result` が `None` を返した回数 ≥ 1 かつ経過 ≥ 2 s」で判定
+- cancel: `send("SELECT pg_sleep(10)")` → `wait_readable(100)` を 1 回 → `cancel()` → `fetch_all(5000)` が `57014` で失敗し、`cancel()` 呼び出しから
+  例外までの経過が 1 s 未満（単調時計）
+- NOTIFY: 別 `Connection` から `NOTIFY` 2 件（payload あり / 空）→ `notifications()` が 2 件、順序とフィールドが一致。`backend_pid` が
+  `SELECT pg_backend_pid()` と一致
+- タイムアウト: docker-compose に「accept するが応答しない」リスナー（D10。ポートは `54399`、方法は research）を足し、
+  `connect_blocking(conninfo, 500)` が `TIMEOUT` で戻り、経過が 500 ms 以上 1,500 ms 未満
+- 状態誤りの `USAGE` 格子: 未接続 send / 結果待ち中 send / 送信前 `set_single_row_mode` / アイドル cancel（例外なし）
+- `_platform/poll` 単体: 自分で `socketpair` または `pipe` を作り、書いてから `POLLIN`、空で `timeout_ms=50` がタイムアウト、閉じた fd で `USAGE`
+  （手段は research。`external_call["pipe"]` で十分）
+- 既存テストの期待値変更: `adopt_result` の抜き出しで**ゼロ**であること（verify が照合）
+
+### 4.8 TestSuite の SKIP 集計（D2。reflect 提案 (b)）
+
+- 分岐で走らないテストは早期 return の直前に `print("SKIP <test関数名>: <理由>")` を出す（既存 2 件 `_on_pg17_and_later` / `_before_pg17` と
+  今回追加するサーバー版依存テストすべて）
+- `tests/run_tests.sh` はファイルごとの出力から `^SKIP ` 行を数え、サーバーごとに `-- <label> skipped N` を末尾に出す（約 10 行。FAIL にはしない）
+- `final_check.sh` は変更しない（集計は情報表示）
+
+### 4.9 jsonb / 文字列系 OID 判定の一元化（D2）
+
+- `result.mojo` の `get_text` と `decode_binary.mojo` の `decode_binary[String]` に重複する「文字列系 5 OID（text / varchar / bpchar / name / json）
+  の判定」と「jsonb version byte（=1）の検査」を 1 つの関数に寄せ、両方から呼ぶ。挙動不変、既存テストの期待値変更ゼロ
+
+### 4.10 UTF-8 検証（D2 / D12）
+
+- text 列の `String(unsafe_from_utf8=)` と zero-copy の `StringSlice(unsafe_from_utf8=)` を検証付き（`from_utf8=` 相当。手段は research）に切り替える。
+  不正な列は `TYPE_MISMATCH`（メッセージはセル全文ではなく「invalid UTF-8 at byte N of column M」の形。Phase 3 残留リスク「セル全文がログに出る」を
+  この経路では避ける）
+- `pixi run bench` で text 列の decode 時間を切替前後で測り PROGRESS に記録する（受け入れ条件にしない。Phase 3 実測: text total 75〜80 ms）
+- テスト: `SELECT E'\xC3\x28'::bytea::text` は PG が拒否するので、偽造は `decode_text` / `decode_binary` の単体テストにバイト列を直接渡して行う
 
 ## 5. 受け入れ基準
 
-### 5.1 HANDOFF §10 Phase 3
-- §6 の全型（+ time / timetz / interval）について、テキスト形式とバイナリ形式で `get[T]` の結果が一致する。
-  境界値: 整数の最小 / 最大 / 0 / 負、float の NaN / ±Infinity / -0.0、`infinity` / `-infinity` の日時、
-  numeric の大きな桁（例: 1e130 相当）・小数（例: 0.000001）・負・0・NaN、uuid の全ゼロ / 全 F、空文字列、
-  NUL を含む bytea、jsonb のネスト
-- 未対応 OID をバイナリで要求したら `PgError(kind=TypeMismatch)`（§4.1）になり、トレースバックを出さない。
-  バイナリ列の `get[String]`（非文字列 OID）/ `get[List[UInt8]]`（非 bytea）も同じ
-- バイナリ形式で `execute` した結果の `column_format(i)` が `BINARY`、`execute(sql)` の結果は `TEXT`
-- 拡張型 8 種を `$1` で送り（§4.4）`SELECT $1::<type>` で同じ値が返る（text / binary の両結果形式）
-- `SHOW DateStyle` が `ISO, YMD`（§4.7）。`examples/bench_formats.mojo` が実行でき所要を表示する（§4.6）
-- zero-copy（§4.5）が成立した場合: `get_text` / `get_bytes` の値が `get[String]` / `get[List[UInt8]]` と一致し、`Result` を消費する移動（`var r2 = res^` 等）の後の使用がコンパイルエラー
-  （research turn 1 訂正: `_ = res^` は生存延長であってエラーにならない）
+### 5.1 HANDOFF §10 Phase 4（サーバー挙動を断定する項目は「要実測」。research が最初のプローブ対象にし、矛盾があれば REQ 本文を直してよい）
 
-### 5.2 堅牢性（差し戻し対象。Phase 1 / 2 §5.2 を Phase 3 の API に拡張）
-- どの入力・出力状態（長さ不足のバイナリ列、不正な uuid 長、numeric の不正 ndigits / 範囲外 weight、
-  jsonb の未知バージョンバイト、テキスト形式の非 ISO 日時文字列、NULL、空結果、未接続・切断後）でも
-  クラッシュ・トレースバックを出さず `PgError` で返す
-- 正常系・異常系の両方で `PQclear` / `PQfinish` / `PQfreemem` が呼ばれ、二重解放しない
-- 解放済みポインタへのアクセスが型・所有権の上で起こらない（zero-copy の slice / span が `Result` より長生きしない: 消費する移動はコンパイルエラー、`_ = res^` は `Result` の生存が延びる。
-  公開 API は `ref` を返さない — `ref` 束縛は生存延長されない。RESEARCH §0.5）
-- 10,000 回のバイナリ形式 execute（拡張型の列を含む）のループでメモリ使用量が単調増加しない
-  （`test_leak` に Phase 3 分のループを追加。判定方式は §5.3）
+- `pg_sleep(2)` を送信中に、同じスレッドで他の処理（カウンタのインクリメント）が進む
+- `cancel()` で `pg_sleep(10)` が 1 秒以内に中断され、SQLSTATE `57014` が得られる（要実測: 57014 は `query_canceled`）
+- 別接続からの `NOTIFY ch, 'payload'` を `notifications()` で受け取れる
+- 接続先が応答しない場合に、タイムアウト付きの `wait_*` が規定時間で戻る
 
-### 5.3 リーク測定方式（Phase 2 D4 を維持）
+### 5.2 堅牢性（差し戻し対象。Phase 1〜3 §5.2 を非同期 API に拡張）
+
+- どの入力・出力・接続状態（未接続、接続ポーリング中、送信中（`PQflush` 未完）、結果待ち、結果取得後、切断、cancel 後、
+  タイムアウト後、`__del__` 直前に結果が残っている）でもクラッシュ・トレースバックを出さず `PgError` で返す
+- 正常系・異常系の両方で `PQfinish` / `PQclear` / `PQfreeCancel` / `PQfreemem`（`PGnotify`）が呼ばれ、二重解放しない
+- 解放済みポインタへのアクセスが型・所有権の上で起こらない（`AsyncConnection` は `Movable` のみ）
+- 10,000 回の非同期 execute（send → poll → Result）のループと 1,000 回の NOTIFY 受信でメモリ使用量が単調増加しない
+  （`test_leak` に Phase 4 分のループを追加。判定方式は §5.3）
+
+### 5.3 リーク測定方式（Phase 2 D4 / Phase 3 §5.3 を維持）
+
 - `test_leak.mojo` は `mojo build` したバイナリで実行、`pixi run check` は 1 サーバー（`PQ_TEST_LEAK_SERVERS=1`）
-- **`TOLERANCE_PAGES = 256` を恒久仕様とする**。docstring に「+83〜85 ページの一段が 1 回出ることがある
-  （glibc arena の拡張と推測、未特定）」を書く（§6 の持ち越し整理に含める）
-- 検出力の陽性対照: 新しく追加する解放経路（zero-copy で `Result` を保持する経路があればそれ）を消したコピーで
-  FAIL することを impl が同じターンで実測し、サンプル列を PROGRESS に貼る
+- `TOLERANCE_PAGES = 256` は恒久仕様
+- 検出力の陽性対照: 新しく追加する解放経路（`PQfreeCancel`、`PQfreemem` for `PGnotify`）を消したコピーで FAIL することを
+  impl が同じターンで実測し、サンプル列を PROGRESS に貼る
 
-### 5.4 品質基準（差し戻し対象。Phase 1 §5.1b / Phase 2 §5.4 と同じ）
-- `pq` 直下の公開 struct / メソッドに docstring がある（`_ffi` はモジュール docstring のみでよい）
-- `pixi run fmt` を実行しても差分なし（`final_check.sh` 1/6 段）
-- `examples/binary.mojo`（接続 → バイナリ形式で全型 SELECT → 値の表示）が単体で実行できる。`pixi.toml` にタスクを追加する
+### 5.4 品質基準（差し戻し対象。Phase 1〜3 と同じ）
+
+- `pq` 直下の公開 struct / メソッドに docstring がある（`_ffi` / `_platform` はモジュール docstring のみでよい）
+- `pixi run fmt` を実行しても差分なし
+- `examples/async_query.mojo`（非同期送信中にカウンタを進めつつ結果を受ける）と `examples/listen_notify.mojo`
+  （LISTEN → 別接続 NOTIFY → 受信表示）が単体で実行できる。`pixi.toml` にタスクを追加する
 - `pixi run package` が通る
-- `pixi run check` が 6/6 段 PASS
+- `pixi run check` が全段 PASS
 
-## 6. 持ち越し整理（最初の 1 コミットにまとめる。Phase 2 VERIFICATION §6 より）
+## 6. 持ち越し整理（最初の 1 コミットにまとめる。Phase 3 VERIFICATION §5 より）
 
-1. `src/pq/prepared.mojo` と `src/pq/__init__.mojo` に「prepared は `PQprepare` 時点の型と同じ幅の値を渡す
-   （`$1::int4` なら `Int32`。`Int` = int8 を渡すと `22P03`）」を 1 文ずつ足す
-2. `tests/final_check.sh` 6/6 段の grep パターンに `|implicit ROLLBACK failed` を追加（見出しにこの文字列を入れない）
-3. `tests/test_prepared.mojo:543-544` の `find("1")` を `"takes 3 parameters, got 1"` の部分一致に
-4. `Connection.__init__` docstring に `_stmt_counter` / `_rollback_failure_handler`
-5. `param_type_oid(0)` の 0 パラメータ文での文言 `out of range (0..-1)` を `(no parameters)` 等に
-6. savepoint 名の NUL を `_reject_nul(name, "name")` で先に弾く（メッセージが `in s` でなく `in name` になる）
-7. `params.mojo` の `c_int(len(_data))` に `len > 0x3FFFFFFF` で `USAGE` を投げる 1 行（§9 の残留リスク）
-8. `tests/test_leak.mojo` の docstring に §5.3 の +83〜85 ページ注記
-9. `Transaction` docstring の「conn.execute との混用」節に「手で `COMMIT` / `ROLLBACK` を送ると破棄時の ROLLBACK が
-   サーバー WARNING になる（データは手動 COMMIT どおり）」を 1 文
-10. （research turn 1 追加）`result.mojo` モジュール docstring・`Row` / `RowIter`・`prepared.mojo`・`transaction.mojo`・`connection.prepare` / `transaction` の docstring にある
-    「`Result`（`Connection`）より長生きするのはコンパイルエラー」を「消費する移動（`var r2 = res^` / 関数へ `res^`）の後の使用がコンパイルエラー。`_ = res^` は破棄ではなく生存延長で、
-    `PQclear` は `Row` の最後の使用の後に走る」に直す（RESEARCH §2.3.1 で実測: 現行の文言のまま書いたコードはコンパイルが通り、安全に動く）
+1. `src/pq/params.mojo:643` docstring Raises と `:670` のメッセージ「libpq takes at most 1073741823」→ 上限は PG 側
+   （`MaxAllocSize` 1 GB）の言い方に直す（F1 (c) で直したコメントと揃える）
+2. `tests/test_connection.mojo:954` の「libpq takes `client_encoding` from the environment」→ 既定は `server_encoding`、
+   環境変数は `PGCLIENTENCODING` と書く
+3. `decode_timetz` に時刻部 0..86400000000 の範囲検査を足す（`decode_time` と同じ `_binary_value_error`）。テスト 1 件
+4. `test_timestamp_params_round_trip` の非 UTC 分岐を `options='-c TimeZone=Asia/Tokyo'` の専用接続で 1 ケース回す
+   （または分岐を消す。impl が実測して選ぶ）
 
-## 7. 既知のサーバー挙動（Phase 2 で実測済み。前 REQ の誤記を訂正した正）
+## 7. 既知のサーバー挙動（Phase 2 / 3 で実測済み。前 REQ の訂正を引き継ぐ）
 
-- prepared statement は ROLLBACK で消えない（`PREPARE` は非トランザクショナル）。手動 `DEALLOCATE` 後の実行は `26000`
-- `conn.execute(sql, params)` で `Int`（int8）を int4 列に渡すと assignment cast で成功する。`Bool` → int4 は `42804`、
-  `Int(3000000000)` → int4 は `22003`。`PQexecPrepared` は `paramTypes` を送らないので `$1::int4` に `Int` を渡すと `22P03`
-- `Connection.open` は ~4 ms/回（TestSuite の `Summary [ N ]` は **ms**）
+- rollback 後の prepared statement は成功する。手動 `DEALLOCATE` 後は `26000`
+- `Bool` → int4 は `42804`、`Int(3000000000)` → int4 は `22003`、`Int(5)` → int4 は成功
+- 接続直後に `SET DateStyle = 'ISO, YMD'` と `IntervalStyle = 'postgres'` を 1 往復で固定（Phase 3 D12）。TimeZone は触らない
+- テスト用コンテナは `Etc/UTC` 固定
 
 ## 8. テスト環境
 
-- Phase 1 / 2 と同じ: `tests/docker-compose.yml`（PG 17 = 54317、PG 14 = 54314）、`pixi run db-up`、`pixi run test`
-- `tests/fixtures/schema.sql` の `pqtest` スキーマ。Phase 3 のテーブルは各テストが自分で作る
+- Phase 1〜3 と同じ: `tests/docker-compose.yml`（PG 17 = 54317、PG 14 = 54314）、`pixi run db-up`、`pixi run test`
+- pixi 環境の libpq は **18.6**（`libpq.so.5.18`。`PQcancelCreate` / `PQsocketPoll` / `PQsetChunkedRowsMode` のヘッダあり）。
+  実行時ロードは `libpq.so.5` の探索なので、利用者環境では 14 のこともある（HANDOFF §2）
+- `tests/fixtures/schema.sql` の `pqtest` スキーマ。Phase 4 のテーブルは各テストが自分で作る
 
 ## 9. 後続フェーズへの申し送り（前回 reflect より。スキル本文は変えないのでここに書く）
 
-- **research**: RESEARCH §0.5「Mojo 1.1.0 既知の落とし穴」に Phase 1 分に加えて Phase 2 の 7 件を足す
-  （`mojo format` は `.gitignore` を尊重 / `SIMD.__rshift__` の rhs は `Self` 固定・符号付き右シフトは符号拡張 /
-  ローカル `List` は `return out^` / `String.as_bytes()` は `Span` / `def main() raises PgError` 不可 / `s += s` は aliasing /
-  `StaticString` は `@implicit` 非対象 / deref を挟む origin の入れ子は変換不能 / `std.os.setenv` は raise しない /
-  空 `List[UInt8]` の `unsafe_ptr()` は `capacity=len+1`）。
-  プローブは最初の 1 本をコンパイルしてから残りを書く。「通る形」だけでなく「仕様上の非対称を突く形」を 1 本含める
-  （例: 同じ列を text と binary で取って差を記録）。**§5.1 のうちサーバー挙動を断定する項目は「要実測」とし最初のプローブ対象にする。
-  矛盾を見つけたら REQ 本文を直してよい**（RESEARCH §5 に読み替えを散らさない）
-- **plan**: 完了基準で `grep -c X = 0` を複数タスクが繰り返すなら最初のタスクで `final_check.sh` に機械化する。
-  テスト仕様の期待メッセージは 2 語以上の部分文字列で書く。タスクごとに「サブエージェント推奨本数」を書き、
-  1 ファイル完結・実行待ち支配のタスクは 0 本と明記する。陽性対照を完了基準に書く
-- **impl**: PROGRESS「次への注意」は「確認済み」と「見込み」を分け、見込みには `未確認:` 接頭辞。所要の数値には単位を書く。
-  サブエージェント依頼文に (a) 型パラメータを持つ型はフルに書く、(b) `fmt` は親が統合後に 1 回、(c) scratch は
-  `.gsd-lite/logs/<slug>/scratch/turn-NNN-<name>` 固定、を必ず入れる
-- **verify**: round 2 以降は「round 1 の格子の再確認 + 差し戻し分の回帰」に限定してよい
-- **reflect**: `cost_usd` とサブエージェント本数の相関を確認する（前回 Interesting 1 の推測の検証）
+- **research**:
+  - RESEARCH §0.5「Mojo 1.1.0 既知の落とし穴」に Phase 1 / 2 分に加えて Phase 3 の 7 件を足す（`Span[UInt8, origin]` は `[origin: ImmOrigin, //]` 前置 /
+    `(-0.0)::float8` は `'-0'::float8` で / `@fieldwise_init` は全フィールド公開 ctor を生む / `ImplicitlyCopyable` でない型は `List` 要素を `.copy()` /
+    `List[T](a, b, c)` 不可・`[a, b, c]` リテラルで / 実引数の `String(...).as_bytes()` は一時オブジェクト由来 / モジュールレベル `var` 不可）
+  - 期待値表は `...` で桁を省略しない。長い値は全桁か、原本を取った SQL と出力ログのパス（`scratch/turn-001-*.log`）を同じ行に書く
+  - プローブは最初の 1 本をコンパイルしてから残りを書く。「仕様上の非対称を突く形」を 1 本含める（例: `PQsendQueryParams` 直後に `Param` バッファを
+    解放して結果が壊れないか / `PQconnectPoll` の最初の戻り値 / `PQcancel` をアイドル時に呼んだときの戻り）
+  - §5.1 と §4 の「要実測」はすべて最初のプローブ対象。矛盾を見つけたら REQ 本文を直してよい
+  - Phase 4 固有の確認: libc `poll` の `POLL*` 定数（Linux x86_64 / aarch64 / macOS）、`struct pollfd` レイアウト、`external_call` で `poll` を呼ぶ形、
+    コンパイル時 OS 判定の書き方、単調時計の取り方、`pipe` / `socketpair` の呼び方、`PGnotify` のレイアウト照合、`String(from_utf8=)` 相当の有無、
+    docker-compose で「accept するが応答しない」リスナーを作る最短の方法
+- **plan**:
+  - **追従先チェックリストは表ではなく最初から実行可能なスクリプト**（`.gsd-lite/logs/<slug>/scratch/turn-002-checklist.sh`）として書き、plan ターンで
+    現在の木で 1 回実行して「現在値」を各行に記録する。期待値は「現在値 + 差分」。impl の各タスクの完了基準に「スクリプトを実行し自タスクの行が期待値に
+    到達」を含め、最終タスクの総点検は再実行だけにする
+  - 所要見積もりは「前マイルストーン末の実測（`check` 112〜143 s、テスト 546 件 × 2）+ 新テスト 1 ファイルあたり接続数 × 3〜7 s」で書く。
+    往復 1 回あたりの ms を分単位の見積もりに足さない
+  - 完了基準で `grep -c X = 0` を複数タスクが繰り返すなら最初のタスクで `final_check.sh` に機械化する。期待メッセージは 2 語以上の部分文字列
+  - タスクごとに「サブエージェント推奨本数」を書き、1 ファイル完結・実行待ち支配のタスクは 0 本と明記。**今回の実験**: 「`src/` を触らずテスト 2 ファイル」型の
+    タスクは 1 本（親がもう 1 ファイルを書く）で指定し、reflect が Phase 3 の 2 本（USD 10.77）と比べる
+  - 陽性対照を完了基準に書く（リーク検出、`final_check.sh` の新しい grep、`USAGE` 格子）
+  - impl への申し送り「親が `*_send` で原本を取り直す」は今回は「親が `psql` / 同期 `Connection` で期待値（`pg_backend_pid`、`57014`、NOTIFY の
+    payload）を取り直す」として常設する
+- **impl**:
+  - PROGRESS「次への注意」は「確認済み」と「見込み」を分け、見込みには `未確認:` 接頭辞。所要の数値には単位
+  - **PROGRESS「未確認」で「誤った値が黙って返る経路」や「状態機械が壊れる経路」を述べる行は、同ターンでテスト 1 件にするか、PLAN の該当タスクに
+    「(x) この行を処分する」を追記する。処分先を二重に書かない**。最終タスクの完了基準に「PROGRESS の全『未確認』行を列挙し、各行を
+    テスト追加 / 契約外と明記 / verify 申し送り のいずれか 1 つに振り分けた表」を入れる
+  - **PROGRESS 1 ターン分の申し送りは 40 行を上限**とし、30 行超の表（受け入れ基準対応表・チェックリスト結果）は `.gsd-lite/TRACE.md` に置いて
+    PROGRESS からはパスと行数だけ書く。verify は `TRACE.md` を読む
+  - PROGRESS「やったこと」に「推奨 N 本 / 実 M 本」を 1 語で書く
+  - サブエージェント依頼文に (a) 型パラメータを持つ型はフルに書く、(b) `fmt` は親が統合後に 1 回、(c) scratch は
+    `.gsd-lite/logs/<slug>/scratch/turn-NNN-<name>` 固定、を必ず入れる
+- **verify**:
+  - **字句の指摘はクラスで名指しする**: 文言を 1 箇所指摘したら同じキーワードを `grep -rn` でリポジトリ全体から列挙し（コメント・docstring・
+    エラーメッセージ・テスト docstring）、F 項目に全部を同梱する
+  - 差し戻し時の「修正後にプローブで期待される変化」は集計値を「どの数がいくつからいくつへ」で書く。round 2 はその数だけ照合する
+  - round 2 以降は「round 1 の格子の再確認 + 差し戻し分の回帰」に限定してよい
+  - `adopt_result` 抜き出しと §4.9 / §4.10 で既存テストの期待値変更がゼロかを照合する（§4.10 の UTF-8 だけは新規テストが増える）
+- **reflect**: 「テスト 2 ファイル型を 1 本」の実験の USD を Phase 3 T6（2 本・USD 10.77）と比べる。`subagent_stats.spawned` は生ログから
 
 ## 10. 用語集
 
-- **結果形式 / result format**: libpq の `resultFormat`（0 = テキスト、1 = バイナリ）。全列一括
-- **テキスト形式**: サーバーの出力関数（`*_out`）の文字列。`DateStyle` 等の GUC に依存
-- **バイナリ形式**: サーバーの送信関数（`*_send`）のバイト列。ビッグエンディアン
-- **拡張型**: Phase 3 で加える自前の値型（`Decimal` / `Date` / `Timestamp` / `TimestampTz` / `Time` / `TimeTz` / `Interval` / `UUID`）
-- **zero-copy**: `Result` の内部バッファを指す `StringSlice` / `Span` を `Result` の origin 付きで返すこと
-- （Phase 1 / 2 の用語: 低レベル層 `_ffi` / 高レベル層 `pq` / conninfo / `PgError.kind` / params / prepared statement / Transaction / savepoint）
+- **非同期 API / AsyncConnection**: libpq の非ブロッキング関数群（`PQconnectStart*` / `PQsend*` / `PQconsumeInput` / `PQisBusy` /
+  `PQgetResult`）を 1 ステップずつ進める Mojo の struct。Mojo の `async` とは無関係
+- **poll 抽象 / `_platform/poll`**: ソケット 1 本の読み / 書き可能待ちを OS 差分を隠して提供する関数（Linux / macOS は libc `poll`）
+- **PollState**: `PQconnectPoll` の結果の写し（`NeedRead` / `NeedWrite` / `Ready` / `Failed`）
+- **cancel**: 実行中クエリの中断要求。サーバー側は SQLSTATE `57014`（`query_canceled`）で応答する
+- **Notification**: `PGnotify`（`relname` = channel、`extra` = payload、`be_pid`）の Mojo 値型
+- **タイムアウト**: `wait_*` の `timeout_ms`。経過しても状態が変わらなければ `PgError`（kind はラウンドで確定）
+- （Phase 1〜3 の用語: 低レベル層 `_ffi` / 高レベル層 `pq` / conninfo / `PgError.kind` / params / prepared statement / Transaction /
+  savepoint / 結果形式 / 拡張型 / zero-copy）
