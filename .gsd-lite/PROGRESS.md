@@ -449,3 +449,10 @@
   他に reflect の材料: `check` の所要は 165〜215 s で揺れた（閾値 247 s 内）、impl の格子 17 本は「DB 側の失敗」だけで出力経路・入力エンコードの面が無かった（verify round 1 が補った）、
   `test_zero_copy` の「3.4 s」は単位の読み違いで性能問題は無かった（research turn 1）。REQ §9 の「テスト 2 ファイル型を 1 本」の USD 比較も reflect の宿題。
   作業ツリーは `main` 上（マージ済み）。次マイルストーンの discuss が `main` から始める
+
+## turn 15 — reflect — phase5-polish-bench-readme
+- やったこと: 振り返りを `.gsd-lite/reflect/20261018-0103-phase5-polish-bench-readme.md` に作成（提案 11 件。計測: 14 ターン / 193.7 分 / USD 91.36、Phase 4 比 −30 %。
+  Plus 9 / Minus 8 / Interesting 11）。turns.jsonl・生ログ 14 本の `result` / `subagent_stats`・PROGRESS・PLAN・TRACE・VERIFICATION・REQ §9・DECISIONS・RESEARCH §0.5・直近 2 件の reflect・ブランチの 24 コミットを読んだ
+- 想定外: lean-ctx MCP 未接続（対象外）。turns.jsonl は turn 5 / 9 / 14 で複数 `result` の最後だけを記録（3 マイルストーン連続。振り返りの ※ に記載）
+- やり直し: 0 回
+- 次への注意: 提案の要点 — verify の字句指摘に「grep パターン / 件数 / ファイル」列を必須化、堅牢性格子を入力 × 出力 × 依存の 3 軸で PLAN に常設、`Monitor` を deny して前景 `until` に統一、PROGRESS 40 行はチェックリスト生値を TRACE へ
