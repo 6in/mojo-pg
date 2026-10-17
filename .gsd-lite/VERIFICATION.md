@@ -1,138 +1,154 @@
-# VERIFICATION — phase4-async-cancel-notify
+# VERIFICATION — phase5-polish-bench-readme
 
-- 作成: 2026-10-17 / gsd-lite-verify（turn 11 = round 1、turn 13 = round 2）
-- 対象: `git diff main...HEAD`（`20524cd` 起点、round 2 時点で 22 コミット。`src/` `tests/` `examples/` `pixi.toml` で 28 ファイル +5,851 / -242）
-- 対象リポジトリの `CLAUDE.md` / `AGENTS.md`: 無し（規約観点は HANDOFF.md §7・§9・§10 と PLAN「決めた事項」1〜17）
-- 判定: **round 2 = 合格（`main` へローカルマージ）**。§8 に round 2 の照合結果。
-  round 1（§4）は指摘あり: 誤動作を伴う指摘 1 件（`timeout_ms` の 32 bit 切り捨て）+ D12 との整合 1 件（通知文字列の UTF-8 無検証）を PLAN **F1** に
-  まとめた（文書・例の軽微 5 件を同梱）。受け入れ基準 §5.1 の 4 件・§5.4 の 5 項目は round 1 時点で満たしており、F1 はそれを崩さず差し戻し分を全部解消した
-- 実行エンジン: Claude Code（Claude Fable 5.1）
+- round 3: 2026-10-18 / turn 14 / Claude Code（claude-fable-5-1）。判定 **合格 → `main` にローカルマージ**（F2 の回帰 + `check` + チェックリスト同値。§6）
+- round 2: 2026-10-18 / turn 12 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F2 の 1 タスク。文書のみ 6 行）→ impl に差し戻し**。F1 は合格（§5）
+- round 1: 2026-10-18 / turn 10 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F1 の 1 タスク）→ impl に差し戻し**
+- 対象: `git diff main...HEAD`（コード 20 ファイル: `src/pq` 7 / `tests` 4 / `examples` 8 / `pixi.toml` / `pixi.lock` / `README.md` / `LICENSE`）。
+  `CLAUDE.md` / `AGENTS.md` は無し。サブエージェント 0 本（親が全部。差分が 1 画面に収まる規模）
+- 生ログ: `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-010-{check,checklist,robust-grid}.log`、スクリプト `turn-010-robust-grid.sh`
 
-## 1. round 1 の進め方
+## 1. 観点と確認したこと
 
-- 並列レビュー（`subagents: auto`）: コードレビュー（既存テストの期待値変更ゼロの照合 / リファクタの挙動保存 / UTF-8 スキャナ / テストが完了基準を検証しているか /
-  `run_tests.sh` / 文書の主張）とセキュリティチェック（FFI メモリ安全 / バッファ / 入力検証 / インジェクション / 秘密情報 / 状態機械の堅牢性 / プラットフォーム分岐）を
-  **読み取り専用**のサブエージェント 2 本に分けて並行。テスト実行・プローブ・判定・文書更新・マージは親だけ
-- 親は同時に (1) クリーンな `pixi run check`（ログ `scratch/turn-011-check.log`）、(2) `src/pq/async_conn.mojo`（1,520 行）と `src/pq/_platform/poll.mojo`（265 行）の
-  通読レビュー、(3) 堅牢性の格子プローブ（§3、`scratch/turn-011-probe-grid.mojo` / `.log`）、(4) 追従先チェックリストの再実行（`scratch/turn-011-checklist.log`）を行った
+### 1.1 コードレビュー（`src/pq`）
 
-## 2. 受け入れ基準との突き合わせ
-
-TRACE.md §2 の対応表（REQ §5.1 の 4 件 / §5.2 の 4 項目 / §5.3 / §5.4 / §4.8〜§4.10）を起点に、担うテスト関数が存在し主張どおりの assert をしていることを
-コードレビュー側がスポットチェックし、親が `pixi run check` で全部を再実行した。
-
-| 基準 | 確認 |
+| 変更 | 確認 |
 |---|---|
-| §5.1-1 `pg_sleep(2)` 送信中にカウンタが進む | `test_poll_result_counts_while_sleeping`（check ログ: PASS 2,007 ms）。判定は「`None` の回数 ≥ 1 かつ経過 ≥ 2,000 ms」の両方 |
-| §5.1-2 `cancel()` で `pg_sleep(10)` が 1 s 以内に中断、`57014` | `test_cancel_stops_a_running_statement`（PASS 143 ms。cancel 発行〜raise < 1,000 ms を単調時計で断定） |
-| §5.1-3 別接続の `NOTIFY ch, 'payload'` を受け取る | `test_wait_notification_receives_both_payloads`（payload 2 件・順序・`backend_pid` 一致・3 回目は `None`） |
-| §5.1-4 応答しない接続先でタイムアウト付き待ちが規定時間で戻る | `test_connect_blocking_times_out`（blackhole 54399、PASS 623 ms、500 ≤ 経過 < 1,500 ms）+ `wait_readable(50)` → `TIMEOUT` |
-| §5.2 状態 9 種 × 入力でクラッシュせず `PgError` | `test_async` 29 件 / `test_notify` 9 件 / `test_poll` 9 件（両サーバー `0 failed`）+ §3 の追加プローブ 5 本でクラッシュ 0 |
-| §5.2 `PQfinish` / `PQclear` / `PQfreeCancel` / `PQfreemem` が呼ばれ二重解放なし | `test_leak` 18 件（check 5/6 段 PG17、Phase 4 の 4 ループとも RSS 平坦）。`PQfreemem` 除去の陽性対照は turn 8 で FAIL を実測、`PQfreeCancel` はコードレビュー担保（§5） |
-| §5.2 `AsyncConnection` は `Movable` のみ | `struct AsyncConnection(Movable)`（`async_conn.mojo:277`）。`Copyable` は `Notification` と docstring の 2 行のみ |
-| §5.2 10,000 回 execute / 1,000 回 NOTIFY で単調増加なし | `test_async_execute_does_not_leak` / `test_notify_receive_does_not_leak` 他 2 本 |
-| §5.4 docstring / fmt / examples / package / check | `pixi run check` **6/6 PASS**（1/6 fmt 差分なし、3/6 docstring 診断 0、4/6 examples 5 本、5/6 両サーバー 47 サマリ全部 `0 failed`、6/6 `matched lines: 0`。18:38:45 → 18:41:44 = **179 s**） |
-| §4.8 SKIP 集計 | check ログに `-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1` |
-| §4.9 / §4.10 | `_string_payload` 一元化 / `_validated_utf8` の 3 経路（コードレビュー側の確認は §4） |
+| `fetch_all` の打ち切り `e.kind == CONNECTION or PQstatus == BAD`（T1） | raise される値は `first_error` 経由で不変。テスト `test_fetch_all_stops_draining_on_a_closed_socket` は `close(2)` → `_fetch_all_error` → `kind == CONNECTION` かつ `< 500 ms` を断定し、修正前は 2003 ms `TIMEOUT` で FAIL（PROGRESS turn 3 の陽性対照）。close 後に fd を開かない形（末尾 `_ = conn^` のみ） |
+| `_after_send` の -1 → `BUSY`（T1） | 到達不能の根拠（`PQflush` は `CONNECTION_BAD` のときだけ -1 / `pqSendSome` は 0 / `pqsecure_raw_write` は `n = len`）が TRACE に 3 行。分岐のコードは存在（`async_after_send_PGASYNC_BUSY` = 1）。レビューで妥当 |
+| `_reject_lost(method)`（T2） | `notifications` 直接 1 + `_collect_notifications` 1 の 2 入口 + def = 3（PLAN 訂正 turn 5 のとおり）。`wait_notification` / `wait_notifications` は `method` 経由で自分の名前。テストは完全一致で 3 回同一 message + `wait_notification()` の文言を断定 |
+| `PgErrorKind.ENCODING = 7` / `write_to` `"Encoding"`（T2） | raise 4 箇所（`decode_binary.mojo` 2 / `async_conn.mojo` 2）で文言は不変。`tests_TYPE_MISMATCH` 97 → 91（−7 + `test_errors` の 1 行）、`src_utf8_and_type_mismatch_same_line` = 0。`grep -rn 'invalid UTF-8' tests/` は全件 `ENCODING` |
+| `_collect_notifications` / `wait_notifications`（T3） | 入口順 `_reject_bad_timeout` → `n < 1` → `_reject_connecting` → `_reject_lost`。予算切れは `out^` を返し例外にしない（D8）。`notifications()` の raise 時に `out + _pending` の順で復元（古い順を保つ）。余りは `_pending` に append。`n = Int.MAX` は `len(out) < n` の比較だけで C に渡らない。`timeout_ms = -1` の `deadline` は負になるが `timeout_ms >= 0` の分岐でしか読まない |
+| `poll.mojo` の `(ret, flags, err)` 化（T4） | errno / `WSAGetLastError` は失敗した直後に `_poll_once` 内で読む（次の呼び出しで上書きされる前）。POSIX 側の挙動は不変（`EINTR` 再試行 / `EBADF` `EINVAL` → `USAGE`）。message を `poll failed: errno N` に変えたが `tests/test_poll.mojo` に文言断定は無い（`test_poll` 11 件 PASS） |
+| `loader.mojo` の `_default_candidates()`（T4） | `comptime if` 連鎖。Linux / macOS の候補は旧 `platform_map` と同一文字列。`PQ_MOJO_LIBPQ` の扱い不変 |
+| `examples/bench_psycopg.py`（T5） | SQL は定数、入力は環境変数 1 つ、`autocommit=True`、全セルを読む。**例外処理の取りこぼし 2 クラス → F1**（§3） |
 
-### 2.1 文書の主張
+### 1.2 テストの妥当性
 
-- 追従先チェックリスト（PLAN、85 行）を再実行: **全行が期待値**。TRACE.md §1 の生出力との差分は `init_TIMEOUT` の 1 行だけ（TRACE 3 → 現在 **6**。期待 ≥ 1 なので合格。
-  T8 が公開 API 表を足した**後**にスクリプトを再実行しなかったため TRACE の値が古い。字句のみ）
-- `check` 所要 179 s は PROGRESS turn 10 の 180 s と一致
+- 新テストは完了基準を実際に検証している: ④ `n ∈ {0, -1}` の文言 `got 0` / `got -1`、⑤ `timeout_ms ∈ {-2, 2147483648, 4294967296, Int.MAX}` の 4 値 + `0` 即時 + `-1` 保留あり、⑥ `Int.MAX` が予算で止まる、⑦ 余りが次の呼び出しに `< 50 ms`、⑧⑨ `out` 保全（⑨ は restore 無しで FAIL することを impl が実測。`turn-005-notify-norestore2.log`）、UNLISTEN / 未 LISTEN / `"Mixed Case"` の契約外 3 件
+- 既存テストの期待値変更は PROGRESS turn 4 の **7 行だけ**（`test_decode_binary.mojo` 5 + `test_notify.mojo` 2）で、全部 UTF-8 不正の kind 変更。OID / 幅 / jsonb 版数の `TYPE_MISMATCH` は不変（diff で確認）
+- `_drop_ascii_database()` は `pq_test` 側の同期接続から `WITH (FORCE)`、失敗は `Bool` で握って raise しない。`_ascii_conninfo` の `42P04` 容認は消えている
 
-## 3. 堅牢性の格子プローブ（round 1 で一括）
+### 1.3 セキュリティ
 
-ライブラリなので格子は「入力（`timeout_ms` / SQL / conninfo / 状態）× 接続の生死 × 例外 kind」。テスト 47 件が押さえていない面を 5 本追加した
-（`scratch/turn-011-probe-grid.mojo`、ログ `turn-011-probe-grid.log`）:
+- 入力検証: `n` / `timeout_ms` は Mojo 側で範囲検査し C に縮小変換しない。conninfo は libpq にそのまま渡す（libpq 側の検証に委ねる。設計どおり）
+- 秘密情報: `password=pq` はテストコンテナの既定で、examples 7 本と `run_tests.sh` が元から持つもの（新規流出なし）
+- インジェクション: `bench_psycopg.py` の SQL は f-string だが埋め込むのは定数 `ROWS` のみ。テストの `DROP DATABASE` は固定名
+- 依存: `psycopg >=3.2` を別 feature に閉じ、default 環境は不変（`pixi list -e default` の python / libpq のビルドが同一。PROGRESS turn 7）
 
-| # | プローブ | 結果 |
-|---|---|---|
-| P1 | `poll_socket(fd, True, False, 2^32 + 50)`（空 pipe） | **50 ms で `timeout`**。`c_int(timeout_ms)` の切り捨て（`poll.mojo:165`）。`2^31` ちょうどなら負値 = 無期限待ちになる。クラッシュせず、入力は「25 日超のタイムアウト」なので残留リスク（§5） |
-| P2 | データ受信済みの `fetch_all(0)` | `TIMEOUT "fetch_all timed out after 0 ms"`、状態 `Busy` のまま。`poll_result` ループで `Idle` に復帰。契約どおり（0 は「予算なし」で `wait_*` の「1 回だけ見る」とは違う）。docstring は 0 の意味を書いていない（§5） |
-| P3 | 16 MB `send` が `Sending` のまま別接続から `pg_terminate_backend` → `flush` / `poll_result` ループ | 3 回中 1 回 `Sending` を観測。**4 ステップで `Idle`・`CONNECTION_BAD`** に到達（step 2 `SERVER 57P01`、step 4 `CONNECTION`）。turn 7 で直した「切断で `Busy` に固まる」バグの `Sending` 側は起きない（libpq が `PQflush` -1 で outCount を捨て、次の `PQflush` が 0 を返すため） |
-| P4 | `LISTEN` 後に backend を terminate → `wait_notification(3000)` | **0 ms で `CONNECTION`**（`None` を返して 3 s 待つことも、無限ループもしない） |
-| P5 | `connect_blocking(conninfo, 0)` | `TIMEOUT "connect_blocking timed out after 0 ms"`（P2 と同じ意味論。設計どおり） |
+### 1.4 文書の主張
 
-## 4. 指摘（round 1 → PLAN F1）
+- README のベンチ表 12 セル × 4 行を `scratch/turn-007-bench.log` の pass 1 と 1 つずつ照合 → **一致**。1 行要約「decode 約 3.7 倍（42 → 11）」「合計約 1.7 倍（83 → 50）」はログと整合
+- README のコード片 6 本は `turn-008-readme-excerpts.py` を再実行して `blocks=6 missing_total=0`。型表は `turn-008-typetable.py` で OID 19 行・Mojo 型列が `__init__.mojo` と一致（差分 4 件は日本語化した散文のみ）
+- README の `PgErrorKind` 8 行は `errors.mojo` の宣言順・印字名と一致。examples の実行行 7 本は `pixi.toml:16-23` のタスク名と一致（`example-async` / `example-notify` の 2 本もファイル名でなくタスク名）
+- TRACE「Windows 照合表」12 行を Microsoft Learn の [F] / [E] と突き合わせ: `events` に置けるのは `POLLPRI / POLLRDBAND / POLLRDNORM / POLLWRNORM` のみで他は `SOCKET_ERROR` + `WSAEINVAL`（#3）、timeout の 3 値（#4）、`SOCKET_ERROR` → `WSAGetLastError`（#5 / #6）、`WSAEINTR` 10004 / `WSAEBADF` 10009 / `WSAEINVAL` 10022 / `WSAENOTSOCK` 10038 / `WSANOTINITIALISED` 10093（#6 / #11）、「As of Windows 10 version 2004 … `(POLLHUP | POLLERR | POLLWRNORM)`」（#8）、Vista 以降・`Ws2_32.dll`（#9）、負の `fd` は `POLLNVAL`（#7）→ **すべて一致**
+- 追従先チェックリスト（`turn-002-checklist.sh`）を再実行 → `turn-009-checklist.log` と **完全一致**（82 key すべて期待値内。例: `tests_TYPE_MISMATCH` 91 / `src_TYPE_MISMATCH` 106 / `test_notify_tests` 24 / `test_async_tests` 31 / `license_lines` 202 / `examples_pixi_run` 7）
+- 言い切り過ぎ 1 件: README §7「`postgres://` の URI は受けません」は examples には当たらない（`basic` に URI を渡すと exit 0）。テストの制約（`run_tests.sh:11-12`）→ **F1 (c)** に同梱
 
-1. **`timeout_ms` が 2^31 以上で黙って誤動作する**（`src/pq/_platform/poll.mojo:165` `c_int(timeout_ms)`、同 `:178`。上限検査は `poll_socket:219` / `async_conn.mojo:255-274` `_reject_bad_timeout` とも `< -1` だけ）。
-   `2^32+50` → 50 ms で `timeout`（親プローブ P1）、`2^31` → `-2147483648` = 無期限、`Int.MAX` → `c_int` は `-1` だが deadline `monotonic() + timeout_ms * 1_000_000` が Int64 を溢れて
-   `fetch_all(Int.MAX)` が **0 ms で `TIMEOUT`**、状態 `Busy` のまま（セキュリティ側 `scratch/turn-011-sec-timeout.mojo` で 4 入口を再現）。クラッシュはしないが「`-1` 以外の無期限」を渡した利用者が
-   黙って即時タイムアウト／無限待ちになる = 誤動作。REQ §4.1 は上限を定めていないので、修正は「`> 2147483647` を既存の `USAGE` 文言に統合」（F1 表 1〜3）。
-   親・セキュリティの 2 経路で独立に検出
-2. **`notifications()` の `channel` / `payload` が UTF-8 無検証**（`async_conn.mojo:1344-1353` `String(unsafe_from_utf8_ptr=)`）。`SQL_ASCII` DB で `NOTIFY ch, E'ab\xC3\x28\xF0'` を送ると
-   不正 UTF-8 の Mojo `String` ができる（セキュリティ側が `scratch/turn-011-sec-ascii-notify.mojo` で再現。同じバイトは text 列経路で `TYPE_MISMATCH "invalid UTF-8 at byte 2 of column 0"`）。
-   REQ §4.10 / D12 の文言は「text 列」なので要件違反ではないが、D12 が現状維持を却下した理由（利用者側の codepoint 走査が 1〜3 byte 読み越す余地）が通知 payload にそのまま当たり、
-   パッケージ内で同じ値型の扱いが食い違う。F1 で差し戻すついでに揃える（表 4〜7。`PQfreemem` は検査結果に関わらず呼ぶ、正常分は `_pending` に戻す）
-3. 文書・例（F1 (c) に同梱。いずれも字句・例の形で誤動作なし）: ① `connect_blocking` の Raises が `SERVER` を落としている（`_drain_setup` の SET 拒否経路。`__init__.mojo:266` と `async_conn.mojo:826-830`）
-   ② `fetch_all` / `connect_blocking` の `timeout_ms = 0` が「最初の wait 前に `TIMEOUT`」であることが docstring に無い（親プローブ P2 / P5） ③ TRACE.md §1 `init_TIMEOUT=3` が古い（現在 6）
-   ④ `examples/async_query.mojo:46-52` が最初の結果で `break` して `BUSY` のまま drop（パッケージ docstring の「`None` + `IDLE` で終了」と食い違う。`PQfinish` で安全ではある）
-   ⑤ `tests/test_extended_datetime.mojo:787` の `SKIP` 行は関数が続けて Tokyo ケースを走らせるので SKIP 集計とずれる（UTC コンテナでは到達しない）
+### 1.5 最終判定コマンド
 
-## 5. 残留リスク（差し戻さない。要件外か、誤動作・データ損失を伴わない）
+- `pixi run check`（クリーンな木、00:22:25 → 00:25:29 = **184 s**。閾値 247 s）→ **6/6 PASS**（`final_check: PASS`、`0 failed` のサマリ 47 件、`FAIL` 0 行、6/6 段の `matched lines` 0）
+- `docker exec … pg_database` は pg17 / pg14 とも **0 行**（`pq_test_ascii` が残らない）
 
-- **`fetch_all` が `PQstatus` を BAD にしない `CONNECTION` エラーで busy-spin し得る**（`async_conn.mojo:1453-1461`: 例外後に待たず `continue`）。`PQconsumeInput` が 0 を返しつつ BAD にならないのは
-  バッファ拡張失敗（OOM 級）だけで再現不能。`timeout_ms = -1` なら無限に回る。Phase 5 候補: `kind == CONNECTION` なら status に関わらず drain を打ち切る
-- **`_after_send` で `PQflush` が -1 のとき pq は `IDLE`、libpq は `PGASYNC_BUSY`** → 次の `send` が libpq の `another command is already in progress` を含む `CONNECTION` になり、モジュール docstring（`:35-39`）と食い違う。
-  PG12 以降の libpq は書き込み失敗を `write_failed` + 戻り 0 にするので -1 は稀。TRACE §3 #5 のとおり契約外のまま
-- **`fetch_all` が切断時に `BUSY` のまま返ることがある**（`adopt_result` が CONNECTION を投げた時点で status が BAD → break。状態は変えない）。次の `poll_result` 1 回で `IDLE` に戻る（`test_a_terminated_backend_ends_the_command` のループがこの形）。ハングはしない
-- **`Sending` 中の切断**は libpq が `PQflush` -1 で outCount を捨てるため次の `flush` が 0 を返し、`poll_result` → `IDLE` に 4 ステップで到達（親プローブ P3）。状態機械は固まらない
-- **`wait_readable(50)` の経過時間は `test_async` で断定していない**（kind だけ）。`poll_socket` 側の `test_poll` 3 件が時間を断定するので間接担保
-- **`PQfreeCancel` 欠落は RSS で検出不能**（`PGcancel` 数百 byte。turn 8 実測）。`async_conn.mojo:1297` の 1 行をコードレビューで担保（TRACE §3 #2 / #8）
-- **Windows 分岐は未コンパイル・未検証**（`comptime if` の非選択側。モジュール docstring に unverified。Phase 5「Windows コードパスのレビュー」）
-- **`test_zero_copy` の 1 テスト 3.4〜3.9 s**（Phase 4 以前からの接続固定費。A/B 済み。Phase 5 ベンチマーク）
-- **malformed conninfo を `start(String)` に渡すと libpq がそのトークンを echo する**（Phase 1 からの既知。`start(Dict)` で回避。docstring 明記済み）
-- `notifications()` が集めた正常な通知は F1 後も「不正 1 件を捨てる」設計なので、`SQL_ASCII` DB では通知の取りこぼしが起こり得る（検証付きにする以上は不可避。UTF-8 DB では到達しない）
-- サブエージェントの契約外提案（TRACE.md 末尾の 7 件）は Phase 5 以降の判断のまま
+## 2. 堅牢性の格子（round 1。round 2 以降はこの再確認 + F1 の回帰だけ）
 
-## 6. 計測（単位 s）
+impl の 17 本（`turn-009-examples-robust.sh`: DB 未起動 / 認証失敗 / libpq 不在 / `port=abc`）に無かった面を一括で試した。
+`turn-010-robust-grid.sh`（**37 レコード**。ビルド済みバイナリ `basic` / `hello_libpq` / `listen_notify` と bench 環境の `python` を pixi のバナー無しで直接呼ぶ）。
 
-- round 1（turn 11）: `pixi run check` 6/6 PASS = 179 s（18:38:45 → 18:41:44）。親プローブ: コンパイル + 実行 約 40 s。
-  サブエージェント 2 本: コードレビュー 578 s / 46 ツール呼び出し / 212k トークン、セキュリティ 580 s / 28 ツール呼び出し / 126k トークン（並行）
+| 軸 | 試した値 | Mojo examples / loader | `bench_psycopg.py` |
+|---|---|---|---|
+| `PQ_TEST_CONNINFO` | 空 / `postgresql://` URI / 非 UTF-8（`\xff\xfe\xc3\x28`）/ 制御文字（`\n` `\t` `\x01`）/ 100 KB / 引用符不整合 / 存在しない DB / 空白のみ | 全部 `failed: PgError(kind=Connection, …)` + exit 1 か正常 exit 0。非 UTF-8 は libpq の message に U+FFFD で入り、`String(unsafe_from_utf8_ptr=…)` → `print` で落ちない | **非 UTF-8 → `UnicodeEncodeError` の Traceback**（F1）。他は `failed: ProgrammingError / OperationalError` + exit 1 |
+| `PQ_MOJO_LIBPQ` | `libc.so.6`（読めるが PQ シンボル無し）/ ディレクトリ / 空ファイル / `/dev/null` / 非 UTF-8 パス | 全部 `failed: PgError(kind=LibpqLoad, …)` + exit 1（`missing symbol PQconnectdb` / `dlopen failed` / `file too short`） | — |
+| stdout | `/dev/full`（正常・badpw）/ 閉じた fd（正常・badpw・nolib）/ パイプ閉鎖（`\| head -c 1`） | 出力なしで exit 0 / 1（Mojo の `print` は書き込み失敗を無視）。パイプ閉鎖は exit 0（3 行とも書けた） | **`/dev/full` → `Exception ignored while flushing sys.stdout: OSError` + exit 120**（F1）。閉じた fd / パイプ閉鎖は exit 0 / 1 でトレースバック無し |
+| stdin | 閉じた fd | 正常 exit 0 | — |
+| 1 MB の環境変数 | — | `env` 自体が E2BIG（ハーネスの限界。プログラムの問題ではない） | 同左 |
 
-## 7. マージ
+## 3. 指摘（→ PLAN F1）
 
-- round 1 は差し戻しのためマージしない。`git remote get-url origin` → `No such remote 'origin'`（ローカルのみ）なので、round 2 合格時は `main` へ `--no-ff` でローカルマージする
-- round 2（turn 13）: 合格。`git checkout main` → `git merge --no-ff gsd-lite/phase4-async-cancel-notify`（結果は PROGRESS turn 13）。ブランチは削除せず残す
+1. **`bench_psycopg.py`: `UnicodeEncodeError`（`ValueError` の子）が Traceback になる**（REQ §5 D4「どの入力…状態でもトレースバックを出さず」。`except psycopg.Error` だけでは psycopg の conninfo パーサが投げる `ValueError` 系を取り逃す）
+2. **`bench_psycopg.py`: stdout が書けないと終了時 flush の `OSError` が `Exception ignored` + exit 120**（REQ §5 D4「終了コード 1」。正常経路・badpw 経路とも）。Python 公式の SIGPIPE 手順（fd 1 を `/dev/null` に dup2）で消える
+3. README §7 の URI の言い切り（文書のみ。F1 (c)）
 
-## 8. round 2（turn 13）— F1 の回帰 + round 1 格子の再確認
+なぜ impl の格子で拾えなかったか: T7 (b) の格子は RESEARCH の 15 本を踏襲し「DB 側の失敗」だけを面にしていた（出力経路と入力のエンコードのクラスが無かった）。
+round 2 は上表の再確認と F1 の回帰（表の 6 行）だけを行い、新しいクラスは探さない。
 
-スキルの規則どおり新しいクラスの探索はせず、(1) F1 の差分（`4616ef7..HEAD`、`src/` 3 ファイル + `examples/` 1 + `tests/` 4、+296 / -45）の通読、
-(2) PLAN F1 末尾「修正後にプローブで期待される変化」の数の照合、(3) §3 の格子プローブの再実行、(4) クリーンな `pixi run check`、(5) 追従先チェックリストの再実行、を行った。
-サブエージェントは使っていない（差分が小さく、親の通読で足りる）。
+## 4. 残留リスク（合格側に残すもの）
 
-### 8.1 「修正後にプローブで期待される変化」の照合（全部一致）
+- Windows 実機は未検証（REQ §3 スコープ外。TRACE 照合表 + README §8 + `loader.mojo` docstring で開示済み）。`_is_usage_error` の 3 コードの分類は文書照合のみ
+- Mojo の `print` は stdout の書き込み失敗（`/dev/full`、閉じた fd）を無視して exit 0 で終わる — トレースバックは出ないので D4 は満たすが、「出力が失われた」ことは利用者に伝わらない（stdlib の挙動。pq の対象外）
+- `wait_notifications` の `_collect_notifications` は `notifications()` が raise した往復で届いた良い通知を `notifications()` 自身の `_pending` 経由で保全する（⑨ で確認）が、`wait_readable` の `CONNECTION` で抜ける経路では `out` を復元しない（`_pending` に戻さず raise）。切断後は `notifications()` が `_reject_lost` で拒否するので取り出す手段が無く、復元しても届かない — 実害なし
+- `check` の所要は 169〜215 s で揺れる（同時実行ノイズ）。閾値 247 s 以内
 
-| 期待（PLAN F1 末尾） | round 2 の実測 |
+## 5. round 2（turn 12）— F1 の回帰 + round 1 格子の再確認。新クラスの探索はしていない
+
+- 対象差分: round 1 以降の変更は `examples/bench_psycopg.py`（+44 / -14）と `README.md` §7（+5 / -2）だけ（`git diff --stat 77c997f...HEAD`。`src/` / `tests/` は不変）
+- 生ログ: `scratch/turn-012-{check,checklist,robust-regress,bench}.log`、スクリプト `turn-012-robust-regress.sh`
+
+### 5.1 F1 の回帰（PLAN F1 の表 6 行）— すべて期待どおり
+
+| 条件 | 実測（`turn-012-robust-regress.log`） |
 |---|---|
-| `turn-011-probe-grid` P1: `timeout=True elapsed_ms=50` → **`USAGE` raise** | `P1 raised Usage 'timeout_ms must be -1, 0 or at most 2147483647 (got 4294967346)'` |
-| P2〜P5 は不変 | P2 `Timeout 'fetch_all timed out after 0 ms'` state=Busy → 復帰 Idle / P5 `Timeout 'connect_blocking timed out after 0 ms'` / P3 3 回とも `Busy`（round 1 の「3 回中 1 回 `Sending`」は今回 0 回。`PQflush` = 1 の非決定は既知） / P4 `Connection` elapsed 1 ms |
-| `turn-011-sec-timeout` の 4 行（`wait_readable(2**32)` / `fetch_all(Int.MAX)` / `fetch_all(1e13)` / `wait_notification(2**32)`）が全部 `USAGE`、`wait_readable(300)` は `Timeout` | 4 行とも `Usage`（`got 4294967296` / `9223372036854775807` / `10000000000000` / `4294967296`）、経過 0 ms。`fetch_all` の拒否後は `Busy` のまま → drain で `Idle`。`wait_readable(300)` は `Timeout` 303 ms |
-| `turn-011-sec-ascii-notify`（DB 名 `pq_test_ascii` 版 = `turn-012-ascii-notify.mojo`）が **`TYPE_MISMATCH` `invalid UTF-8 at byte 2 of notification payload`** | `PgError(kind=TypeMismatch, message=invalid UTF-8 at byte 2 of notification payload)` |
-| `check` 5/6 段 47 本 `0 failed`、`test_poll` 9 → **11**、`test_async` 29 → **30**、`test_notify` 9 → **10〜11** | 47 サマリ全部 `0 failed`（`grep 'tests run' \| grep -vc ' 0 failed'` = 0）。`test_poll` 11 / `test_async` 30 / `test_notify` 11（両サーバー） |
+| 非 UTF-8 conninfo | rc 1、stdout `failed: UnicodeEncodeError 'utf-8' codec can't encode characters in position 53-55 ...` 1 レコード、`Traceback` 0 |
+| `/dev/full`（正常 / badpw） | rc 1 / 1、stderr `failed: OSError [Errno 28] No space left on device` 1 行、`Exception ignored` 0 |
+| stdout のパイプ閉鎖（**本物の EPIPE**。§5.3） | 正常 / badpw とも rc 1、stderr `failed: BrokenPipeError [Errno 32] Broken pipe` 1 行、`Exception ignored` 0（表の「0 か 1」の範囲） |
+| badpw / badport | rc 1、`failed: OperationalError ...` 1 レコード（badport は libpq のヒント行で物理 2 行） |
+| 正常 | rc 0、1 行目 `psycopg 3.3.4 impl=c libpq=180006 server=170011 python=3.14.8` |
 
-### 8.2 F1 差分のレビュー（`4616ef7..HEAD`）
+- コードレビュー（`bench_psycopg.py:79-109`）: 例外は親クラス 2 段（`psycopg.Error` / `ValueError`）+ 外側 `OSError`。`status` を持ち回って `sys.exit` は末尾 1 回（内側で exit すると明示 flush を飛ばす — impl の説明どおり）。
+  `sys.stdout is None`（fd 1 閉鎖）を守っている。`_discard_stdout()` は Python 公式の SIGPIPE 手順そのもの。F1 (a) の規則（親クラス / `_run` の `sys.exit(1)` 不変）に合致
+- README §7 の言い換え: `tests/run_tests.sh:10-13` の注記（末尾に ` password=...` を付け足す）と一致。examples が URI で動くことは格子の `basic conninfo URI` / `py conninfo URI`（rc 0）で裏取り
 
-- **表 1〜3（`timeout_ms` 上限）**: `_platform/poll.mojo` に `TIMEOUT_MS_MAX = 2_147_483_647` と `_reject_bad_timeout` を 1 定義だけ置き、`poll_socket` と `async_conn` の 6 入口（`wait_readable` / `wait_writable` / `connect_blocking` ×2 / `fetch_all` / `wait_notification`）
-  がこれを呼ぶ。import の向きは `async_conn → _platform/poll`（決めた事項 17 を維持）。上限が 2^31-1 なので `timeout_ms * 1_000_000` ≤ 2.15e15 で deadline の Int64 溢れも消える（コメントに明記）。
-  既存の `< -1` 文言は `"timeout_ms must be -1, 0 or positive"` → `"... or at most 2147483647"` に変わったが、既存テスト 2 件は `"timeout_ms must be"` しか見ていないので**期待値変更ゼロ**（コードレビューで確認）
-- **表 4〜7（通知の UTF-8）**: `notifications()`（`async_conn.mojo:1381-1417`）は `_pending` を `found` に引き取ってから `PQnotifies` を回し、`relname` / `extra` を owned `String` に複製 → **`PQfreemem` を先に呼ぶ**（`:1399`）→ `_reject_bad_notification_text` で channel → payload の順に検査 →
-  失敗なら `self._pending = found^` で正常分を戻してから raise（`:1408`）。`PGnotify` は raise 経路でも必ず解放され（`src_PQfreemem_calls=3` 不変）、不正 UTF-8 の `String` は関数内に留まって外へ出ない。
-  `wait_notification`（`:1583-1588`）は `TIMEOUT` だけを `None` に写すので `TYPE_MISMATCH` はそのまま伝播（表 7）。スキャナは `decode_binary._utf8_first_invalid` を import（実装 1 つ）
-- PLAN からの逸脱 1 件は妥当: `strlen` 長の `Span` ではなく owned `String` の `as_bytes()` を検査（`external_call["strlen"]` が stdlib の同名シンボル束縛と衝突し得る。RESEARCH §0.5 ☆ と同じ理由）
-- **文書・例 5 件**: ① `connect_blocking` の Raises に `SERVER`（2 形の docstring + `__init__.mojo` の表） ② `fetch_all` / `connect_blocking` に「`0` は予算なし = 即 `TIMEOUT`」（`__init__.mojo` の Timeouts 項にも） ③ TRACE §1 を turn 12 の再実行で差し替え（round 2 の再実行と**完全一致**、diff なし）
-  ④ `examples/async_query.mojo` が `None` + `IDLE` まで回る形（`results` カウンタで「結果なし」を判定） ⑤ `test_extended_datetime.mojo:787` の SKIP 文言に `(main)`（77 桁・1 行、`^SKIP ` 維持）
-- テストの妥当性: `test_a_budget_above_c_int_max_is_usage_at_every_entry` は 4 入口 + 経過 < 1,000 ms + 拒否後の `Busy` → `fetch_all(5000)` で回収まで断定。`test_timeout_at_c_int_max_is_accepted` が上限ちょうどを受け入れる陽性側。
-  `test_a_payload_that_is_not_utf8_is_rejected_and_dropped` / `test_a_channel_...` は `_assert_sql_ascii` で `SQL_ASCII` DB に着いていることを先に確かめる（UTF-8 DB だとサーバーが弾いて偽陽性になる）。`"ab"` が message に無いことも断定
-- セキュリティ観点の再確認: 新しい外部入力は通知バイト列のみで、検証前にコードポイント走査しない（`as_bytes()` だけ）。`CREATE DATABASE pq_test_ascii` はテストが固定文字列で発行し、両サーバーに残る（PROGRESS turn 12 に明記。`42P04` を無視するので再実行は安全）。秘密情報・インジェクション経路の追加なし
+### 5.2 round 1 の格子の再確認（`turn-012-robust-regress.sh`、**42 レコード**。Mojo 3 本は HEAD `0ed5ae9` から再ビルド）
 
-### 8.3 検証コマンド（round 2）
+- 全 42 レコードで `unhandled_markers=0 traceback=0 exception_ignored=0`。入力クラス（空 / URI / 非 UTF-8 / 制御文字 / 100 KB / 引用符不整合 / 存在しない DB / 空白のみ / `libc.so.6` / ディレクトリ / 空ファイル / `/dev/null` / 非 UTF-8 パス）は
+  すべて `failed: PgError(...)` + rc 1 か正常 rc 0。出力クラス（`/dev/full` / 閉じた fd / stdin 閉鎖）は round 1 と同じ rc
+- `pixi run check`（`db-reset` 直後のクリーンな木）→ **6/6 PASS**（`final_check: PASS`、`0 failed` のサマリ 47 件、`FAIL` / `Traceback` 0 行、6/6 段 `matched lines` 0）。所要は約 **165 s**（ログの mtime からの概算。閾値 247 s）
+- `docker exec … pg_database` は pg17 / pg14 とも **0 行**
+- チェックリスト（82 key）は `turn-011-checklist.log` と **完全一致**（`diff` 空）
+- `pixi run bench`（アイドル時、`check` の後に 1 回）: decode **binary 13 / 13 / 13 ms < text 42 / 42 / 42 ms**（README の 12/11/11 vs 42/42/44 と同じ桁。受け入れ基準の性質は再現）
+- README コード片 6 本 `blocks=6 missing_total=0`、型表 `src rows=20 readme rows=20` で差分 4 件は round 1 と同じ日本語化の散文のみ
 
-- `pixi run check` **6/6 PASS**（`scratch/turn-013-check.log`、19:18:02 → 19:20:49 = **167 s**。1/6 fmt 差分なし、2/6 precompile、3/6 docstring 診断 0、4/6 examples 5 本、5/6 両サーバー 47 サマリ `0 failed` + `skipped 1` ×2、6/6 `matched lines: 0`）
-- 追従先チェックリスト再実行（`scratch/turn-013-checklist.log`）: turn 12 の出力と **diff なし**（全 85 行期待値。`test_poll_tests=11` / `test_async_tests=30` / `test_notify_tests=11` / `src_PQfreemem_calls=3` / `src_PQexec_calls=4` / `poll_external_call_symbols=2`）
-- 作業木は clean（`git status --short` 空）、`git remote get-url origin` → `No such remote 'origin'`
+### 5.3 指摘（→ PLAN F2。文書のみ）と、round 1 の格子の欠陥 1 件
 
-### 8.4 残留リスクの更新
+1. **examples 6 本の docstring が「`key=value ...` form only, never a `postgres://` URI」のまま**で、F1 (c) で直した README §7「`examples/` は URI でも動く」と矛盾する
+   （REQ §4.3「docstring が README と矛盾しない」。`basic.mojo:7` / `params.mojo:13` / `binary.mojo:13` / `async_query.mojo:12` / `listen_notify.mojo:14` / `bench_formats.mojo:16`）。
+   **なぜ前ラウンドで拾えなかったか**: round 1 は格子で README の言い切りに気づいたあと README だけを F1 に入れ、同じ文をリポジトリ全体で `grep -rn` しなかった（REQ §9 verify の規則の不履行）
+2. 格子の欠陥（指摘ではなく verify 側の訂正）: round 1 / F1 (b) の `run_pipe`（`2>&1 1>&3 | head -c 1`）は **stderr をパイプに、stdout を捕捉側に**つないでいて、stdout の EPIPE を一度も試していなかった。
+   round 2 は `> >(exit 0)`（読み手が先に消えたパイプ）に置き換えて本物の EPIPE を試した: `bench_psycopg.py` は上表のとおり合格、Mojo の `basic` / `hello_libpq` は **rc 141（SIGPIPE で終了）**。
+   トレースバックは出ず、`head` に繋いだときの Unix の標準挙動なので D4 の違反とは見なさない（§5.4 に残す）
 
-§5 の一覧はそのまま有効。F1 により「`timeout_ms` ≥ 2^31」は残留リスクから消え、「`SQL_ASCII` DB では不正 UTF-8 の通知 1 件を捨てる」が §5 末尾の記載どおり残る。新規の残留リスクなし
+### 5.4 残留リスク（round 2 で追加。合格側に残すもの）
+
+- Mojo の examples は stdout の読み手が先に消えると SIGPIPE で rc 141 になる（stdlib の `print` は SIGPIPE を無視しない）。トレースバックは出ない。パイプで `head` に繋ぐ用途の標準挙動
+- `bench_psycopg.py` の `_run` 内 `sys.exit(1)`（件数不一致）は `SystemExit` で明示 flush を飛ばすので、**「サーバーが件数を間違える」と「stdout が書けない」が同時に起きた場合だけ** `Exception ignored` + rc 120 に戻る。PLAN F1 (a) が「`_run` の `sys.exit(1)` は変えない」と定めた経路で、実害は無い
+- `_discard_stdout()` の `os.open(os.devnull)` が失敗する（fd 枯渇）と `OSError` が素通りして Traceback になる。stdout が書けない状況との二重故障のみ
+
+## 6. round 3（turn 14）— F2 の回帰だけ。合格
+
+- 対象差分: round 2 以降の変更は `examples/` 6 本の docstring（`4c20636`、+18 / -17。`basic` / `params` / `binary` / `async_query` / `listen_notify` / `bench_formats`）だけ。
+  `src/` / `tests/` / `README.md` / `bench_psycopg.py` / `pixi.toml` は不変（`git diff a619168..HEAD -- examples/` と `git show --stat` で確認）。サブエージェント 0 本
+- 生ログ: `scratch/turn-014-{check,checklist}.log`
+
+### 6.1 PLAN F2 の表との突き合わせ — すべて期待どおり
+
+| 検査 | 実測 |
+|---|---|
+| `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` | **0 件**（rc 1）。`tests/run_tests.sh:10-13` の「NOT a postgres:// URI」（テスト側の真の制約）は残っている |
+| 6 ファイルの該当 1 文 | 全部「a `key=value ...` string or a `postgresql://` URI, passed to `PQconnectdb` as is」。`Run it with \`pixi run <task>\`.` の行は不変。6 本とも 80 桁超の行 0（`awk 'length > 80'`） |
+| 文書間の整合 | README §7 `:363-366`（テストだけ `key=value` 形式、`examples/` は `PQconnectdb` 素通しで URI 可）/ `src/pq/connection.mojo:169-172`（`open` は conninfo か `postgresql://` URI を `PQconnectdb` どおりに受ける）/ `bench_psycopg.py:11`（URI を否定しない「(`key=value ...` form)」のまま、表どおり不変）と矛盾なし |
+| `/home/parallels/.pixi/bin/pixi run check`（`db-up` 済みの木。コンテナ 3 台 Healthy） | **6/6 PASS**（`final_check: PASS`、rc 0、`FAIL` / `Traceback` 0 行、`0 failed` のサマリ 47 件、6/6 段 `matched lines in build/final_check.log: 0`）。00:55:46 → 00:58:52 = **186 s**（閾値 247 s） |
+| チェックリスト（`turn-002-checklist.sh`、82 key） | `turn-013-checklist.log` と **`diff` 空**（完全一致。`examples_pixi_run` 7 / `readme_h2` 10 / `readme_examples_links` 10 / `hello_*` / `examples_raise_error` 0） |
+| `docker exec … pg_database`（`pq_test_%`） | pg17 / pg14 とも **0 行** |
+| 堅牢性格子 / bench の再実行 | 省略（表どおり任意。コードが不変なので round 2 の `turn-012-robust-regress.log` 42 レコードがそのまま有効） |
+
+### 6.2 マージ
+
+- リモートなし（`git remote get-url origin` → `No such remote`）→ (a) ローカルマージ。`main` には branch 側に無いコミットが無く（`git log HEAD..main` 空）、作業ツリーはクリーン
+- `git checkout main` → `git merge --no-ff gsd-lite/phase5-polish-bench-readme`。ブランチは残す
+
+### 6.3 残留リスク（全ラウンドの統合。§4 / §5.4 に追加なし）
+
+- Windows 実機は未検証（REQ §3 スコープ外。TRACE 照合表 + README §8 + `loader.mojo` docstring で開示済み）
+- Mojo の `print` は stdout の書き込み失敗を無視し、読み手が先に消えると SIGPIPE（rc 141）。トレースバックは出ない（stdlib の挙動）
+- `bench_psycopg.py` は「件数不一致 + stdout 書けない」「fd 枯渇 + stdout 書けない」の二重故障でのみ `Exception ignored` / Traceback に戻る
+- `_collect_notifications` は `wait_readable` の `CONNECTION` で抜ける経路では `out` を復元しないが、切断後は取り出す手段が無く実害なし
+- `check` の所要は 165〜215 s で揺れる（閾値 247 s 以内）

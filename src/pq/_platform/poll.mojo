@@ -20,11 +20,30 @@ Three platform notes:
   `POLLERR` / `POLLHUP` / `POLLNVAL` in `events` with `WSAEINVAL`, so only the
   two input flags are ever requested. Its `revents` are translated to the
   POSIX values before they leave `_poll_once`, which keeps the decoding in
-  `poll_socket` single-branched.
-- Only two symbols are called by name, `poll` and `WSAPoll`, and each in one
-  signature. Mojo resolves an `external_call` symbol once per name, so a
-  second signature for the same name -- or re-declaring something the stdlib
-  already calls, such as `write` -- is a compile error.
+  `poll_socket` single-branched. Winsock reports failures through
+  `WSAGetLastError` rather than `errno`, so `_poll_once` returns the error
+  code alongside the flags and `_is_interrupted` / `_is_usage_error` classify
+  it with per-platform constants. Two Windows-only caveats no code here can
+  paper over: before Windows 10 version 2004 a failed TCP connect is not
+  reported to `WSAPoll` at all (`POLLHUP | POLLERR | POLLWRNORM` on a failed
+  connect arrived in 2004), so an asynchronous connection waiting in
+  `wait_writable` only learns of the failure when its budget expires and it
+  reports `TIMEOUT`; and Winsock needs `WSAStartup` before any socket call or
+  every call fails with `WSANOTINITIALISED` (10093) -- libpq calls it itself
+  when it opens a connection, so a `PQsocket` is safe, but using this module
+  on a descriptor libpq did not create is not.
+- Only three symbols are called by name, `poll`, `WSAPoll` and
+  `WSAGetLastError`, and each in one signature. Mojo resolves an
+  `external_call` symbol once per name, so a second signature for the same
+  name -- or re-declaring something the stdlib already calls, such as `write`
+  -- is a compile error.
+
+The Windows branch was written against these, and `.gsd-lite/TRACE.md` holds
+the line-by-line comparison:
+
+- https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll
+- https://learn.microsoft.com/en-us/windows/win32/api/winsock2/ns-winsock2-wsapollfd
+- https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2
 """
 
 from std.ffi import ErrNo, c_int, external_call, get_errno
@@ -180,9 +199,46 @@ struct PollEvents(Copyable, Movable, TrivialRegisterPassable, Writable):
         )
 
 
+def _is_interrupted(err: Int) -> Bool:
+    """Whether a poll failure code means "a signal arrived, try again".
+
+    Args:
+        err: The code `_poll_once` reported.
+
+    Returns:
+        True only for POSIX `EINTR`. Windows has no equivalent worth
+        retrying: `WSAEINTR` (10004) is raised when another thread calls
+        `WSACancelBlockingCall`, which this package never does, and polling
+        again would undo a deliberate cancellation.
+    """
+    comptime if CompilationTarget.is_linux() or CompilationTarget.is_macos():
+        return err == Int(ErrNo.EINTR.value)
+    else:
+        return False
+
+
+def _is_usage_error(err: Int) -> Bool:
+    """Whether a poll failure code blames the caller rather than the network.
+
+    Args:
+        err: The code `_poll_once` reported.
+
+    Returns:
+        True when the descriptor or the arguments were wrong, which
+        `poll_socket` turns into `PgErrorKind.USAGE` instead of
+        `PgErrorKind.CONNECTION`. POSIX: `EBADF`, `EINVAL`. Windows:
+        `WSAEBADF` 10009, `WSAEINVAL` 10022, `WSAENOTSOCK` 10038 -- the
+        numbers are spelled out because Winsock codes are not in `ErrNo`.
+    """
+    comptime if CompilationTarget.is_linux() or CompilationTarget.is_macos():
+        return err == Int(ErrNo.EBADF.value) or err == Int(ErrNo.EINVAL.value)
+    else:
+        return err == 10009 or err == 10022 or err == 10038
+
+
 def _poll_once(
     fd: Int, want_read: Bool, want_write: Bool, timeout_ms: Int
-) -> Tuple[Int, Int]:
+) -> Tuple[Int, Int, Int]:
     """Call the platform's poll exactly once.
 
     Args:
@@ -192,8 +248,12 @@ def _poll_once(
         timeout_ms: Milliseconds to wait, `0` for a probe, `-1` for forever.
 
     Returns:
-        The poll return value and the resulting flags, the latter always
-        expressed with the POSIX `POLL*` values.
+        The poll return value, the resulting flags -- always expressed with
+        the POSIX `POLL*` values -- and the failure code, which is `0` unless
+        the return value is negative. The code is read here rather than by the
+        caller because the two platforms keep it in different places
+        (`errno` versus `WSAGetLastError`) and both are clobbered by the next
+        call.
     """
     comptime if CompilationTarget.is_linux() or CompilationTarget.is_macos():
         var events = Int16(0)
@@ -205,7 +265,8 @@ def _poll_once(
         var ret = external_call["poll", c_int](
             Pointer(to=pfd), Int(1), c_int(timeout_ms)
         )
-        return (Int(ret), Int(pfd.revents))
+        var err = Int(get_errno().value) if ret < 0 else 0
+        return (Int(ret), Int(pfd.revents), err)
     else:
         # Windows: never ask for POLLERR / POLLHUP / POLLNVAL -- WSAPoll
         # fails the whole call with WSAEINVAL if they appear in `events`.
@@ -229,7 +290,12 @@ def _poll_once(
             flags |= _POLLHUP
         if (pfd.revents & _WSA_POLLNVAL) != 0:
             flags |= _POLLNVAL
-        return (Int(ret), Int(flags))
+        # Winsock leaves `errno` alone; the code lives in WSAGetLastError and
+        # only the call that just failed may read it.
+        var err = (
+            Int(external_call["WSAGetLastError", c_int]()) if ret < 0 else 0
+        )
+        return (Int(ret), Int(flags), err)
 
 
 def poll_socket(
@@ -254,9 +320,10 @@ def poll_socket(
     Raises:
         PgError: `PgErrorKind.USAGE` when `timeout_ms` is below `-1` or above
             `TIMEOUT_MS_MAX`, when the descriptor is not open (`POLLNVAL`), or
-            when the kernel rejects the call with `EBADF` / `EINVAL`;
+            when the call is rejected for a reason `_is_usage_error` claims
+            (`EBADF` / `EINVAL`, or their Winsock equivalents);
             `PgErrorKind.CONNECTION` for any other `poll` failure, carrying
-            the `errno` text.
+            the numeric failure code.
     """
     _reject_bad_timeout(timeout_ms)
     # A finite budget is anchored to a deadline so an EINTR retry resumes
@@ -269,8 +336,8 @@ def poll_socket(
         var ret = polled[0]
         var flags = Int16(polled[1])
         if ret < 0:
-            var err = get_errno()
-            if err == ErrNo.EINTR:
+            var err = polled[2]
+            if _is_interrupted(err):
                 if timeout_ms > 0:
                     var left = deadline - monotonic()
                     if left <= 0:
@@ -280,9 +347,9 @@ def poll_socket(
                     remaining = (left + 999_999) // 1_000_000
                 continue
             var kind = PgErrorKind.CONNECTION
-            if err == ErrNo.EBADF or err == ErrNo.EINVAL:
+            if _is_usage_error(err):
                 kind = PgErrorKind.USAGE
-            raise PgError(kind, String("poll failed: ", err))
+            raise PgError(kind, String("poll failed: errno ", err))
         if ret == 0:
             return PollEvents(False, False, False, False, True)
         # POLLNVAL is a closed or never-opened descriptor, which is a bug in

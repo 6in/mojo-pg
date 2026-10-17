@@ -1,398 +1,399 @@
-# RESEARCH — phase4-async-cancel-notify
+# RESEARCH — phase5-polish-bench-readme
 
 - 作成: 2026-10-17 / gsd-lite-research（turn 1）
-- 入力: REQUIREMENTS.md / DECISIONS.md / HANDOFF.md §7・§9・§10、`archive/phase3-binary-all-types/RESEARCH.md`、
-  `reflect/20261017-0254-phase3-binary-all-types.md`。`state.json.research.targets` = similar_oss / official_docs
-- 検証環境: Mojo 1.1.0 (8189361e)、pixi env の `libpq.so.5`（`PQlibVersion` = 180006）、docker `postgres:17`（17.11、port 54317）/
-  `postgres:14`（14.24、port 54314）、aarch64 Linux（Ubuntu、glibc）。`alpine/socat` イメージ（§2.5）
-- **プローブ**（`.gsd-lite/logs/phase4-async-cancel-notify/scratch/`、gitignore 対象。結論は本書に転記済み）:
-  - `turn-001-probe-poll.mojo` + `.log`: libc `poll` / `pipe` / `socketpair` / errno / 単調時計（§2.3）
-  - `turn-001-probe-lang.mojo` + `.log`: OS 判定・C 型幅・UTF-8 検証 ctor（§2.4、§2.6）
-  - `turn-001-name-*.mojo`（12 本）: stdlib 名の存在確認（1 ファイル 1 名。§2.4）
-  - `turn-001-probe-async.mojo` + `-pg17.log` / `-pg14.log`: 非同期接続〜cancel〜NOTIFY〜切断〜接続失敗 4 種（A〜N の 14 節。§2.1・§2.2）。
-    **PG17 と PG14 の差は NOTIFY の到着タイミングと `PQflush` の戻りだけ**（§2.7）
-  - `turn-001-probe-async2.mojo` + `-pg17.log` / `-pg14.log`: 接続中の誤呼び出し、prepared、single-row の境界、tx 内 cancel、NOTIFY の到着、
-    切断後の `PQgetResult`、multi-host（A〜H。§2.1・§2.2）。**PG17 / PG14 でタイミング以外の差ゼロ**
-  - `turn-001-blackhole-compose.yml`: 「accept するが応答しない」リスナーの compose 定義（§2.5。そのまま `tests/docker-compose.yml` に写せる）
-- サブエージェント 1 本（OSS / 公式 docs / macOS・Windows 定数の調査。約 10 分、90 ツール呼び出し。§1 と §2.3 の「出典」行はその報告から。報告の「`get_errno` / `monotonic` がある」は
-  `turn-001-name-get_errno_a.mojo` / `_b.mojo` で実測して採用）
-- 無人シェルの注意: `mojo` / `pixi` は PATH に無い → **`/home/parallels/.pixi/bin/pixi run mojo ...`**。lean-ctx MCP は未接続（素の Read / Bash で可）。
-  プローブは **最初の 1 本（poll）をコンパイルしてから** 残りを書いた。やり直しは PROGRESS 参照（5 回、うち 4 回は Mojo の名前違い → §0.5 ☆ に転記）
+- 入力: REQUIREMENTS.md / DECISIONS.md / HANDOFF.md §5.1・§6・§8・§10、`archive/phase4-async-cancel-notify/{RESEARCH,VERIFICATION,TRACE,PROGRESS}.md`、
+  `reflect/20261017-1925-phase4-async-cancel-notify.md`。`state.json.research.targets` = official_docs / similar_oss
+- 検証環境: Mojo 1.1.0 (8189361e)、pixi 0.82.0、pixi env の libpq 18.6（`PQlibVersion` = 180006、conda-forge `h4d8aa50_3`）、docker `postgres:17`（**17.11**、54317）/
+  `postgres:14`（**14.24**、54314）/ `alpine/socat`（54399）、Ubuntu 24.04.5 LTS、kernel 6.8.0-147、aarch64 4 コア（仮想マシン、archspec `neoverse_n1`）、RAM 15 GiB。
+  ホスト python3 3.12.3 + psycopg 3.3.3（`binary` 実装、libpq 180000）はプローブ 1 本（DROP DATABASE）にだけ使った
+- **プローブ**（`.gsd-lite/logs/phase5-polish-bench-readme/scratch/`、gitignore 対象。結論は本書に転記済み。`.log` は同名プローブの出力原本）:
+  - `turn-001-probe-lang.mojo` + `.log`: `_WsaPollFd` の `size_of`、`comptime if` 連鎖で OS 別候補を返す関数、`ErrNo` の値（§2.3・§2.4）
+  - `turn-001-probe-closefd.mojo` + `.log`: `close(PQsocket)` 後の `fetch_all` / `send` / `wait_readable`（§2.7。**busy-spin を再現**）
+  - `turn-001-probe-notify-bad.mojo` + `.log`: 切断後（`PQstatus` = BAD）の `notifications()` / `wait_notification()`（§2.8）
+  - `turn-001-zerocopy-time.sh` + `.log`: `test_zero_copy` の単体 / `check` 相当 / build→run 分離（§2.5。**単位の読み違いが原因**）
+  - `turn-001-examples-robust.sh` + `.log`: examples 7 本 × 誤パスワード / 閉じたポート / libpq 不在（§2.9。**`hello_libpq` だけ未捕捉**）
+  - `turn-001-dropdb-race.py` + `.log`: 切断直後の `DROP DATABASE`（FORCE 有無 × PG14 / PG17 × 10 回。§2.6）
+  - `turn-001-pixi/`（`pixi.toml` + `pixi.lock` + `examples/bench_psycopg.py`）+ `turn-001-bench.log`: feature `bench` の最小形で psycopg を入れて測った（§2.1・§2.2。
+    環境 `.pixi/` は消した。`pixi install -e bench` で再現できる）
+- 無人シェルの注意: `mojo` / `pixi` は PATH に無い → `/home/parallels/.pixi/bin/pixi run mojo ...`。`gsd-lite-loop.sh --where` は PATH にある（`.gsd-lite/` には無い）。
+  lean-ctx MCP は未接続（素の Read / Bash で可）。`/etc/os-release` は lean-ctx のルート制限で読めない → `lsb_release -ds`。やり直し 0 回（プローブ 6 本すべて 1 回でコンパイル・実行）
 
 ## 0. 結論サマリ
 
-1. **作る（BLOCKED にしない）**。要件を満たす既存 OSS は無い（Mojo 製の libpq 非同期ラッパーは 2026-10 時点で存在しない。§1）。
-   盗める設計は psycopg 3 の generator 状態機械（connect / execute / fetch / notifies の 4 本。§1.1・§3）
-2. **REQ §4・§5.1 の「要実測」は全部確認済みで、矛盾は無い**。確定した事実（§2.1 / §2.2）: `PQconnectPoll` の最初の戻りは **`PGRES_POLLING_WRITING`(2)**、
-   `PQsendQueryParams` は戻った時点でパラメータバッファを読み終えている（直後に上書きしても結果は元の値）、`PGnotify` のレイアウトは offset 0 / 8 / 16 / 24
-   （`relname` / `be_pid` / `extra` / `next`。`next` は常に 0 で返る）、cancel は呼び出しから **1〜4 ms** で `57014 canceling statement due to user request`
-3. **REQ 本文を 3 箇所訂正した（§5）**: (a) §4.7 NOTIFY テストは「`notifications()` 1 回で 2 件」ではなく「2 件揃うまで `wait_notification` / 再試行（上限 2 s）」
-   （**2 件の NOTIFY は別メッセージで届き、1 回の `PQconsumeInput` で 1 件しか取れないことがある**。PG14 で実測）、(b) §4.1 の `@parameter if` は Mojo 1.1.0 では
-   **`comptime if`**、(c) §4.1 Windows 分岐の判定は `CompilationTarget.is_linux()` / `is_macos()` の **`else`**（`is_windows` も `platform_map(windows=)` も 1.1.0 に無い）
-4. **`_platform/poll` は成立**: `@fieldwise_init struct PollFd(TrivialRegisterPassable)` 8 byte、`external_call["poll", c_int](Pointer(to=pfd), Int(1), c_int(timeout))`
-   で readable / writable / timeout / `POLLHUP` / `POLLNVAL` の 5 状態を実測。`EINTR` は stdlib の **`std.ffi.get_errno() == ErrNo.EINTR`** で読める（OS 切替済み）。単調時計は
-   **`std.time.monotonic()`（= `perf_counter_ns()` = `clock_gettime(CLOCK_MONOTONIC)`、差 0 ms）**。`POLL*` の使う 6 値は Linux（x86_64 / aarch64）と macOS で同一、Windows だけ別値（§2.3）
-5. **タイムアウトテストの相手（D10）は `alpine/socat -u TCP-LISTEN:5432,fork,reuseaddr OPEN:/dev/null`**: TCP accept 後に何も書かない。libpq は SSLRequest を
-   送って `PGRES_POLLING_READING`（status 7 = `CONNECTION_SSL_STARTUP`）で待ち続け、`poll(500)` が 501 ms で満了（実測）。`docker compose up -d --wait` は
-   healthcheck 無しでも 0.7 s で healthy 扱い（§2.5）
-6. **状態機械の境界で libpq 自身が守ってくれる箇所と、守ってくれない箇所**（§2.1 表 / §4）: 守る = 結果待ち中・最初の結果取得後〜NULL 前の `PQsendQuery`（0 +
-   `another command is already in progress`）、接続中の `PQsendQuery`（0 + `no connection to the server`）、アイドルの `PQsetSingleRowMode`（0）。
-   **守らない** = `PQsetSingleRowMode` は **最初の `PQgetResult` の後でも 1 を返す**（効果は無い）、`PQgetCancel` は接続中でも非 NULL、`PQconnectPoll` は OK 後に呼んでも 3。
-   → REQ §4.2 の `USAGE` 格子（状態名入り）はクライアント側で持つしかない
-7. **切断後の `PQgetResult` は NULL を返す前に 1 件、SQLSTATE 空の `PGRES_FATAL_ERROR` を返す**（`PQresultErrorMessage` = `server closed the connection
-   unexpectedly ... invalid socket`、`PQstatus` = BAD、`PQsocket` = -1、`PQflush` = -1、`PQgetCancel` = NULL）。既存 `_take_result` の分類（sqlstate 空 + BAD →
-   `CONNECTION`）がそのまま効き、2 回目で NULL なので `fetch_all` は止まる
-8. **`Sending`（`PQflush` = 1）は 16 MB のクエリで PG17 では 1 回出たが PG14 では 0 回**: 非決定的なのでテストは「最終的に `Idle`・結果が正しい」だけを断定する（§4 P12）
-9. **UTF-8**: `String(from_utf8=Span)` / `StringSlice(from_utf8=Span)` は検証して raise するが **位置を返さない**（メッセージは `Cannot construct a String from
-   invalid UTF-8 data` / `StringSpan: buffer is not valid UTF-8`）。REQ §4.10「invalid UTF-8 at byte N of column M」には自前のスキャナが要る →
-   **速い経路は stdlib の検証、失敗時だけ自前スキャナで N を求める**（§3-9。性能影響は失敗時のみ）
+1. **作る（BLOCKED にしない）**。要件を覆す発見は無い。「作るか使うか」の判断対象も無い（Phase 5 は仕上げ）。REQ 本文の事実誤りを 2 箇所直した（§5）
+2. **psycopg 比較は pixi の feature `bench` で成立**（§2.1）。`[feature.bench.dependencies] python = ">=3.10"; psycopg = ">=3.2"` +
+   `[environments] bench = { features = ["bench"], solve-group = "default" }` + `[feature.bench.tasks] bench-psycopg = "python examples/bench_psycopg.py"`。
+   `pixi run bench-psycopg` は `-e` 無しで bench 環境を選ぶ。解決結果: **psycopg 3.3.4 + psycopg-c 3.3.4（C 実装）+ python 3.14.8、libpq は default 環境と同じ 18.6 `h4d8aa50_3`**。
+   default 環境（`check` が使う）は**変わらない**（python 3.15.0 のまま）。conda-forge に `psycopg-binary` は無く、`psycopg`（noarch）が `psycopg-c` を必須依存にしている
+3. **実測値（§2.2、pg17、同一マシン・アイドル時）**: Mojo text `exec 43〜45 / decode 44 / total 88〜89 ms`、Mojo binary `exec 37〜46 / decode 12 / total 49〜59 ms`、
+   psycopg text `42 / 44〜46 / 86〜89 ms`、psycopg binary `36 / 35〜36 / 72〜73 ms`。**HANDOFF §8「バイナリがテキストより速い」は decode 列で 3.7 倍（12 vs 44 ms）、合計でも成立**。
+   psycopg の binary decode（36 ms）に対して Mojo は 12 ms。exec はサーバー側の仕事なので両者同じ
+4. **`test_zero_copy` の「1 テスト 3.4〜3.9 s」は単位の読み違い**（§2.5）。TestSuite の `PASS [ n ]` は**ミリ秒**（`pg_sleep(2)` のテストが `[ 2033.338 ]`、`build/final_check.log:48`）。
+   実測: 12 件 49〜56 ms、ビルド済みバイナリの壁時計 52 ms、`mojo run` の壁時計 1.6〜1.8 s はコンパイル。`test_result`（同じ `_connect`）も 1 件 3.7〜4.5 ms で同じ。
+   **直すものは無い**。impl は `scratch/turn-001-zerocopy-time.log` を TRACE に転記するだけ（D12 の「テスト側なら直す / src 側なら記録」のどちらでもなく「問題なし」）
+5. **`fetch_all` の busy-spin は再現できる**（§2.7、probe-closefd A）: BUSY 中に `close(PQsocket)` → `PQconsumeInput` が 0 を返すが `PQstatus` は OK のまま →
+   `fetch_all(1500)` は **1500 ms 回り続けて `TIMEOUT`**（`CONNECTION` ではない）。state は BUSY のまま。修正後は即 `CONNECTION`（< 50 ms）になるのが差分 → テスト 1 件の陽性対照になる
+6. **`_after_send` の `PQflush` -1 は到達不能**（§2.7）: PG18 の `PQflush` は `conn->status == CONNECTION_BAD` のとき -1、それ以外は `pqFlush` で、書き込み失敗は
+   `write_failed` + 「成功したことにする」（`pqsecure_raw_write`）ので -1 にならない。`PQsendQuery` が成功した直後に status が BAD になる経路は同一スレッドに無い →
+   REQ §4.5 の「到達困難なら陽性対照はコードレビュー」を採る。分岐自体（-1 → `BUSY`）は libpq の `PGASYNC_BUSY` と一致するので入れてよい
+7. **`notifications()` は BAD でも既に `CONNECTION` を投げる**（空リストは返さない。§2.8）。ただし **libpq の `errorMessage` が呼ぶたびに `connection not open` を 1 行ずつ蓄積する**
+   （2 回目 1 行、3 回目 2 行、`wait_notification` 3 行）。先行チェック（REQ §4.6）の観測可能な効果は「文言が固定される」ことで、テストはそこを断定する
+8. **Windows 照合（§2.3）**: レイアウト（16 byte）・フラグ値 5 つ・events の制限・timeout・戻り値は**正しい**。**誤り 1 件**: `ret < 0` の後の `get_errno()` は Windows では
+   `WSAGetLastError()`（`ws2_32.dll`）でないと取れない（Winsock は errno を設定しない）。加えて **Windows 10 2004 より前は接続失敗が `WSAPoll` に出ない**（公式注記）、
+   `WSAStartup` 前提、`external_call["WSAPoll"]` のシンボル解決は未検証のまま
+9. **`_ffi/loader.mojo` の Windows 行**（§2.4）: `platform_map` に `windows=` が無いので、`comptime if CompilationTarget.is_linux() / elif is_macos() / else` の連鎖で
+   `StaticString` を返す関数に置き換える（プローブでコンパイル・実行済み、Linux で `libpq.so.5,libpq.so`）。Windows は `libpq.dll` の 1 候補
+10. **DROP DATABASE**（§2.6）: PG14 / PG17 とも `WITH (FORCE)` 可（PG13 で導入）。切断直後の DROP は FORCE 無しでも 20/20 成功（4〜10 ms）だが、FORCE は無料の保険なので付ける。
+    トランザクション内不可（`Connection.execute` の `PQexec` は autocommit なので可）、対象 DB に繋いだ接続からは不可。`IF EXISTS` の不在時は NOTICE（stderr）で `check` 6/6 の
+    パターンには当たらない
+11. **examples の堅牢性**（§2.9）: 6 本は誤パスワード / 閉じたポート / libpq 不在 / 不正 conninfo のすべてで `failed: PgError(...)` + 終了コード 1。
+    **`hello_libpq.mojo` だけ `raise Error` で `Unhandled exception caught during execution` + `stack trace was not collected ...` の 2 行が出る**（REQ §5 違反。1 箇所の書き換え）
 
-## 0.5 Mojo 1.1.0 既知の落とし穴（Phase 1〜3 からの転記 ★ + 今回の追加 ☆）
+## 0.5 Mojo 1.1.0 既知の落とし穴（Phase 1〜3 ★ / Phase 4 ☆ / 今回 ◇）
 
-- ☆ **`external_call` は同じシンボル名を 1 プロセス（モジュール）内で 1 つの引数型列でしか呼べない**。`poll` を `(Pointer, Int, c_int)` と `(Int, Int, c_int)` で
-  2 回書くと `existing function with conflicting signature`。**stdlib が既に使う `write` / `read` / `close` も同じ**（`std.io.FileDescriptor` が
-  `write(Int, Pointer[NoneType], Int) -> Int` で呼んでいる）→ テストで pipe に書くのは `FileDescriptor(fd).write("A")`、`close` は
-  `external_call["close", c_int](c_int(fd))` が stdlib と衝突しなかった（実測）。`_platform/poll` は `poll` と `__errno_location` だけ呼ぶ
-- ☆ **`external_call` は `from std.ffi import external_call` が必要**（自動では見えない）。`size_of` は `from std.sys import size_of`（`sizeof` は無い）
-- ☆ **OS 判定は `from std.sys.info import CompilationTarget` → `CompilationTarget.is_linux()` / `is_macos()` を `comptime if` で**。`is_windows()` は無い、
-  `std.sys.info.os_is_*` も `std.sys.os_is_*` も無い、`platform_map` は `linux=` / `macos=` のみ（`windows=` は `unexpected keyword parameter`）。
-  `@parameter if` は構文エラー（`'if' statement does not support decorators`）
-- ☆ `std.os.errno` は無い。**errno は `from std.ffi import get_errno, ErrNo` → `get_errno() == ErrNo.EINTR`**（OS 切替済み。`Int(ErrNo)` は不可、`.value` で Int）。
-  `external_call["__errno_location", Int]()` でも読めるが Linux 専用（§2.3）
-- ☆ 単調時計は `from std.time import monotonic`（ns の `Int`。`perf_counter_ns()` と同値）。`std.time.now` は無い
-- ☆ 1.1.0 の文字列スライス型の正式名は **`StringSpan`**（エラー文言 `StringSpan: buffer is not valid UTF-8`）。`StringSlice` も通る（別名）。既存コードは `StringSlice` で統一されているのでそのまま
-- ☆ `std.ffi` の C 型: `c_int` 4 / `c_uint` 4 / `c_short` 2 / `c_ushort` / `c_long` 8 / `c_ulong` 8 / `c_size_t` / `c_ssize_t` がある
-- ☆ `String.strip()` は `StringSpan` を返す → `String(...)` で包む。`t[byte=a:b]` も `StringSpan` で `List[String].append` には `String(...)` が要る
-- ☆ `def f(mut s: String)` に `String("literal")` の一時値は渡せない（`must be mutable`）→ `var` に受けるか `var s: String` 引数の関数に `^` で渡す
-- ☆ **`print(a, b)` の既定 `sep=" "`** で `"errbuf='", s, "'"` は `errbuf=' x '` になる。期待値照合で空文字と区別するなら `sep=""` か `String(...)` 連結
-- ★（Phase 3 の 7 件）`Span[UInt8, origin]` は `[origin: ImmOrigin, //]` 前置が必須 / `(-0.0)::float8` は `'-0'::float8` で / `@fieldwise_init` は全フィールド公開 ctor を生む /
-  `ImplicitlyCopyable` でない型は `List` 要素を `.copy()` / `List[T](a, b, c)` 不可・`[a, b, c]` リテラルで（**今回も 1 回踏んだ**。`var x: List[Int32] = [Int32(0), Int32(0)]`）/
-  実引数の `String(...).as_bytes()` は一時オブジェクト由来 / モジュールレベル `var` 不可
-- ★（Phase 3）`_ = x^` は破棄ではなく生存マーカー、origin 付き値の使用で破棄が延びる / `ref` 束縛は生存延長されない / `drop(res^)` / `var r2 = res^` 後の使用は
-  `use of uninitialized value` / `Span(unsafe_ptr=, length=)` / `StringSlice(unsafe_from_utf8=)` は未検証・`String(from_utf8=)` は検証して raise /
-  `Array[UInt8, 16](fill=0)` / `p[unsafe_offset=i]` / `//` `%` は床除算 / `-Int64.MIN` は wrap / `atol` は空白と `+` を通す / `s[byte=i]` / `Writable` で `String(x)` /
-  `comptime if T == 自前型` は `rebind[T](v).copy()` / ASAP 破棄 × バッファ型は `_ = buffers^` で守る
-- ★（Phase 2）`mojo format` はディレクトリ走査で `.gitignore` を尊重 / `SIMD.__rshift__` 符号拡張 / ローカル `List` は `return out^` / `String.as_bytes()` は `Span` /
-  `def main() raises PgError` 不可 / `s += s` は aliasing エラー / `StaticString` は `@implicit` 変換元にならない / deref で origin 入れ子 / `std.os.setenv` は `Bool` /
-  空 `List[UInt8]` の `unsafe_ptr()` は `capacity=len+1`
-- ★（Phase 1）`len(String)` 不可 → `byte_length()` / `from std.math import isnan, isinf` / リスト literal は型注釈必須 / `::` は単項マイナスより強い / stdlib ソースは pixi env に無い
-  （名前は 1 名 1 ファイルの `mojo run` で確定。今回 `turn-001-name-*.mojo` 12 本、1 本 2〜3 s）/ `UnsafePointer` は deprecated / `__deinit__(deinit self)` /
-  素の `None` は `Optional[T](None)` / `size_t` は `c_size_t(...)` / libpq の既定 notice processor は stderr / `List[c_int]` を lengths / formats に
+- ◇ **TestSuite の `PASS [ n ]` / `Summary [ n ]` はミリ秒**。秒と読むと「1 テスト 3.4 s」のような架空の性能問題を作る（Phase 4 turn 9 がこれ）。`pg_sleep(2)` のテストで較正できる
+- ◇ **`def main() raises` で `raise Error(...)` すると Mojo ランタイムが `stack trace was not collected ... MODULAR_DEBUG=stack-trace-on-error` と
+  `Unhandled exception caught during execution: ...` を出し、`mojo run` が `error: execution exited with a non-zero result: 1` を足す**（3 行、終了コード 1）。
+  「トレースバックを出さない」要件は `def main():` + `try / except e: print("failed:", e); exit(1)` の形でしか満たせない（他の 6 example はこの形）
+- ◇ **`external_call["close", c_int](c_int(fd))` で libpq の socket を閉じても libpq は気づかない**（`PQstatus` OK、`PQsocket` は同じ番号）。`send` も成功する
+  （`pqsecure_raw_write` が EBADF を `write_failed` + 成功扱いにする）。テストで使うなら、閉じてから `PQfinish`（= `__del__`）までの間に新しい fd を開かないこと（fd 番号の再利用で無関係な fd を閉じる）
+- ◇ **libpq の `errorMessage` は追記式**: BAD になった接続で `PQconsumeInput` を呼ぶたびに `connection not open` が 1 行ずつ増える。pq の `_connection_error()` はその全文を message にするので、
+  「同じ操作を 2 回したら同じメッセージ」は成り立たない。文言を断定するテストは `find(...) >= 0` か、pq 側で先に投げる（REQ §4.6 の先行チェック）
+- ◇ **`comptime if` 連鎖（`if / elif / else`）を `def` の本体に書いて各分岐で `return` できる**（`StaticString`）。`platform_map` の代替として使える
+- ◇ **`size_of[_WsaPollFd]()` = 16、`size_of[_PollFd]()` = 8**（Linux aarch64 で実測。`var fd: Int` + `Int16` ×2 は C と同じ自然アライメント）
+- ◇ pixi: `[feature.X.tasks]` のタスクは `pixi run <task>` で `-e X` 無しに動く。`solve-group = "default"` を付けても default 環境の python（3.15）は bench 環境（3.14）と
+  一致させられない形で解決された（default 環境は変わらず、libpq の build だけ一致）。`pixi search --platform linux-aarch64 "psycopg-c==3.3.6"` で依存を確認できる
+- ◇ lean-ctx のルート制限: `cat /etc/os-release` は拒否される（`lsb_release -ds` を使う）
+- ☆（Phase 4 の 9 件）`PgError` を値で返すとき `return e^` ／ `except e: return e^` の `try` 本体から `Error` を投げるヘルパを呼べない（判定は `try` の外へ）／
+  `var x: Optional[T] = None` は `except` が必ず脱出すると「assignment never used」警告／`FileDescriptor(fd).write()` は一時値への mutating 呼び出しで不可（`var` に受ける）／
+  `prefix^ + chr(0)` は `^` 演算子と解釈される／`self._field^` でフィールドから move out 不可（`copy()` + `clear()`）／`print("SKIP ...")` は 80 桁を超えると `mojo format` が割る／
+  `len(StringSlice)` は `byte_length()`／`__origin_of` は `origin_of`
+- ☆（Phase 4 research）`external_call` は同じシンボル名を 1 つの引数型列でしか呼べない（stdlib が使う `write` / `read` も同じ。`close` は衝突しなかった）／`from std.ffi import external_call`
+  が必要、`size_of` は `from std.sys import size_of`／OS 判定は `CompilationTarget.is_linux()` / `is_macos()` を `comptime if` で（`is_windows()` 無し、`platform_map` は `linux=` / `macos=` のみ、
+  `@parameter if` は構文エラー）／errno は `from std.ffi import get_errno, ErrNo`（`.value` で Int。EBADF 9 / EINVAL 22 / EINTR 4）／単調時計は `std.time.monotonic`／
+  文字列スライスの正式名は `StringSpan`（`StringSlice` も通る）／`c_int` 4 / `c_short` 2 / `c_long` 8 等がある／`String.strip()` と `t[byte=a:b]` は `StringSpan`／
+  `def f(mut s: String)` に一時値は渡せない／`print(a, b)` の既定 `sep=" "`
+- ★（Phase 3）`Span[UInt8, origin]` は `[origin: ImmOrigin, //]` 前置／`(-0.0)::float8` は `'-0'::float8`／`@fieldwise_init` は全フィールド公開 ctor／`ImplicitlyCopyable` でない型は
+  `List` 要素を `.copy()`／`List[T](a, b, c)` 不可・`[a, b, c]` リテラルで／実引数の `String(...).as_bytes()` は一時オブジェクト由来／モジュールレベル `var` 不可／`_ = x^` は生存マーカー／
+  `ref` 束縛は生存延長されない／`Span(unsafe_ptr=, length=)` / `StringSlice(unsafe_from_utf8=)` は未検証・`String(from_utf8=)` は検証して raise／`//` `%` は床除算／`-Int64.MIN` は wrap／
+  `atol` は空白と `+` を通す／`comptime if T == 自前型` は `rebind[T](v).copy()`／ASAP 破棄 × バッファ型は `_ = buffers^` で守る
+- ★（Phase 2）`mojo format` はディレクトリ走査で `.gitignore` を尊重（`check` 1/6 はファイル列挙で回避済み）／`SIMD.__rshift__` 符号拡張／ローカル `List` は `return out^`／
+  `def main() raises PgError` 不可／`s += s` は aliasing エラー／`StaticString` は `@implicit` 変換元にならない／`std.os.setenv` は `Bool`／空 `List[UInt8]` の `unsafe_ptr()` は `capacity=len+1`
+- ★（Phase 1）`len(String)` 不可 → `byte_length()`／`from std.math import isnan, isinf`／リスト literal は型注釈必須／`::` は単項マイナスより強い／stdlib ソースは pixi env に無い（名前は 1 名 1 ファイルの
+  `mojo run` で確定）／`UnsafePointer` は deprecated／`__deinit__(deinit self)`／素の `None` は `Optional[T](None)`／`size_t` は `c_size_t(...)`／libpq の既定 notice processor は stderr（`FATAL:` /
+  `NOTICE:` 行が出る。`check` 6/6 が数えるのは `warning:` / `WARNING:` / `implicit ROLLBACK failed` だけ）
 
-## 1. 類似 OSS（similar_oss。サブエージェント報告。行番号は 2026-10-17 の main）
+### 0.5.1 Mojo → C の型幅（縮小変換）
 
-### 1.1 psycopg 3 — https://github.com/psycopg/psycopg/blob/master/psycopg/psycopg/generators.py
-- `_connect` :61-103: `connect_poll()` の READING → `WAIT_R`、WRITING → `WAIT_W` を **毎イテレーション `yield conn.socket, wait` で fd を再取得**（docstring :12「fileno may change」）。
-  OK で break、FAILED は `finish_pgconn` して `OperationalError`、他（ACTIVE）は `InternalError`。**`nonblocking = 1` は接続完了後**（:102。本プロジェクトは start 直後。どちらも可）
-- `_send` :138-157: `while pgconn.flush() != 0: ready = yield WAIT_RW; if ready & READY_R: pgconn.consume_input()` — コメント「この consume は notify を読むことがあり、PGconn に溜まって後で `fetch()` が拾う」
-- `_fetch` :204-226: `is_busy()` なら `WAIT_R` → `consume_input()` → `is_busy()` 偽まで。**`get_result()` の前に `_consume_notifies(pgconn)`**（:224）→ 本プロジェクトの `poll_result` も
-  `PQgetResult` 前後で通知がキューに残ることを前提にし、`notifications()` はいつ呼んでもよい設計（§2.2 J2 と一致）
-- `_fetch_many` :160-201: NULL まで取り、`consume_input` が失敗（idle-in-transaction kill 等）したときは **既に FATAL_ERROR の結果があれば break、無ければ再 raise**（:174-183）。
-  COPY_* / PIPELINE_SYNC で早期 break。結果列は丸ごと返し、カーソル側が最初の非 OK で raise
-- `notifies` :283-296: `yield WAIT_R; consume_input(); while n := pgconn.notifies(): ...`
-- cancel（`_connection_base.py` :296-320）: closed なら no-op（`_should_cancel`）。`connection.py` :479-516: 実行中に KeyboardInterrupt → cancel → **5 s 以内に `QueryCanceled` が来なければ `finish()`**
-  （#1371）→ 本プロジェクトの `fetch_all(timeout_ms)` を cancel 後に呼ぶ形と同型
-- `waiting.py` :441-498（https://github.com/psycopg/psycopg/blob/master/psycopg/psycopg/waiting.py）: `POLL_BAD = ~(POLLIN|POLLOUT)`。**revents にエラービットがあっても POLLIN が立っていれば libpq に渡す**
-  （libpq の方が親切なエラーを出す）。**エラービットだけ**のときは `os.fstat` で fd 閉鎖を確かめて `OperationalError("connection socket closed")`。締め切りは `time.monotonic()`。
-  EINTR は Python 側（PEP 475）任せ。コメント: 「Linux の select は fd ≥ 1024 不可」「fd を閉じると epoll.poll が hang」→ poll を選ぶ理由
+- **`c_int(x)` / `Int32(x)` / `Int16(x)` / `UInt32(x)` は範囲外の `Int` を黙って wrap する**（Phase 4 round 1 の実測: `wait_readable(2**32 + 50)` が 50 ms 待った。F1 で `TIMEOUT_MS_MAX` を置いて解決）。
+  C に渡す引数はすべて「渡す前に `Int` のまま範囲検査」が原則。現在の検査点: `_reject_bad_timeout`（`c_int(timeout_ms)` の 6 入口）、`c_int(256)`（定数）、`_PollFd(Int32(fd), ...)`（fd は
+  実用上 2^31 未満。未検査）、`_WsaPollFd(fd, ...)`（`Int` のまま。`SOCKET` = `UINT_PTR` で幅一致）
+- 今回の新規引数 `wait_notifications(n, timeout_ms)`: `timeout_ms` は既存の `_reject_bad_timeout` を通す。`n` は C に渡さない（ループ上限と `List` の件数）ので縮小変換は無いが、
+  `n < 1` を `USAGE`、`n = Int.MAX` は「予算切れまで集める」の意味で受け入れる（`List` の確保は到着分だけ）。plan の境界値行: `n ∈ {0, -1, 1, 2, Int.MAX}` × `timeout_ms ∈ {-1, 0, 200, TIMEOUT_MS_MAX, TIMEOUT_MS_MAX+1, 2**32}`
+- `psycopg` 側（Python）には縮小変換が無い。bench の `int` 合計は多倍長なので溢れない。Mojo 側 `bench_formats.mojo` の `ints += Int(row.get[Int32](0))` は Int64 累積で溢れない（和 ≈ 5×10^9）
 
-### 1.2 psycopg2 / ruby-pg（C 実装の守り方）
-- psycopg2 `pqpath.c` :706-760 `pq_get_result_async`: `PQconsumeInput()==0` → `CONNECTION_BAD` なら closed=2 + `OperationalError(PQerrorMessage)`；notifies / notices を処理してから `PQisBusy` → 1 なら「まだ」；
-  **結果列の中のエラーは最初の FATAL_ERROR を保持し、後続は PQclear**（:751-760「handle the *first* error」）。`_pq_execute_async` :900-930: `PQflush` 0 → READ、1 → WRITE、-1 → error。
-  `connection_int.c` :836-853: `PGRES_POLLING_FAILED` **と `PGRES_POLLING_ACTIVE` の両方**を失敗扱い（ACTIVE は `libpq-fe.h:125`「unused; keep for backwards compatibility」）
-- ruby-pg `ext/pg_connection.c` :2554-2603 `wait_socket_readable`: **読み待ちの前に必ず `PQflush` を終わらせる**（:2578「before we wait for data, make sure everything has been sent」）、締め切りはループごとに再計算、
-  起床後 `PQconsumeInput()==0` → `ConnectionBad`（:2595 コメント「PQisBusy is true on connection errors」）。`pgconn_sync_cancel` :2398-2417 は `char errbuf[256]`。
-  `PQsetSingleRowMode()==0` は例外（:1938）。Windows は `WSAEventSelect`（`rb_io_wait` が遅い）。POLLERR / POLLHUP / EINTR はランタイム任せ
-- → 本プロジェクトに写すもの: (a) `wait_readable` の前の `flush`（`fetch_all` は `Sending` なら先に `wait_writable` + `flush`）、(b) 「最初のエラーを保持して残りを取り切る」（D16 と同じ）、
-  (c) `PGRES_POLLING_ACTIVE`(4) も `CONNECTION` にする
+## 1. 類似 OSS（similar_oss）
 
-### 1.3 Mojo 製（GitHub、2026-10-17 時点）
-- `dvirarad/mojo-postgres`（Apache-2.0、libpq `external_call`、**同期のみ**、Mojo 0.25.7）/ `lee101/mojo-pg`（MIT、自前ワイヤ、blocking + deadline、poll 無し）/ `lee101/mojo-db`（MIT、`SO_RCVTIMEO`、
-  `__errno_location` 直書き）/ `ehsanmok/flare`（MIT、epoll / kqueue reactor、poll 無し）→ **libpq 非同期を Mojo で書いたものは無い**。採用する依存も無い
-- **`mojothon/libc`**（MIT、Mojo ≥ 1.1、linux-64 + osx-arm64）`src/libc/poll/syscalls.mojo` :45-60 `struct pollfd(TrivialRegisterPassable) { fd: Int32; events: c_short; revents: c_short }`、
-  :81 `def poll(fds: c_ptr[pollfd], nfds: c_ulong, timeout: Int32) -> Int32`、`errno/syscalls.mojo` :27-45 `get_errno` が `CompilationTarget.is_macos()` で `__error` / `__errno_location` を切替。
-  **形は本書 §2.3 と同一（独立に同じ結論）**。ただし POLL* 定数が Linux 値だけで macOS の `POLLWRNORM` が違う（本プロジェクトは 6 値しか使わないので影響なし）。写さない（stdlib `get_errno` で足りる）
+### 1.1 psycopg 3 — https://www.psycopg.org/psycopg3/docs/
 
-### 1.4 公式 docs の要点（出典 URL。§2 の実測と突き合わせ済み）
-- libpq-connect: 「`PQsocket` は `PQconnectPoll` 呼び出しをまたいで同じと仮定するな」「最初のイテレーションは WRITING を返したものとして振る舞え」「**`connect_timeout` は `PQconnectPoll` では無視される**。経過時間の判断はアプリの責任」
-  「失敗・放棄しても `PQfinish` は要る」（P1 / P2 / P3 / P23 の根拠）
-- libpq-async: `PQsetnonblocking` は送信側のみ（`PQexec` は非ブロッキングを尊重しない）。`PQflush` 1 のときは **read-ready も待って `PQconsumeInput`**（サーバーが NOTICE を送れずに詰まる）。
-  `PQisBusy` は読まない（`fe-exec.c:2064`: **`CONNECTION_BAD` なら 0 を返す** → §2.1 切断行の `isBusy 0` の理由）。「`PQgetResult` は NULL まで」「アクティブなコマンドが無ければ即 NULL」
-- `fe-exec.c:1706-1715`: `no connection to the server`（status ≠ OK）/ `another command is already in progress`（asyncStatus ≠ IDLE）— メッセージは既存のエラーバッファに**追記**される（`PQerrorMessage` に前のエラーが残り得る）
-- libpq-single-row-mode: 「`PQsendQuery` 直後、`PQconsumeInput` / `PQgetResult` の前にだけ呼べる。正しいタイミングなら 1、さもなくば 0」— **実測はこれより緩い（§2.1）**。`fe-exec.c:1941-1959 canChangeResultMode` は
-  `asyncStatus == BUSY && !pgHavePendingResult` しか見ない。「0 行の TUPLES_OK が終端、その後も NULL まで `PQgetResult`」
-- libpq-cancel: `PQcancel` 1 / 0、errbuf 256 推奨、「dispatch 成功は効果の保証ではない。失敗（既に完了）なら**何も見えない**」、`PGcancel` は read-only で別スレッドから呼べる、`fe-cancel.c:577-699` で自前 socket を
-  **ブロッキング connect**。**PG18 docs は `PQcancel` を「deprecated で insecure（sslmode=require でも cancel 要求は暗号化されない）」と記す**（§4 P31。D6 の判断は変えない: libpq 14 対応のため）。
-  サーバー `postgres.c:3621-3632`: コマンド読み取り中（アイドル）の cancel は**無視**（追加のエラーを送らない）→ §2.2 E と一致。57014 = `query_canceled`
-- libpq-notify: 「`PQnotifies` は読まない。`PQconsumeInput` の後に」「`PQgetResult` / `PQexec` のたびに `PQnotifies` を見よ」「`PQfreemem` は `PGnotify` ポインタだけでよい（`relname` / `extra` は別アロケーションではない）」。
-  **`libpq-fe.h:241-248` は 4 フィールド（`next` 込み、LP64 で 32 byte）**。sql-notify: payload は既定 8000 byte 未満、未指定なら空文字、tx 内は COMMIT まで届かない、同一 (channel, payload) は tx 内で 1 つに畳まれる。
-  sql-listen: `LISTEN` も tx commit で効く
-- libpq-exec / `fe-connect.c:5287-5327`: `PQfinish` は内部の作りかけ結果と**未読の PGnotify** を解放し、未読の受信データは捨てる。利用者が受け取った `PGresult` は `PQclear` が要る（既存 `Result` の責務）
-- libpq-status: `PQsocket` は「正常運用中は変わらないが接続セットアップ / reset 中は変わり得る」、-1 = 接続なし
+- **バイナリ結果**: `Connection.cursor(binary=True)` または `execute(..., binary=True)`。結果の全列が同じ形式（列ごとには選べない）。バイナリ要求時は 1 クエリ 1 文のみ
+  （https://www.psycopg.org/psycopg3/docs/basic/params.html「Binary parameters and results」/ https://www.psycopg.org/psycopg3/docs/api/cursors.html）
+- **実装の見分け**: `psycopg.pq.__impl__` が `"c"` / `"binary"` / `"python"`。conda-forge 版は `"c"`（実測）。`psycopg.pq.version()` = ロードされた libpq（実測 180006 = default 環境と同じ）
+  （https://www.psycopg.org/psycopg3/docs/api/pq.html）
+- **公式の conda 立場**: 「Conda は未テスト・非サポート」（https://www.psycopg.org/psycopg3/docs/basic/install.html）。README には「conda-forge の psycopg-c 3.3.4 を使った」と版を書けば足りる
+- **盗める測り方**: `cursor.execute()` = ラウンドトリップ + サーバー整形 + クライアント側 `PGresult` への着地（Mojo の `exec` と同じ境界）、`fetchall()` = 行オブジェクト化（Mojo の `decode`）。
+  `autocommit=True` で暗黙 BEGIN のラウンドトリップを消す（Mojo の `PQexec` は autocommit）。`timestamp` は `datetime` で返るので `(ts - datetime(2000,1,1))` を µs にして合計（Mojo の `Timestamp.micros` と同じ量）
+- psycopg 3 の generator 状態機械（Phase 4 §1.1）は今回使わない
+
+### 1.2 conda-forge のパッケージ（`pixi search --channel conda-forge --platform linux-aarch64`、2026-10-17）
+
+| パッケージ | 版 | 依存 | 備考 |
+|---|---|---|---|
+| `psycopg` | 3.3.4 `pyh848bd53_0`（noarch） | `libpq`, `psycopg-c >=3.3.4,<3.3.5`, `python >=3.10`, `typing-extensions` | noarch の最新は 3.3.4（`psycopg-c` は 3.3.6 まであるが `psycopg` が追いついていない） |
+| `psycopg-c` | 3.3.4 `py313h330e198_0` ほか +5 build（実際に解決されたのは `py314h3076274_0`） | `libpq >=18.3,<19`, `python 3.13.*` 等（build ごとに python を固定） | 3.3.6 は `libpq >=18.6,<19`, py314。py315 build は無い |
+| `psycopg-binary` | **無い** | — | PyPI 専用（https://www.pypi.org/project/psycopg-binary） |
+
+- 3 プラットフォーム（`linux-aarch64` / `linux-64` / `osx-arm64`）とも `psycopg-c` の build がある（`pixi install -e bench` が 3 つぶんのロックを作って成功した）
+- `python >=3.10` の制約で solver は **python 3.14.8** を選ぶ（`psycopg-c` 3.3.4 に py315 build が無い）。default 環境の python 3.15（mojo → mblack / jupyter_client の依存）は別物のまま
+
+### 1.3 README のベンチ表記（他の PostgreSQL ドライバ）
+
+- asyncpg の README はベンチを「psycopg3 比 5x（幾何平均、2023-06、toolbench）」の 1 行 + 外部チャートで出し、環境はチャート側に置く（https://github.com/MagicStack/asyncpg）。
+  本プロジェクトは HANDOFF §8 が「勝敗は条件にしない。結果を記録する」なので、**数値の表 + 計測環境 + 日付 + 1 行要約**（REQ §4.1）が正しい形。グラフは作らない
+- 「同じ SQL・同じ形式・同じ測り方」を README に書く（psycopg 側の境界は §1.1）。psycopg が `"c"` 実装であることも 1 行で書く（`"python"` 実装だと桁が変わる）
+
+### 1.4 Apache-2.0
+
+- 全文: https://www.apache.org/licenses/LICENSE-2.0.txt（約 200 行、末尾に APPENDIX「How to apply the Apache License to your work」、ひな形 `Copyright [yyyy] [name of copyright owner]`）。
+  `LICENSE` には全文をそのまま置き（APPENDIX 含む。改変しない）、README 末尾に `Copyright 2026 0hya6in` + `Apache License 2.0` と書く（D11）。`curl -o LICENSE` は無人ターンでは
+  allowlist 外の可能性 → impl は `WebFetch` 相当で本文を取るか、plan が取得コマンドを明示する
 
 ## 2. 公式ドキュメント + 検証結果（official_docs）
 
-### 2.1 libpq 非同期 API（実測。probe-async A〜I・K〜N、probe-async2 A〜D・F〜H。PG17 / PG14 同一）
+### 2.1 pixi に psycopg を足す最小の形（実測。`scratch/turn-001-pixi/pixi.toml`）
 
-| 項目 | 事実（実測） | 根拠 |
-|---|---|---|
-| `PQconnectStartParams` | 非 NULL、`PQstatus` = 2（`CONNECTION_STARTED`）、`PQsocket` = 7（既に開いている）。名前解決失敗は **start の時点で** `PQstatus` = 1（BAD）、`PQsocket` = -1、`PQsetnonblocking` が **-1** | A / M-badhost |
-| `PQsetnonblocking(1)` | 0、`PQisnonblocking` = 1。multi-host フォールバック後も 1 のまま | A / G |
-| `PQconnectPoll` の列 | **2 (WRITING, status 3 MADE) → 1 (READING, status 7 SSL_STARTUP) → 2 (status 3) → 1 (status 4 AWAITING_RESPONSE) ×3 → 3 (OK, status 0)**。7 ステップ 5 ms。待たずに連続で呼んでも `2 1 1` と害なし。OK の後に呼ぶと 3 のまま | A / async2 A |
-| 接続失敗 | refused: step 1 で 0（FAILED）、`PQsocket` 7 → **-1**、msg `Connection refused ...` / bad password: step 7 で 0、`FATAL:  password authentication failed for user "pq"`（status 1）。どちらも `PQfinish` は要る | M |
-| 接続中の誤呼び出し | `PQsendQuery` → 0 + `no connection to the server`；`PQconsumeInput` → 1；`PQisBusy` → 0；`PQgetResult` → NULL；**`PQgetCancel` → 非 NULL**；`PQtransactionStatus` → 4（UNKNOWN）；`PQflush` → 0 | async2 A |
-| アイドル | `PQflush` 0 / `PQisBusy` 0 / `PQconsumeInput` 1 / `PQgetResult` NULL（ブロックしない） | A |
-| `PQsendQuery` 2 文（D13 の SET） | 1、`PQflush` 0、`PQisBusy` 1 → 結果 **2 件**（COMMAND_OK `SET` ×2）→ NULL | B |
-| `PQsendQuery("SELECT pg_sleep(2), 1")` | `PQisBusy` が真の間に `poll(100)` を 20 回 = 2006 ms、カウンタ 20。結果 TUPLES_OK rows 1 → NULL | C |
-| 結果待ち中の `PQsendQuery` | **0 + `another command is already in progress`**（`PQflush` 0） | G2 |
-| 最初の結果取得後・NULL 前の `PQsendQuery` | **0 + 同じメッセージ**（`PQisBusy` は 0 なのに）。NULL を見るまで libpq は busy 扱い → `state()` は NULL まで `Busy` | G4 |
-| エラー結果 | `SELECT 1/0` → FATAL_ERROR `22012` → NULL（1 件 + NULL） | F1 |
-| 多文の途中でエラー | `SELECT 1; SELECT 1/0; SELECT 2` → TUPLES_OK(1), FATAL_ERROR 22012, **NULL**（3 文目は実行されず結果も無い） | F2 |
-| 多文 3 件 | TUPLES_OK ×3 → NULL | F3 |
-| 空文字列 | `PGRES_EMPTY_QUERY`(0) 1 件（sqlstate / msg 空）→ NULL。既存 `_take_result` は `SERVER "empty query"` | F4 |
-| `PQsetSingleRowMode` | アイドル → **0**；`PQsendQuery` 直後 → 1；`PQconsumeInput` 後（データ到着済み）→ **1**；**最初の `PQgetResult`（完全な TUPLES_OK）の後 → 1 だが効果なし**；切断後 → 0 | H / async2 C・F |
-| single-row の結果列 | `generate_series(1,3)` → **SINGLE_TUPLE(9) ×3 → TUPLES_OK(2) rows 0 → NULL**（4 件）。途中エラー: SINGLE_TUPLE ×1 → FATAL_ERROR 22012 → NULL。**多文に適用すると全文に効く**（`SELECT 1; SELECT 2` → 9, 2(0 rows), 9, 2(0 rows), NULL）。prepared にも効く | H1〜H4 / async2 B |
-| `PQsendQueryParams` 後のバッファ | 送信直後に値を上書き（`hello-param` → `XXXX...`、int4 bytes → `FFFF`）しても結果は **`hello-param`**。libpq は呼び出し中にコピー済み → 戻った時点で解放可 | I |
-| `PQsendPrepare` | 1 → 結果 **COMMAND_OK、cmd tag 空文字**（1 件）→ NULL | async2 B |
-| `PQsendQueryPrepared` | resultFormat 1 → `PQfformat` 1。未知の名前 → FATAL_ERROR **`26000`** `prepared statement "nope" does not exist` → NULL | async2 B |
-| `PQflush` = 1 の再現 | 16 MB の `SELECT length('...')`: **PG17 で 1 回だけ 1**（11 ms 後に 0）、PG14 では最初から 0。非決定的 | K |
-| 切断（`pg_terminate_backend`） | 結果待ち中: FATAL_ERROR **`57P01`** 1 件 → 次の `PQconsumeInput` が **0**（`PQerrorMessage` = `FATAL: terminating connection ... server closed the connection unexpectedly ...`）、`PQstatus` 1、`PQsocket` **-1**。その後 `PQgetResult` は **1 件目 = FATAL_ERROR で sqlstate 空・`PG_DIAG_MESSAGE_PRIMARY` 空・`PQresultErrorMessage` = `server closed ... invalid socket`、2 件目 = NULL**。`PQflush` -1、`PQsendQuery` 0 + `no connection to the server`、`PQgetCancel` **NULL**、`PQnotifies` NULL、`PQsetSingleRowMode` 0、`PQconnectPoll` 0、`PQtransactionStatus` 4 | L / async2 F |
-| multi-host `host=127.0.0.1,127.0.0.1 port=1,54317` | 8 ステップ 20 ms で OK。**fd 番号は 7 のまま**（閉じて開き直し同じ番号）。REQ の「毎回 `PQsocket` を読み直す」は維持（番号が変わらないのは偶然） | async2 G |
-| 未読結果ありの `PQfinish` | クラッシュ無し（リークは `test_leak` で） | async2 H |
+```toml
+[feature.bench.dependencies]
+python = ">=3.10"
+psycopg = ">=3.2"
 
-### 2.2 cancel / NOTIFY（probe-async D・E・J、probe-async2 D・E）
+[feature.bench.tasks]
+bench-psycopg = "python examples/bench_psycopg.py"
 
-| 項目 | 事実（実測） | 根拠 |
-|---|---|---|
-| cancel 結果待ち中 | `PQgetCancel` 非 NULL、`PQcancel` = 1、errbuf 空、呼び出し 1〜4 ms。結果: **FATAL_ERROR `57014` `canceling statement due to user request`** → NULL。cancel 呼び出しから結果まで **1〜4 ms**（REQ の 1 s 以内を満たす）。`PQtransactionStatus` → 0（IDLE） | D |
-| cancel アイドル | `PQcancel` = 1（2 ms）、その後 `PQconsumeInput` 1 / `PQisBusy` 0 / `PQgetResult` NULL、次の `SELECT 42` は正常。**無害**（D11 どおり） | E |
-| cancel tx 内 | `BEGIN` → `pg_sleep(10)` を cancel → 57014 → `PQtransactionStatus` **3（INERROR）** → 次文は `25P02` → `ROLLBACK` で復帰 | async2 D |
-| cancel 切断後 | `PQgetCancel` = NULL（REQ: `CONNECTION`） | L |
-| `PGnotify` レイアウト | `relname` char* @0、`be_pid` int @8、`extra` char* @16、`next` @24（**常に 0**）。`_ffi/types.mojo` の `PGnotify` 定義（Int, c_int, Int, Int）と一致。`PQfreemem` で解放 | J |
-| NOTIFY 受信の形 | `PQnotifies` は `PQconsumeInput` の前は NULL（読まない）。`consumeInput` 後に 2 件（payload `payload-1` / 空文字）。`be_pid` は通知側の `pg_backend_pid()` と一致（1208195） | J |
-| **到着は 1 件ずつ別メッセージ** | 同期側で `NOTIFY` を 2 回実行し終えた後でも、1 回の `wait_readable + PQconsumeInput` で **PG14 は 1 件、PG17 は 2 件**取れた（async2 E では両方 1 ラウンド）。2 件目は次の読み取りで来る → **テストは「揃うまで再試行」** | J / E |
-| クエリ実行中の NOTIFY | `pg_sleep(0.5)` 中に送られた NOTIFY は結果ドレイン後の `PQnotifies` で取れる（結果処理が通知も拾う） | J2 |
-| payload 7999 byte | 受信 7999 byte（上限 8000 未満）。UTF-8 `héllo` は 6 byte そのまま | J3 |
-| tx 内 NOTIFY | 通知側 `BEGIN; NOTIFY` では届かず、`COMMIT` 後に届く | async2 E2 |
-| 自分への NOTIFY | 同じ接続で `NOTIFY ch` → 結果ドレイン直後に `PQnotifies` 非 NULL | async2 E3 |
+[environments]
+bench = { features = ["bench"], solve-group = "default" }
+```
 
-### 2.3 `_platform/poll`（probe-poll + ヘッダ照合）
+- `pixi install -e bench` → 「The bench environment has been installed.」（ロック解決 + ダウンロード 1 分未満。python 3.14.8 と psycopg-c ≈ 35 MB）
+- `pixi run bench-psycopg` → `Pixi task (bench-psycopg in bench): python examples/bench_psycopg.py`（**`-e bench` 不要**）。`pixi run check` は default 環境のまま
+- 却下した形: (a) `[dependencies]` に常時追加 → default 環境の python が 3.14 に下がり `check` の環境が変わる（mblack 等は動くはずだが検証コストがある）。(b) feature を作って
+  `[environments]` を書かない → タスクが環境に紐づかず `pixi run bench-psycopg` が解決できない
+- `pixi.lock` は bench 環境ぶん増える（3 プラットフォーム）。**コミット対象**（既存 lock も追跡済み）。plan のチェックリスト: `grep -c "psycopg-c" pixi.lock` が 0 → ≥ 3
+- README の手順: `pixi run db-up` → `pixi run bench`（Mojo）→ `pixi run bench-psycopg`（psycopg。初回は環境作成で待つ）
 
-- **Linux の値（`/usr/include/asm-generic/poll.h`。x86_64 / aarch64 共通）**: `POLLIN 0x0001` / `POLLPRI 0x0002` / `POLLOUT 0x0004` / `POLLERR 0x0008` /
-  `POLLHUP 0x0010` / `POLLNVAL 0x0020`。`struct pollfd { int fd; short events; short revents; }`（8 byte）。`nfds_t` = `unsigned long`（8 byte、glibc）。
-  `EINTR` = 4、`EAGAIN` = 11、`EBADF` = 9（`asm-generic/errno-base.h`）
-- **macOS（xnu `bsd/sys/poll.h`、https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/poll.h）**: `:67-73, 88-90` `POLLIN 0x0001` / `POLLPRI 0x0002` / `POLLOUT 0x0004` /
-  `POLLERR 0x0008` / `POLLHUP 0x0010` / `POLLNVAL 0x0020`（**使う 6 値は Linux と同一**。違うのは `POLLWRNORM`(= POLLOUT) / `POLLWRBAND 0x0100` で、使わない）。`:95-99` `struct pollfd` 同形、
-  **`:101 typedef unsigned int nfds_t`（4 byte。glibc は 8 byte）** → 引数は `Int(1)` のレジスタ渡しでどちらも可。Apple の `poll(2)` は `/dev/*` を扱えない（BUGS）がソケット / pipe は可。
-  errno は `__error()`（xnu `bsd/sys/errno.h:81-82`）。`CLOCK_MONOTONIC` = 6（Linux は 1。Mojo `std/time/time.mojo:40` が切替済み）
-- **Windows `WSAPoll`（https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll、`ns-winsock2-wsapollfd`、mingw-w64 `winsock2.h:1179-1196`）**:
-  `WSAPOLLFD { SOCKET fd; SHORT events; SHORT revents; }` = **16 byte（fd @0 8 byte、events @8、revents @10）**。`POLLRDNORM 0x0100` / `POLLRDBAND 0x0200` / **`POLLIN 0x0300`** / `POLLPRI 0x0400` /
-  `POLLWRNORM 0x0010` / **`POLLOUT 0x0010`** / `POLLWRBAND 0x0020` / **`POLLERR 0x0001` / `POLLHUP 0x0002` / `POLLNVAL 0x0004`**。`int WSAPoll(LPWSAPOLLFD, ULONG fds, INT timeout)`、`Ws2_32.dll`。
-  落とし穴: `events` に `POLLERR` / `POLLHUP` / `POLLNVAL` / `POLLPRI` を入れると `SOCKET_ERROR` + `WSAEINVAL`（エラーは常に返るので要求しない）、戻り -1 の errno は `WSAGetLastError()`、
-  **Windows 10 2004 より前は connect 失敗を報告しない**（2004 以降は `POLLHUP|POLLERR|POLLWRNORM`）、`WSAStartup` が要る（libpq が内部で呼ぶ: `PQconnectStart` 時点で済む見込み。未検証）
-  → 定数は OS 分岐の中で定義し、戻り値は OS 非依存の `PollEvents`（readable / writable / error / hangup / invalid / timeout）に写す。Linux x86_64 は `arch/x86/include/uapi/asm/` に `poll.h` が無く
-  asm-generic を使う（aarch64 と同じ値）。glibc `io/sys/poll.h:33` `nfds_t = unsigned long`
-- **Mojo からの呼び方（実測、probe-poll）**:
-  ```
-  @fieldwise_init
-  struct PollFd(TrivialRegisterPassable):
-      var fd: Int32
-      var events: Int16
-      var revents: Int16
-  var pfd = PollFd(Int32(fd), events, Int16(0))
-  var ret = external_call["poll", c_int](Pointer(to=pfd), Int(1), c_int(timeout_ms))   # nfds は Int(1) でよい（64 bit レジスタ渡し）
-  var e = Pointer[c_int, MutUntrackedOrigin](unsafe_from_address=external_call["__errno_location", Int]())[]  # ret < 0 のとき
-  ```
-  `size_of[PollFd]()` = 8（C と一致）
-- **実測表（pipe / socketpair）**:
+### 2.2 ベンチの測り方と実測（`scratch/turn-001-bench.log`）
 
-| 状況 | ret | revents | 経過 |
+- **psycopg スクリプト**（`scratch/turn-001-pixi/examples/bench_psycopg.py`。そのまま `examples/bench_psycopg.py` に置ける）: `SQL` / `ROWS` / `RUNS` を `bench_formats.mojo` と同じ値で持ち、
+  `psycopg.connect(conninfo, autocommit=True)` → warm-up text / binary 1 回ずつ → text / binary 交互 3 回。`exec` = `cur.execute(SQL)` の前後、`decode` = `fetchall()` + 5 列全部を読むループ
+  （int 合計 / int 合計 / float 合計 / `len(str)` / `(ts - 2000-01-01)` の µs 合計）。`rows != ROWS` や合計 0 で終了コード 1。`psycopg.Error` は `failed: <型名> <message>` + 終了コード 1
+  （誤パスワードで実測、トレースバックなし）
+- 行の読み方の差: Mojo は `row.get[String](3).byte_length()`（O(1)）、psycopg は `len(s)`（文字数。ASCII なので同数）。README に「全セルを読む」とだけ書き、この差は書かなくてよい
+- **実測（pg17 54317、アイドル時、同一マシン）**:
+
+| 実装 | 形式 | exec (ms) | decode (ms) | total (ms) |
+|---|---|---|---|---|
+| Mojo `pq`（`pixi run bench`） | text | 45 / 43 / 43 | 44 / 44 / 44 | 89 / 88 / 88 |
+| Mojo `pq` | binary | 46 / 37 / 39 | 12 / 12 / 12 | 59 / 49 / 52 |
+| psycopg 3.3.4 (c, py3.14.8) | text | 42 / 42 / 42 | 46 / 44 / 45 | 89 / 86 / 87 |
+| psycopg 3.3.4 (c) | binary | 36 / 36 / 36 | 36 / 35 / 36 | 72 / 72 / 73 |
+
+- 1 行要約の候補: 「バイナリ形式はテキスト形式より decode で 3.7 倍速い（12 ms vs 44 ms、10 万行 × 5 列）。合計でも 49〜59 ms vs 88〜89 ms。psycopg 3（C 実装）は text 86〜89 ms / binary 72〜73 ms」
+- 揺れ: 3 回の幅は exec で ±5 ms、decode で ±1 ms。README の表は impl の実測ログ（`scratch/turn-NNN-bench.log`）から転記し、3 回の値をそのまま並べるか中央値を書く（plan が決める。上の表は 3 回並記）
+- 受け入れ（REQ §4.1）「`pixi run bench` の decode 列で binary < text」は現状 12 < 44 で成立。verify は再実行して同じ関係を確認する
+
+### 2.3 `WSAPoll` 照合表（poll.mojo の `else` 分岐。TRACE にこのまま写せる）
+
+一次資料: [F] https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll（WSAPoll function）、
+[S] https://learn.microsoft.com/en-us/windows/win32/api/winsock2/ns-winsock2-wsapollfd（WSAPOLLFD structure）、
+[E] https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2（Windows Sockets Error Codes）、
+[H] https://raw.githubusercontent.com/mirror/mingw-w64/master/mingw-w64-headers/include/winsock2.h（フラグの数値。MS Learn には数値が無い）
+
+| # | 項目 | poll.mojo の現状 | 根拠 | 判定 |
+|---|---|---|---|---|
+| 1 | `WSAPOLLFD` = `{ SOCKET fd; SHORT events; SHORT revents; }`、`SOCKET` = `UINT_PTR`（x64 で 8 byte）→ 16 byte | `_WsaPollFd(fd: Int, events: Int16, revents: Int16)`、`size_of` = 16（実測） | [S] 構造体定義、[H] typedef、`probe-lang.log` | **一致** |
+| 2 | `POLLRDNORM 0x0100`、`POLLRDBAND 0x0200`、`POLLIN = RDNORM\|RDBAND = 0x0300`、`POLLWRNORM 0x0010 = POLLOUT`、`POLLERR 0x0001`、`POLLHUP 0x0002`、`POLLNVAL 0x0004` | `_WSA_POLLIN 0x0300`、`_WSA_POLLOUT 0x0010`、`_WSA_POLLERR 0x0001`、`_WSA_POLLHUP 0x0002`、`_WSA_POLLNVAL 0x0004` | [H] `#define` 行、[S]「POLLIN は RDNORM と RDBAND の組」 | **一致** |
+| 3 | `events` に置けるのは `POLLPRI` / `POLLRDBAND` / `POLLRDNORM` / `POLLWRNORM` のみ。他の値は `SOCKET_ERROR` + `WSAEINVAL`。`POLLPRI` は MS プロバイダで失敗 | ERR / HUP / NVAL を `events` に入れない（docstring 明記）、`POLLPRI` を使わない | [F] Remarks、[S] events | **一致**（`POLLRDBAND` を要求するのは許容範囲。`0x0100` だけにする案は任意） |
+| 4 | `timeout`（INT）: > 0 は ms、0 は即時、< 0 は無期限 | `c_int(timeout_ms)`、-1 で無期限 | [F] Parameters / Remarks | **一致** |
+| 5 | 戻り値: 0 = タイムアウト、> 0 = `revents` 非 0 の要素数、`SOCKET_ERROR`(-1) = 失敗 | `ret == 0` → timeout、`ret < 0` → エラー、それ以外は flags | [F] Return value | **一致** |
+| 6 | **失敗理由は `WSAGetLastError()`**（`ws2_32.dll`）。Winsock は errno を設定しない。`WSAEINVAL` 10022 / `WSAENOTSOCK` 10038 / `WSAEBADF` 10009 / `WSAEFAULT` 10014 / `WSAENETDOWN` 10050 / `WSAENOBUFS` 10055 / `WSANOTINITIALISED` 10093 / `WSAEINTR` 10004（`WSACancelBlockingCall` 時のみ） | `poll_socket` が `get_errno()` → `ErrNo.EINTR` / `EBADF` / `EINVAL` を見る（POSIX の値 4 / 9 / 22） | [E] 冒頭「WSAGetLastError を直後に呼ぶ」+ 一覧、[F] Return value「Call the WSAGetLastError function」 | **不一致 → 直す**。`_poll_once` の `else` 分岐で `external_call["WSAGetLastError", c_int]()` を読み、10022 / 10038 / 10009 → `USAGE`、それ以外 → `CONNECTION`、`EINTR` 再試行はしない（§3-2 の形） |
+| 7 | `revents` の `POLLNVAL` = 無効なソケット。`fd` が負の要素は無視され `revents` は [F] では `POLLNVAL`、[S] では「クリア」（**公式同士で食い違い**） | `POLLNVAL` → `USAGE`（`poll: fd N is not open`） | [F] Remarks 末尾、[S] Remarks | **一致**（`PQsocket` = -1 のときは [F] なら `USAGE`、[S] なら要素 0 個扱いで `WSAEINVAL`「none of the sockets valid」→ #6 修正後は同じ `USAGE`） |
+| 8 | **Windows 10 2004 以降**、TCP 接続失敗は `POLLHUP \| POLLERR \| POLLWRNORM` で通知。それ以前は通知されない（既知の仕様差） | 非同期接続は `wait_writable` で待つ → 古い Windows では接続失敗が予算切れ（`TIMEOUT`）まで分からない | [F] Remarks の Note | **README に明記**（コード変更なし。「Windows 10 2004 より前は接続失敗の検出がタイムアウト頼み」） |
+| 9 | `WSAPoll` は Vista 以降、`Ws2_32.dll`、`WSAAPI` = `WINAPI`（x64 では既定の呼出規約と同一） | `external_call["WSAPoll", c_int](Pointer, Int(1), c_int)` | [F] Requirements、[H] `#define WSAAPI WINAPI` | **一致**（x64 前提。シンボル解決は未検証のまま） |
+| 10 | `nfds` は `ULONG`（32 bit） | `Int(1)`（64 bit） | [F] Syntax | **許容**（x64 ABI は下位 32 bit を使う。POSIX 側の `nfds_t` も 64 bit で同じ書き方） |
+| 11 | `WSAStartup` 未実行だと `WSANOTINITIALISED` 10093 | `poll_socket` は libpq の `PQsocket` にしか使わない。libpq は接続開始時に `WSAStartup` を呼ぶ（fe-connect.c、`#ifdef WIN32`。未取得） | [E] 10093 | **一致の見込み**（docstring に「libpq の socket 以外に使う場合は WSAStartup が要る」を 1 行） |
+| 12 | `SOCKET` は符号なし、`PQsocket` は `int` | `fd: Int` | libpq の `PQsocket` は `int` を返す（全 OS） | **一致** |
+
+- **直すのは #6 の 1 件**。#8 と #11 は README / docstring の明記。`comptime if` の非選択側なので Linux / macOS の `check` には影響しない（REQ §5「Linux / macOS の挙動は変わらない」は `check` PASS で担保）
+- 検証方法（Windows 無し）: (a) `comptime if` の `else` は Linux でコンパイルされないので、**`else` 分岐の構文・型は Linux の `mojo build` では検証できない**。impl は `else` 側の
+  コードを一時的に `if True:` 側へ複製した scratch ファイルで `mojo build` だけ通す（`WSAPoll` / `WSAGetLastError` のシンボルは Linux に無いのでリンクせず、`mojo build -o` ではなく
+  `mojo build` の型検査段階まで。`external_call` は実行時解決なのでビルドは通る見込み。通らなければ TRACE に書く）。(b) 照合表の 12 行を TRACE に写し、verify が URL と行番号を突き合わせる
+
+### 2.4 `_ffi/loader.mojo` の Windows 行（実測 `probe-lang`）
+
+- 現状: `comptime _DEFAULT_CANDIDATES = platform_map["libpq_candidates", linux=..., macos=...]()`。`windows=` は `unexpected keyword parameter`（Phase 4 §0.5）
+- 置き換え（プローブでコンパイル・実行済み。Linux で `libpq.so.5,libpq.so` を返した）:
+
+```mojo
+def _default_candidates() -> StaticString:
+    comptime if CompilationTarget.is_linux():
+        return "libpq.so.5,libpq.so"
+    elif CompilationTarget.is_macos():
+        return "libpq.5.dylib,libpq.dylib,/opt/homebrew/opt/libpq/lib/libpq.5.dylib,/usr/local/opt/libpq/lib/libpq.5.dylib"
+    else:
+        return "libpq.dll"
+```
+
+- `_candidates()` は `String(_default_candidates())` を `split(",")` する（既存のまま）。`from std.sys.info import CompilationTarget` を足し、`platform_map` の import を消す
+- `libpq.dll` の探索は `LoadLibrary` の既定順（実行ファイルのディレクトリ → System32 → PATH）。`PQ_MOJO_LIBPQ` はフルパスでそのまま。`OwnedDLHandle` の Windows 実装は未検証（README の「未検証」に含める）
+- 検証: `pixi run hello-libpq` と `tests/test_loader_fail.mojo`（候補が全部失敗する経路）が変わらないこと。チェックリスト: `grep -c "libpq.dll" src/pq/_ffi/loader.mojo` 0 → 1、`grep -c platform_map src/pq/_ffi/loader.mojo` 2 → 0
+
+### 2.5 `test_zero_copy` の所要（実測 `scratch/turn-001-zerocopy-time.log`）
+
+| 計測 | 結果 |
+|---|---|
+| `mojo run tests/test_zero_copy.mojo`（`PQ_TEST_CONNINFO` 未設定） | TestSuite `Summary [ 56.293 ]`（12 件、1 件 4.0〜7.6）、壁時計 **1,835 ms** |
+| 同、`PQ_TEST_CONNINFO` 設定（`run_tests.sh` と同条件） | `Summary [ 48.866 ]`、壁時計 1,625 ms |
+| `mojo run tests/test_result.mojo`（同じ `_connect`、対照） | `Summary [ 65.512 ]`（15 件、1 件 3.7〜7.4）、壁時計 1,871 ms |
+| `mojo build` → バイナリ実行 | build 3,140 ms、**実行 52 ms**（`Summary [ 48.829 ]`） |
+| 同、`test_result` | build 4,145 ms、実行 76 ms（`Summary [ 71.727 ]`） |
+
+- **TestSuite の `[ n ]` はミリ秒**。較正: `build/final_check.log:48` の `PASS [ 2033.338 ] test_poll_result_counts_while_sleeping`（`pg_sleep(2)` を含む）、`:416` の leak テスト `[ 37376.787 ]`（= 37 s、`run_tests.sh` の「took 74s」の半分弱）
+- 1 テスト 3.4〜3.9 **ms** は接続 1 本（`Connection.open` = `PQconnectdb` + `SET DateStyle ...`）の固定費で、`test_result` と同じ。`check` 内「took 2s」はコンパイル込み
+- Phase 4 reflect の「`test_zero_copy` 46 s が `check` を支配」も同じ読み違い（46 ms）。`check` を支配しているのは leak 74 s + コンパイル（47 ファイル × 1.5〜4 s）
+- **REQ §4.5 の前提（「接続あたりの固定費」「テスト側なら直す」）は空振り**。impl の作業は TRACE に上の表を写すこと（§5 で REQ を訂正済み）
+
+### 2.6 `DROP DATABASE`（docs + 実測 `scratch/turn-001-dropdb-race.log`）
+
+- 構文: `DROP DATABASE [ IF EXISTS ] name [ [ WITH ] ( FORCE ) ]`（PG14 docs https://www.postgresql.org/docs/14/sql-dropdatabase.html。FORCE は PG13 で導入、
+  https://www.postgresql.org/docs/13/sql-dropdatabase.html）。PG17 も同じ（https://www.postgresql.org/docs/current/sql-dropdatabase.html）
+- 制約（docs 原文の要旨）: 「対象 DB に接続した状態では実行できない（`postgres` など他の DB に接続して発行する）」「トランザクションブロック内では実行できない」
+  「FORCE は既存接続の終了を試みる。prepared transaction / 論理レプリケーションスロット / サブスクリプションがあると終了しない。接続が残る場合は失敗する」
+- 実測（PG17 17.11 / PG14 14.24、`CREATE` → 接続 → `SELECT 1` → `close()` → 直後に `DROP`、各 10 回）: **FORCE 無し 10/10 成功、FORCE 有り 10/10 成功、所要 4〜10 ms**。
+  `PQfinish` 後の backend 終了は DROP より速い（psycopg でも libpq の `PQfinish` なので Mojo と同じ経路）
+- `IF EXISTS` で不在のとき: サーバーは NOTICE `database "..." does not exist, skipping` を返す。pq は notice processor を設定していないので libpq の既定が **stderr に `NOTICE:` 行**を出す。
+  `check` 6/6 のパターン（`warning:|WARNING:|implicit ROLLBACK failed`）には当たらない。ログを汚したくなければ `SELECT 1 FROM pg_database WHERE datname = 'pq_test_ascii'` で先に見る（任意）
+- 推奨形（REQ §4.7）: 2 テストとも `_ascii_conninfo()` の先頭で `DROP DATABASE IF EXISTS pq_test_ascii WITH (FORCE)` → `CREATE DATABASE ...`、末尾で `_ = listener^` / `_ = sender^` の後に
+  `DROP DATABASE pq_test_ascii WITH (FORCE)`。末尾の DROP は `try / except` で握り、元の結果（assert の失敗）を隠さない（`raises` の後に DROP を置くと assert 失敗で DROP が飛ばされる →
+  先頭の `IF EXISTS` がそれを回収する設計）。発行は `pq_test` に繋いだ `Connection`（`_open(_conninfo())`）から。**`conn.transaction()` の中では発行しない**
+- 検証: `psql -l` 相当 = `SELECT datname FROM pg_database WHERE datname LIKE 'pq_test_%'` を `pixi run test` 後に両サーバーで実行して 0 行（verify の申し送りどおり）。
+  陽性対照: 末尾の DROP をコメントアウトした scratch 版で 1 行残ることを 1 回見る
+- `db-reset`: `db-reset = { depends-on = ["db-down", "db-up"] }`（pixi は `depends-on` を列挙順に実行）。`db-down` の `-v` でボリュームが消え、fixtures（`schema.sql`）が再適用される
+
+### 2.7 `fetch_all` の busy-spin と `_after_send` の `PQflush` -1（libpq ソース + 実測 `scratch/turn-001-probe-closefd.log`）
+
+libpq（REL_18_STABLE）の事実:
+
+- `PQflush`（fe-exec.c）: `if (!conn || conn->status == CONNECTION_BAD) return -1; return pqFlush(conn);`。`pqFlush` は `outCount > 0` なら `pqSendSome`、でなければ 0
+- `pqSendSome`（fe-misc.c）: `sock == PGINVALID_SOCKET` → `write_failed = true` + 「connection not open」+ `outCount = 0` + **return 0**。送信エラーは `pqsecure_raw_write`（fe-secure.c）が
+  `EPIPE` / `ECONNRESET` / **default（EBADF 含む）** のすべてで `write_failed = true` + `write_err_msg` 保存 + **`n = len`（成功したことにする）**（理由コメント: 「サーバーからエラー文を読める可能性がある間は
+  書き込み失敗を報告しない」）。-1 を返すのは `pqReadData` が失敗したときと、ブロッキングモードの `pqWait` 失敗だけ
+- `pqReadData`（fe-misc.c）: `recv` の errno が接続断系（`ECONNRESET` 等）なら `pqDropConnection` + **`status = CONNECTION_BAD`** + -1。**それ以外（EBADF 等）は -1 を返すが status は変えない**。
+  EOF は「server closed the connection unexpectedly」+ BAD
+- `PQconsumeInput`: 非ブロッキングなら `pqFlush` が < 0 で 0、`pqReadData` が < 0 で 0、他は 1
+- `PQsendQueryStart`: `status != CONNECTION_OK` → 「no connection to the server」で 0。成功後は `pqAppendCmdQueueEntry` で `PGASYNC_BUSY`
+
+実測（probe-closefd、pg17）:
+
+| ケース | 観測 |
+|---|---|
+| A: BUSY 中に `close(PQsocket)` → `fetch_all(1500)` | `PQstatus` は OK のまま。**1500 ms 後に `TIMEOUT`（`fetch_all timed out after 1500 ms`）**。state は BUSY のまま、`PQflush` = 0 |
+| B: IDLE で `close(PQsocket)` → `send("SELECT 1")` | **成功**（state BUSY、`PQflush` = 0、status OK）。16 MB の 2 回目は `USAGE`（BUSY 中） |
+| C: `close(PQsocket)` → `wait_readable(100)` | `USAGE` `poll: fd 7 is not open (POLLNVAL)`（`poll_socket` の既存経路） |
+
+- **A が REQ §4.5 の busy-spin そのもの**: `poll_result` → `PQconsumeInput` = 0 → `_connection_error()`（`CONNECTION`）→ `PQstatus != BAD` → `continue` → 待たずに再試行 → 予算切れまで CPU を回す。
+  `timeout_ms = -1` なら無限。修正（`kind == CONNECTION` なら status を見ずに break）後は **1 回目の `CONNECTION` を即 raise**（経過 < 50 ms、message は libpq の
+  `could not receive data from server: Bad file descriptor`）。state は BUSY のまま（既存の「切断時に BUSY のまま返る」残留リスクと同じ。次の `poll_result` で IDLE）
+- **テストの形**（test_async に 1 件）: `connect_blocking` → `send("SELECT pg_sleep(0.3)")` → `external_call["close", c_int](c_int(conn.socket()))` → `monotonic()` を挟んで `fetch_all(2000)` →
+  `kind == CONNECTION` かつ経過 < 500 ms。注意: close 後〜`__del__`（`PQfinish`）の間に fd を開かない（同じ番号を再利用して無関係な fd を閉じるのを避ける）。`PQfinish` が閉じた fd を再度 close するのは
+  EBADF で無害。`external_call["close"]` は `test_poll.mojo:55` と同じ 1 シグネチャ（stdlib と衝突しない。Phase 4 §0.5）。**この 1 件は PG14 / PG17 で同じ**（libpq 側の挙動）
+- **`_after_send` の `PQflush` -1 は到達不能**: `PQsendQuery` が成功 = status OK かつ送信エラーは「成功扱い」→ 直後の `PQflush` は 0 か 1。-1 は status BAD のときだけで、同一スレッドで
+  `PQsendQuery` と `PQflush` の間に status が変わる経路は無い（実測 B でも 0）。REQ §4.5 の「到達困難なら陽性対照はコードレビュー」を採る。分岐は入れる（-1 → `BUSY`、docstring に
+  「libpq は `PGASYNC_BUSY` なので次の `send` は libpq の `another command is already in progress` になる。`BUSY` にしておけば pq の `USAGE` が先に出る」）
+- Phase 4 RESEARCH §0-7「切断後の `PQflush` = -1」は `status == CONNECTION_BAD` の分岐（上の `PQflush` 先頭）で説明がつく。矛盾なし
+
+### 2.8 `notifications()` / `wait_notification()` on BAD（実測 `scratch/turn-001-probe-notify-bad.log`）
+
+- `pg_terminate_backend` 後、2 回目の `notifications()` で `CONNECTION`（1 回目は EOF 未到達で成功 = `test_notifications_reports_a_lost_connection` のとおり）。`PQstatus` = BAD、`PQsocket` = -1
+- **BAD 後の呼び出しは毎回 `CONNECTION` を投げる（空リストは返さない）**。ただし message が `server closed the connection unexpectedly ...` + `connection not open` × (呼び出し回数 − 1) と**伸びる**
+  （`PQconsumeInput` → `pqReadData` が「connection not open」を `errorMessage` に追記するため）。`wait_notification` も同じ（3 行）
+- REQ §4.6 の先行チェックの効果 = **文言の固定**: `if PQstatus == CONNECTION_BAD: raise PgError(CONNECTION, "notifications() on a lost connection")`（文言は plan）。テスト: BAD にした後
+  `notifications()` を 3 回呼び、3 回とも `kind == CONNECTION` かつ **message が同一**（または pq の固定文言で始まる）。陽性対照: 先行チェックを外すと 3 回目の message が 2 回目より長い（上のログ）
+- `wait_notification` / 新 `wait_notifications` は `notifications()` を呼ぶので同じ経路で `CONNECTION` になる（先行チェックは 1 箇所で足りる）
+
+### 2.9 examples の堅牢性（実測 `scratch/turn-001-examples-robust.log`）
+
+| example | 誤パスワード | 閉じたポート（54390） | libpq 不在 / 不正 conninfo |
 |---|---|---|---|
-| 空の pipe 読み側、`POLLIN`、timeout 50 | 0 | 0 | 50 ms |
-| pipe 書き側、`POLLOUT`、timeout 0 | 1 | 4 | 0 |
-| 1 byte 書いた後の読み側、`POLLIN`、timeout 0 / -1 | 1 | 1 | 0（-1 でも即返る） |
-| 書き側 close 後の読み側（未読 1 byte あり） | 1 | **17 = POLLIN\|POLLHUP** | 0 |
-| close 済み fd | **1** | **32 = POLLNVAL** | 0（**ret は -1 ではない**。errno 0） |
-| fd = -1 | 0 | 0 | 20 ms（無視され timeout） |
-| nfds = 0、timeout 10 | 0 | — | 10 ms（純粋な sleep） |
-| socketpair 片側、`POLLIN` / `POLLOUT` | 0 / 1 | 0 / 4 | 0 |
-| 相手 close 後、`POLLIN` / `POLLOUT` | 1 / 1 | **17** / **20 = POLLOUT\|POLLHUP** | 0 |
+| basic / params / binary / bench_formats | `failed: PgError(kind=Connection, message=connection to server at "127.0.0.1", port 54317 failed: FATAL: password authentication failed ...)` rc=1 | `... Connection refused / Is the server running ...` rc=1 | `failed: PgError(kind=LibpqLoad, ...)` rc=1 / `invalid integer value "abc" for connection option "port"` rc=1 |
+| async_query / listen_notify | `failed: PgError(kind=Connection, message=FATAL: password authentication failed ...)` rc=1（**`connection to server at` の前置きが無い**: 非同期接続の libpq 文言） | `... Connection refused ...` rc=1 | — |
+| **hello_libpq** | — | — | **`stack trace was not collected. Enable ... MODULAR_DEBUG=stack-trace-on-error` + `Unhandled exception caught during execution: PgError(kind=LibpqLoad, ...)` + mojo の `error: execution exited with a non-zero result: 1`**（rc=1 だが 3 行の未捕捉出力） |
 
-- **単調時計**: `clock_gettime(CLOCK_MONOTONIC=1)` の ns と `std.time.perf_counter_ns()` の差は 0 ms（同じ時計）。**`std.time.monotonic() -> Int`（ns）も存在し `perf_counter_ns()` と同値**
-  （実測 `263037006663462` が両方）→ 名前が意図を表す `monotonic()` を使う。`EINTR` 再試行の残り時間はこれで測る
-- **errno は `from std.ffi import get_errno, ErrNo`（stdlib 公開。`std/sys/_libc_errno.mojo` が `__errno_location` / `__error` を OS で切替）**: `get_errno()` は `ErrNo`（`Writable`: `Bad file descriptor`、
-  `.value` = 9、`== ErrNo.EBADF` / `ErrNo.EINTR`（`.value` 4）で比較。`Int(e)` は不可）。`__errno_location` の直書きは不要（probe-poll で動いたが stdlib 版に替える）
-- **`socketpair(AF_UNIX=1, SOCK_STREAM=1, 0, fds)` / `pipe(fds)` はどちらも `external_call` で呼べる**（`fds` は `List[Int32]` 2 要素の `unsafe_ptr()`）。
-  書き込みは `std.io.FileDescriptor(fd).write("A")`（§0.5 ☆ の `write` 衝突を避ける）。`close` は `external_call["close", c_int](c_int(fd))`
-- `EINTR` の実測は無理に行わない（シグナルハンドラの登録が要る）。回避策はコードレビュー項目（§4 P4）
+- 直すのは `hello_libpq.mojo` の `main`（`raise Error(String(e))` → `print("failed:", e); exit(1)`、`def main():` に）。他 6 本は REQ §5 を満たす
+- 検証: 上のスクリプトを impl が再実行して `unhandled_markers=0` が 15/15（現状 14/15）。verify はこのスクリプトを「格子」として流用できる（`scratch/turn-001-examples-robust.sh`。
+  所要 ≈ 15 本 × 4 s = 60 s）
+- README のクイックスタートは `failed: PgError(kind=Connection, ...)` の形だけを約束し、libpq 文言（前置きの有無）は約束しない
+- docstring の総点検（REQ §4.3）: 7 本とも先頭 docstring に「何を見せるか」「`PQ_TEST_CONNINFO` / 既定の接続先」「`PgError` は印字して非 0」が**既にある**（`hello_libpq` は「実行方法」が無い）。
+  `pixi run hello-libpq` / `example-*` / `bench` の名前を各 docstring に 1 行足せば REQ §4.3 の「実行方法」が揃う
 
-### 2.4 Mojo 1.1.0 言語（probe-lang + name-*）
+### 2.10 `PgErrorKind.ENCODING` の影響範囲（grep。plan のチェックリスト用の基線）
 
-- `CompilationTarget.is_linux()` → True、`is_macos()` → False（aarch64 Linux）。`comptime if CompilationTarget.is_linux(): ... elif CompilationTarget.is_macos(): ... else: ...`
-  がコンパイル・実行とも通る。**`else` が Windows 分岐の置き場**（§0-3c）
-- `c_short` 2 / `c_long` 8 / `c_ulong` 8 / `c_uint` 4 byte
-- 存在する名前: `std.sys.info.platform_map`（`linux=` / `macos=` のみ）、`std.sys.CompilationTarget`、`std.ffi.c_ssize_t`。
-  存在しない名前: `std.sys.os_is_*`、`std.sys.info.os_is_*`、`CompilationTarget.is_windows`、`std.os.errno`、`std.sys.is_x86`、
-  `std.collections.string.utf8` / `.string_slice` モジュール（UTF-8 検証関数は公開されていない）
+- `grep -rn 'invalid UTF-8'` のファイル: `src/pq/decode_binary.mojo`（`_validated_utf8` の raise 2 箇所 `:343` / `:347` + docstring `:41` / `:329`）、`src/pq/async_conn.mojo`
+  （`_reject_bad_notification_text` の raise 2 箇所 `:295` / `:299` + docstring `:267` / `:281` / `:1362` / `:1373` / `:1562`）、`src/pq/__init__.mojo`（`:35` / `:122` / `:254` / `:285` / `:286`）、
+  `src/pq/result.mojo`（docstring `:543` / `:848` / `:854`）、`tests/test_notify.mojo`（`:492` / `:534` の `TYPE_MISMATCH` 断定 2 件）、`tests/test_decode_binary.mojo`（`:466`〜`:537` の UTF-8 系 8 件。
+  kind を断定している行は plan が `grep -n "TYPE_MISMATCH" tests/test_decode_binary.mojo` で選ぶ。OID 不一致・長さ不一致の `TYPE_MISMATCH` は残す）、`tests/test_zero_copy.mojo:487`（正常側のみ、kind 断定なし）
+- `grep -c TYPE_MISMATCH` の基線（陽性対照に使う。全ファイル合計）: **tests 97、src 125**（ファイル別は `scratch` には無い → plan が `turn-002-checklist.sh` で取り直す）
+- `errors.mojo`: docstring「exactly seven constants」→ eight、`write_to` に `Encoding` 分岐、`comptime ENCODING = Self(7)`。`tests/test_errors.mojo` が名前一覧を断定していれば追加
+- `__init__.mojo` の `## PgErrorKind` 節と API 表（`notifications()` / `wait_notification` の `TYPE_MISMATCH (channel or payload is not UTF-8)` → `ENCODING`）、README のエラー一覧に反映
+- UTF-8 スキャナの 4 バイト境界（REQ §4.6 テスト）: `_utf8_first_invalid` の単体は `test_decode_binary.mojo:510` `test_utf8_first_invalid_finds_each_malformed_input` に格子がある → `f4 90 80 80`
+  （U+110000、不正）と `f5 80 80 80`（不正先頭バイト）の 2 行を**同じ格子に足す**（期待オフセットはどちらも 0。`f4 8f bf bf` = U+10FFFF が正常側の対照）
 
-### 2.5 「accept するが応答しない」リスナー（D10）
+### 2.11 Apache-2.0 の取得
 
-- compose 定義（`scratch/turn-001-blackhole-compose.yml`。`tests/docker-compose.yml` にサービス追加）:
-  ```yaml
-  blackhole:
-    image: alpine/socat
-    command: -u TCP-LISTEN:5432,fork,reuseaddr OPEN:/dev/null
-    ports:
-      - "127.0.0.1:54399:5432"
-  ```
-  `-u` は単方向（TCP → /dev/null）なので**クライアントに 1 byte も返さず、接続も閉じない**。`fork` で複数接続可、`reuseaddr` で再起動即可
-- 実測: `docker compose up -d --wait` は **0.66 s で `Healthy`**（healthcheck 無しのサービスは running = healthy 扱い）。Python で startup packet を送って
-  `recv` が 0.7 s / 1.0 s で timeout（応答ゼロ）。libpq 側（probe-async N）: step 1 = 2 (WRITING)、step 2 = 1 (READING、status 7 SSL_STARTUP)、
-  `poll(POLLIN, 500)` が **501 ms** で満了、`PQstatus` は 7 のまま、`PQerrorMessage` 空。→ `connect_blocking(conninfo, 500)` は `TIMEOUT` で
-  500〜1500 ms の範囲に収まる見込み（処理は 1 ms 未満）
-- イメージは `alpine/socat:latest`（初回 pull 済み）。CI 無しなので tag 固定は任意
-
-### 2.6 UTF-8 検証（probe-lang）
-
-| 入力 | `String(from_utf8=Span)` | `StringSlice(from_utf8=Span)` |
-|---|---|---|
-| `68 c3 a9`（`hé`） | OK、`byte_length` 3 | OK |
-| `61 62 c3 28 63`（途中で不正） | raise `Cannot construct a String from invalid UTF-8 data` | raise `StringSpan: buffer is not valid UTF-8` |
-| `61 e2 82`（末尾切れ） | raise（同文） | — |
-| `c0 80`（overlong） | raise | — |
-| `ed a0 80`（サロゲート） | raise | — |
-
-- raise の型は素の `Error`、**不正位置は無い**。REQ §4.10 の「byte N」は自前で求める（§3-9）。既存の 3 経路: `result.mojo:435 _text`（`String(unsafe_from_utf8_ptr=)`、
-  テキスト形式の全セル）、`decode_binary.mojo:715,725`（`String(unsafe_from_utf8=bytes)`、バイナリの文字列系 OID）、`result.mojo:765 get_text`
-  （`StringSlice(unsafe_from_utf8=bytes)`）。`_text` は長さを `PQgetlength` で取って `Span` 化してから検証する形に変える（`unsafe_from_utf8_ptr` は strlen 走査）
-
-### 2.7 PG14 と PG17 の差（probe-async / async2 の diff）
-
-1. NOTIFY 2 件の到着が 1 回の `PQconsumeInput` に揃うか（PG17 は揃った、PG14 は 1 件 + 次回）— **タイミング差であって仕様差ではない**（async2 E では PG14 も 1 ラウンドで 2 件）
-2. 16 MB クエリの最初の `PQflush`（PG17: 1、PG14: 0）— 同じくタイミング
-3. 他は全行一致（cancel の ms、`57014`、`57P01`、`26000`、`25P02`、single-row の列、切断後の挙動、multi-host）。**サーバー版分岐のテストは Phase 4 には不要**
+- https://www.apache.org/licenses/LICENSE-2.0.txt（§1.4）。impl は本文を `LICENSE` に書く。検証: `head -3 LICENSE` が `Apache License` / `Version 2.0, January 2004` / `http://www.apache.org/licenses/`、
+  `grep -c "APPENDIX" LICENSE` = 1、`wc -l LICENSE` ≈ 200（公式は 202 行）
 
 ## 3. 盗める設計 / 使えるライブラリ（plan が採否表にする）
 
-1. **psycopg 3 の 4 generator を Mojo のメソッドに写す**（§1.1）: `connect`（`PQconnectPoll` を WRITING 前提で開始、READING / WRITING で yield）、`send`（`PQflush` が 1 なら
-   RW 待ち → `PQconsumeInput` → 再 `PQflush`）、`fetch_many`（`PQconsumeInput` → `PQisBusy` なら R 待ち → `PQgetResult` を NULL まで）、`notifies`（`PQconsumeInput` → `PQnotifies` を NULL まで）。
-   本プロジェクトは yield の代わりに **1 ステップ進めて戻り値（`PollState` / `Optional[Result]`）で待ち方を返す**
-2. **`PollState` / `AsyncState` は `ResultFormat` と同じ `@fieldwise_init struct X(Equatable, TrivialRegisterPassable, Writable)` + `comptime NeedRead = Self(0)`**。
-   `write_to` で名前を書く（`USAGE` メッセージ `send() called while Busy` に使う）
-3. **`adopt_result(pq, conn, res)` の抜き出し**: `connection.mojo:613-691 _take_result` の本文をモジュール関数へ（`PGRES_SINGLE_TUPLE` を成功に足す 1 行だけ変更）。
-   `Connection._take_result` は `return adopt_result(self._pq, self._conn, res)` の 1 行に。`_error_field` も一緒に移す。置き場は `result.mojo`（`Result` を作る側）が自然
-4. **`poll_connect` の D13 組み込み**: `PQconnectPoll` が 3 を返したら `PQsendQuery(_SESSION_SETUP_SQL)` → `PQflush` → 内部フラグ `_setup_pending = True`。以降の `poll_connect` は
-   `PQconsumeInput` → `PQisBusy` なら `NeedRead` → `PQgetResult` 2 件（COMMAND_OK を確認、FATAL なら `CONNECTION`）→ NULL で `Ready`・`state = Idle`。
-   結果件数は **2 + NULL**（§2.1 B）
-5. **`state()` の遷移規則（libpq の実測に合わせる）**: `Connecting`（start〜`poll_connect` が `Ready`）→ `Idle` →（`send*` 成功）→ `PQflush` が 1 なら `Sending`、0 なら `Busy`
-   →（`poll_result` が NULL）→ `Idle`。**`PQisBusy` が 0 でも NULL を見るまで `Busy`**（§2.1 G4）。`consume_input` が 0 を返したら `CONNECTION` を投げ、状態は `Busy` のまま
-   でよい（次の `poll_result` が FATAL(sqlstate 空) → `CONNECTION`、その次が NULL → `Idle`。§2.1 切断行）
-6. **`set_single_row_mode` のクライアント側ガード**: `_single_row_allowed` フラグを `send*` 成功時に True、`poll_result` / `consume_input` / `is_busy` のいずれかの呼び出しで False に。
-   False なら `USAGE`（libpq の戻り値 1 は信用しない。§2.1）
-7. **`cancel()`**: `state() == Busy or Sending` のときだけ `PQgetCancel` → `PQcancel(errbuf 256)` → `PQfreeCancel`。`Idle` は no-op（D11）。`Connecting` は **`USAGE` を提案**（§5-6）。
-   `PQgetCancel` NULL / `PQcancel` 0 → `CONNECTION`（errbuf を message に。成功時 errbuf は空）
-8. **`fetch_all(timeout_ms)`**: 全体の締め切り `deadline = perf_counter_ns() + timeout_ms*1e6`。ループ: `poll_result()` → `Some` なら append、`None` かつ `state()==Idle` なら終了、
-   `None` かつ `Busy` なら `wait_readable(残り ms)`。`adopt_result` が投げたら `first_error` に保存して続行、NULL 到達後に `first_error` を投げる（D16）。
-   残り ms が 0 以下なら `TIMEOUT`
-9. **UTF-8（§4.10）の 2 段構え**: 速い経路 `String(from_utf8=span)` / `StringSlice(from_utf8=span)`（stdlib、SIMD 想定）。raise したら `_utf8_first_invalid(span) -> Int`
-   （RFC 3629 の表 3-7 を素直に書いた 30 行のスキャナ。overlong / サロゲート / 末尾切れを弾く）で N を求め `TYPE_MISMATCH("invalid UTF-8 at byte N of column M")`。
-   単体テストはスキャナに §2.6 の 5 バイト列を直接渡す（`c3 28` → 2、`e2 82` 末尾切れ → 1、`c0 80` → 0、`ed a0 80` → 0）。
-   **陽性対照**: stdlib が raise する入力でスキャナが -1 を返さないこと（5 件全部）
-10. **文字列系 OID の一元化（§4.9）**: `decode_binary.mojo` に `def _string_payload(bytes: Span[UInt8, origin], oid: UInt32) raises PgError -> Span[UInt8, origin]`
-    （jsonb は version byte 検査 + 1 byte 剥がし、5 OID はそのまま、他は `_binary_oid_error`）を 1 つ置き、`decode_binary[String]`（`:706-725`）と `Row.get_text`（`:746-764`）が呼ぶ
-11. **SKIP 集計（§4.8）**: `print("SKIP <name>: <reason>")` の後 `return`。`run_tests.sh` は `mojo run ... | tee` で出力を取り `grep -c '^SKIP '` を `skipped` に加算、サーバーごとに
-    `-- <label> skipped N` を出す（約 10 行）。既存 2 件は `test_extended_datetime.mojo:840,875`、`test_leak.mojo:573`（`SKIP: RSS sampling is Linux-only` → 形式を揃える）
-12. **テストの NOTIFY 受信は `wait_notification(2000)` を 2 回**（または `notifications()` を揃うまで 2 s 上限で再試行）。期待 payload は親が `psql` 相当（同期 `Connection`）で
-    取り直す（REQ §9 常設）
-13. **`wait_readable` の前に送信を終わらせる（ruby-pg :2578）**: `fetch_all` / `wait_notification` は `state() == Sending` なら先に `wait_writable` → `flush()`。`poll_result` 自体は
-    `Sending` でも呼べる（`PQconsumeInput` → `PQisBusy` 真 → `None`）が、呼ぶ側が readable だけ待つとデッドロックし得る（libpq-async の注意）。`wait_readable` の docstring に書く
-14. **`PollEvents` の判定順（psycopg `waiting.py` :446-491）**: `POLLNVAL` → `USAGE`；`POLLIN` / `POLLOUT` が立っていればエラービット併存でも readable / writable として返す（libpq に読ませて本当のエラー文言を得る）；
-    **エラービットだけ**（`POLLERR` / `POLLHUP` 単独）→ `CONNECTION("socket closed")`。REQ §4.2「`POLLERR` / `POLLHUP` で `CONNECTION`」はこの「単独のとき」の意味で実装する（§5-11）
-15. **`_platform/poll` の形（mojothon/libc と同型、§1.3）**: `def poll_socket(fd: Int, want_read: Bool, want_write: Bool, timeout_ms: Int) raises PgError -> PollEvents`、`PollEvents` は
-    `@fieldwise_init struct PollEvents(TrivialRegisterPassable, Writable)` に `readable / writable / hangup / error: Bool`（timeout は全部 False）。OS 定数は `comptime if` の中の `comptime`
+1. **psycopg bench の境界**（§1.1）: `execute` = exec、`fetchall` + 全セル読み = decode。`autocommit=True`。`examples/bench_psycopg.py` はプローブ版をそのまま採用できる
+2. **`WSAGetLastError` の読み方**: `_poll_once` の `else` で `var err = external_call["WSAGetLastError", c_int]()` を読んで `(ret, flags, Int(err))` の 3 要素で返す、または Windows 側で
+   `ret < 0` のとき `flags` の代わりに負のエラーコードを返す。推奨は **3 要素タプル**（POSIX 側は `get_errno().value` を同じ位置に入れる）。`poll_socket` 側は `err` を OS 別定数と比べる:
+   POSIX `EINTR` 再試行 / `EBADF` `EINVAL` → `USAGE`、Windows `10022` `10038` `10009` → `USAGE`、他 → `CONNECTION`。`ErrNo` は Windows で意味が無いので `comptime if` の中でだけ使う
+3. **`comptime if` 連鎖の候補関数**（§2.4）: `platform_map` を消す
+4. **`DROP DATABASE IF EXISTS ... WITH (FORCE)`** を先頭と末尾に（§2.6）。末尾は try で握る
+5. **`fetch_all` の `kind == CONNECTION` で break**（§2.7）。`first_error` に入れてから break するので raise される値は変わらない
+6. **`notifications()` の先行チェック**（§2.8）: `self._reject_connecting(...)` の直後に `PQstatus` を見る
+7. **`wait_notifications(n, timeout_ms)`**: `wait_notification` の本体を「n 件集まるまで」に一般化し、`wait_notification` は `wait_notifications(1, timeout_ms)` の先頭要素（`Optional`）にする、
+   または 2 本を別に書く。推奨は**一般化 + 薄い `wait_notification`**（`_pending` の扱いが 1 箇所になる。既存 `test_notify` 11 件が回帰）。`found` を `_pending` に戻す順序は現状と同じ
+   （余りは先頭から `_pending.append`）
+8. **README の節立て**（REQ §4.2 の順）+ 型表は `__init__.mojo:42-62` を日本語見出しで転記（verify が照合）。`PgErrorKind` 一覧は `errors.mojo` の 8 値 + `__init__.mojo` の `## PgErrorKind` 節
+9. **examples 堅牢性スクリプト**（§2.9）を `tests/` に入れるか: 入れない（`check` の所要 +60 s。verify の格子として scratch に残す）
 
 ## 4. 落とし穴と検証方法（plan は完了基準に写す）
 
-| # | 落とし穴 | 回避策 | どう検証すれば踏んでいないと分かるか |
+| # | 落とし穴 | 回避 | どう検証すれば踏んでいないと分かるか |
 |---|---|---|---|
-| P1 | `PQconnectStartParams` が BAD を返した後に `PQsetnonblocking` を呼ぶ（-1）/ `PQsocket` -1 を poll する | start 直後に `PQstatus == CONNECTION_BAD` なら `PQfinish` して `CONNECTION`（REQ §4.2） | `AsyncConnection.start("host=nonexistent.invalid ...")` が `CONNECTION`（message に `could not translate host name`）、refused（port 1）は `poll_connect` が `CONNECTION`（`Connection refused`） |
-| P2 | `PQconnectPoll` 前に POLLIN で待つ（最初は WRITING） | 最初の `poll_connect` は待たずに呼ぶ。`connect_blocking` は戻り値で待ち方を選ぶ | `poll_connect()` の最初の戻りが `NeedRead` または `NeedWrite` のどちらでも `connect_blocking` が完了する（実測の列 2,1,2,1,1,1,3 を docstring に） |
-| P3 | 接続ごとに `PQsocket` を読み直さない（multi-host で fd が変わり得る） | `wait_*` は毎回 `PQsocket` を呼ぶ。`socket()` を保持しない | `host=127.0.0.1,127.0.0.1 port=1,<port>` で `connect_blocking` が成功（実測 8 ステップ 20 ms）。fd 変化そのものは断定しない |
-| P4 | `poll` の `EINTR` を失敗にする / 残り時間を測り直さない | `ret == -1 and errno == EINTR` → `deadline - perf_counter_ns()` で再試行。他の errno は `CONNECTION`（`EBADF` / `EINVAL` は `USAGE`） | シグナルは起こせないのでコードレビュー: `_platform/poll` に `EINTR` 分岐と `perf_counter_ns` の再計算がある |
-| P5 | `POLLNVAL` を readable 扱い / ret -1 を期待 | `revents & POLLNVAL` → `USAGE`（閉じた fd）。ret 1 で来る（§2.3） | 単体: pipe の両端を close した fd で `USAGE`。`POLLHUP` だけ（17 / 20）は `CONNECTION` でなく「readable」として返し、呼ぶ側が `PQconsumeInput` で切断を検出（libpq の切断メッセージの方が親切） |
-| P6 | `timeout_ms < -1` を libc に渡す（Linux は無期限扱い） | `USAGE`（REQ §4.1） | 単体: `-2` → `USAGE`、`-1` は無期限（データありで即返る）、`0` 即時 |
-| P7 | `external_call["write"]` 等を独自シグネチャで宣言して stdlib と衝突（§0.5 ☆） | `_platform/poll` は `poll` / `__errno_location`（macOS `__error`）だけ。テストの pipe 書きは `FileDescriptor` | コンパイルが通る（`test_poll.mojo` を `mojo run`） |
-| P8 | Windows 分岐を `is_windows` で書く（存在しない） | `comptime if is_linux / elif is_macos / else`。`else` の docstring に「Windows、未検証」。`WSAPoll` は `external_call["WSAPoll", c_int]` で `WSAPOLLFD(fd: Int, events: Int16, revents: Int16)`（SOCKET 8 byte）、定数は §2.3 の Windows 値 | `pixi run package` と全テストが Linux で通る（else 分岐はコンパイルされない）。Phase 5 レビュー項目 |
-| P9 | `state()` を `PQisBusy` から導く（最初の結果取得後〜NULL 前に `Idle` になる） | 自前の状態変数。NULL を見たときだけ `Idle` | 格子: `send("SELECT 1; SELECT 2")` → `poll_result` 1 件取得後 `state() == Busy`、この時点の `send` が `USAGE`（libpq に届く前。message `send() called while Busy`）。陽性対照: 状態検査を外すと libpq の `another command is already in progress` が `CONNECTION` として出る |
-| P10 | D13 の SET を 1 結果だと思って `Ready` を早く返す | 結果 2 件 + NULL をドレイン（§2.1 B）。`CONNECTION_OK` 後に `SHOW DateStyle` | `connect_blocking` 後に `send("SHOW DateStyle")` → `ISO, YMD`、`state() == Idle`、`transaction_status() == PQTRANS_IDLE` |
-| P11 | `poll_result` が `adopt_result` の raise で状態を壊す（NULL を取り切れない） | raise の前に内部状態は変えない（`Busy` のまま）。次の `poll_result` が NULL → `Idle` | `send("SELECT 1/0")` → `poll_result` が `SERVER 22012` → もう 1 回 `poll_result` が `None` で `state() == Idle` → `send("SELECT 1")` 成功。多文版 `SELECT 1; SELECT 1/0; SELECT 2` は 1 件 + エラー + NULL（3 文目の結果は無い） |
-| P12 | `Sending` 状態をテストで断定する（`PQflush` = 1 は非決定的、§2.1 K） | `send*` の戻り後 `state()` は `Sending` **または** `Busy`。`flush()` は `Sending` でなければ no-op で `True` | テスト: 16 MB クエリ送信 → `flush()` を `True` までループ（0 回以上）→ `fetch_all` の値が `16000000`。「`Sending` を 1 回は観測」は書かない |
-| P13 | `set_single_row_mode` を libpq の戻り値で判定（1 件目取得後も 1） | §3-6 のフラグ。`USAGE` メッセージに状態 | 格子: アイドル → `USAGE`、`send` 直後 → OK、`poll_result` 1 回呼んだ後 → `USAGE`。正例: `generate_series(1,3)` が `Result` 4 件（1 行 ×3 + 0 行）。多文は全文に効く（`SELECT 1; SELECT 2` → 4 件）。prepared でも効く |
-| P14 | single-row の最後の 0 行 `TUPLES_OK` を落とす / エラー途中を落とす | `adopt_result` は 0 行も `Result`。途中エラーは `fetch_all` が残りを取り切って投げる | `fetch_all` の件数 4、途中エラー `generate_series(1,2), 1/(2-generate_series(1,2))` は 1 件取れた後 `SERVER 22012`、`state() == Idle` |
-| P15 | cancel の 57014 を `fetch_all` が取り逃す / tx 内で `INERROR` を放置 | 57014 は普通の `SERVER` エラー。tx 内なら利用者が `ROLLBACK` | テスト: `cancel()` → `fetch_all(5000)` が `SERVER 57014`、`cancel()` 呼び出し〜raise が 1 s 未満（実測 1〜4 ms）。tx 内: `transaction_status() == PQTRANS_INERROR`、`send("ROLLBACK")` で `IDLE` |
-| P16 | アイドル cancel を `USAGE` にする / 接続中 cancel を通す（`PQgetCancel` は非 NULL） | `Idle` no-op、`Connecting` は `USAGE`（提案 §5-6）、切断後は `PQgetCancel` NULL → `CONNECTION` | 格子 4 件: idle（例外なし、次の `send` 正常）/ connecting（`USAGE`）/ busy（57014）/ 切断後（`CONNECTION`） |
-| P17 | `PQcancel` の errbuf を `String(unsafe_from_utf8_ptr=)` で読んで `PGcancel` を先に free する | 読んでから `PQfreeCancel`。成功時は空文字（message に入れない） | リーク: `test_leak` の cancel ループ 1,000 回 + 陽性対照（`PQfreeCancel` を消すと FAIL） |
-| P18 | `notifications()` 1 回で全件取れると仮定（§2.2 到着行） | `wait_notification` でループ。テストは 2 s 上限で揃うまで | テスト: NOTIFY 2 件（payload あり / 空）→ `wait_notification(2000)` ×2 が両方 `Some`、順序 `payload-1`, `` 、`channel`、`backend_pid == 通知側 pg_backend_pid()`。3 回目は `None`（タイムアウト 200 ms） |
-| P19 | `PGnotify` を `PQfreemem` し忘れ / `relname` を free 後に読む | `String` に複製してから `PQfreemem` | `test_leak` に NOTIFY 1,000 件受信 + 陽性対照（`PQfreemem` を消すと FAIL） |
-| P20 | NOTIFY が結果ドレイン中に来ると `poll_result` だけで消える | libpq が内部キューに溜める（§2.2 J2）。`notifications()` はいつでも呼べる | テスト: `send("SELECT pg_sleep(0.3)")` 中に別接続が NOTIFY → `fetch_all` 後の `notifications()` が 1 件 |
-| P21 | 切断後に `fetch_all` が止まらない / `CONNECTION` が出ない | `consume_input` 0 → `CONNECTION`。`PQgetResult` の 1 件目は sqlstate 空 + BAD → `adopt_result` が `CONNECTION`、2 件目 NULL | テスト: 別接続から `pg_terminate_backend` → `fetch_all` が `SERVER 57P01` または `CONNECTION`（どちらが先に見えるかは競合。両方許容）、その後 `send` が `CONNECTION`、`socket() == -1`、`status() == CONNECTION_BAD` |
-| P22 | `__del__` で結果が残っていると二重解放 / クラッシュ | `PQfinish` だけ（libpq が片付ける。§2.1 H） | テスト: `send("SELECT 1; SELECT 2")` → `wait_readable` → `consume_input` → drop。クラッシュ無し。`test_leak` ループに「結果を取らずに drop」を含める |
-| P23 | タイムアウトテストに `connect_timeout` を conninfo に入れる（libpq のブロッキング用。`PQconnectPoll` には効かない） | 入れない。`connect_blocking(conninfo, 500)` の全体締め切りで測る | テスト: 54399 へ `connect_blocking(..., 500)` が `TIMEOUT`、経過 500〜1500 ms（実測 501 ms）。`db-up` 後に `blackhole` が `Up` |
-| P24 | `wait_*` の `TIMEOUT` と `wait_notification` の `None` を混同 | D8 どおり。`fetch_all` / `connect_blocking` は `TIMEOUT` | `wait_readable(50)`（アイドル接続）→ `TIMEOUT`。`wait_notification(50)` → `None` |
-| P25 | `_text` を `String(from_utf8=)` に替えたら `PQgetlength` を使わず strlen になる / NUL 入り text が切れる | `PQgetvalue` + `PQgetlength` で `Span` → 検証 | 既存テストの期待値変更ゼロ（verify 照合）+ `pixi run bench` の text 列の差を PROGRESS に |
-| P26 | UTF-8 不正の位置 N が stdlib から取れない（§2.6） | §3-9 の 2 段構え | 単体 5 件（§3-9）+ 陽性対照 |
-| P27 | `adopt_result` 抜き出しで `Connection` の挙動が変わる | `_take_result` は 1 行の委譲に | 既存テスト 546 件 × 2 の期待値変更ゼロ、`grep -c "def _take_result" = 1`、`grep -c "PGRES_SINGLE_TUPLE" src/pq/result.mojo >= 1` |
-| P28 | SKIP 集計が `mojo run` の終了コードを飲む | `set -o pipefail` か `PIPESTATUS[0]`（`final_check.sh:39-42` と同じ） | 陽性対照: 1 テストを一時的に fail させて `run_tests.sh` が非 0 |
-| P29 | `test_leak` の非同期 10,000 回が遅い | 1 接続を使い回し、`send` → `fetch_all` のみ（`pg_sleep` 無し）。Phase 3 の同期 10,000 回と同程度（数 s） | `-- took Ns` が +15 s 以内 |
-| P30 | examples が `--wait` 前に走る / blackhole が無いと `check` が落ちる | `db-up` は compose 全体（blackhole 込み）。タイムアウトテストは 54399 が `ECONNREFUSED` なら `SKIP`（理由付き） | `pixi run db-up` 後 `docker compose ps` に `blackhole` が `Up` |
-| P31 | `PQcancel` は PG18 docs で「deprecated・insecure（cancel 要求は TLS で保護されない）」 | D6 どおり使う（libpq 14 対応）。`cancel()` の docstring に「cancel 要求は暗号化されない。`PQcancelBlocking`（17+）への切替は Phase 5 以降の判断」と明記 | `grep -c "not encrypted\|PQcancelBlocking" src/pq/async_conn.mojo` ≥ 1（docstring） |
-| P32 | `is_busy()` で切断を検出しようとする（`PQisBusy` は `CONNECTION_BAD` なら 0） | 切断検出は `consume_input()`（0 → `CONNECTION`）と `poll_result` の sqlstate 空 FATAL。`is_busy()` は「結果が揃ったか」だけ | 切断テスト（P21）で `is_busy() == False` かつ `state() == Busy` の瞬間があっても `poll_result` が `CONNECTION` を投げる |
-| P33 | `PGRES_POLLING_ACTIVE`(4) を `NeedRead` 扱いにして無限ループ | psycopg2 と同じく `CONNECTION`（libpq-fe.h「unused」） | コードレビュー: `poll_connect` の分岐に 0 / 1 / 2 / 3 以外 → `CONNECTION` |
-| P34 | `PQerrorMessage` は追記式で前のエラーが残る（`fe-exec.c:1706-1715`） | `USAGE` 格子はクライアント側で先に弾く（libpq に届かせない）。`CONNECTION` の message は libpq 文言のまま（Phase 1 方針） | USAGE 格子のメッセージが `send() called while Busy` 等の自前文言で、libpq 文言を含まない |
+| P1 | `fetch_all` の busy-spin（§2.7 A） | `except e:` で `kind == CONNECTION` なら break | test_async 1 件: `close(socket)` 後の `fetch_all(2000)` が `CONNECTION` かつ経過 < 500 ms。陽性対照: 修正前は 2000 ms 後 `TIMEOUT`（`probe-closefd.log` A） |
+| P2 | 閉じた fd の再利用（P1 のテスト） | close 〜 `__del__` の間に fd を開かない。テスト末尾で `_ = conn^` を最後に | コードレビュー（テスト本文に接続・ファイル open が無い） |
+| P3 | `_after_send` の -1 分岐が到達不能 | 分岐は入れ、陽性対照はコードレビュー（REQ §4.5） | TRACE に §2.7 の libpq 根拠（`PQflush` 先頭、`pqsecure_raw_write` の「成功扱い」）を書く。`grep -c "flushed == -1\|else:" ` 等で分岐の存在 |
+| P4 | `notifications()` の文言が呼ぶたびに伸びる（§2.8） | `PQstatus == CONNECTION_BAD` を先に見て pq 文言で raise | test_notify 1 件: BAD 後 3 回とも同一 message。陽性対照: 先行チェック無しだと 3 回目 > 2 回目（`probe-notify-bad.log`） |
+| P5 | `DROP DATABASE` を対象 DB への接続から / tx 内から発行 | `pq_test` の `Connection.execute`（autocommit） | SQLSTATE `55006` / `25001` が出ないこと（テスト PASS）。`pg_database` に `pq_test_ascii` が残らない（両サーバー） |
+| P6 | 末尾の DROP が assert 失敗で飛ぶ → DB が残る | 先頭の `IF EXISTS` で回収 + 末尾は try で握る | 陽性対照: assert を一時的に失敗させた scratch 版で 2 回目の実行が PASS する |
+| P7 | `IF EXISTS` の NOTICE が stderr に出る | 許容（`check` 6/6 のパターン外） | `check` 6/6 `matched lines: 0` |
+| P8 | `ENCODING` の取りこぼし（UTF-8 の raise が `TYPE_MISMATCH` のまま残る） | §2.10 の 4 raise 箇所 + docstring | `grep -rn "invalid UTF-8" src tests` の全行に `TYPE_MISMATCH` が無い。`grep -c TYPE_MISMATCH` が tests 97 → 97 − (期待値変更数)、src 125 → 125 − (raise 4 + docstring N) |
+| P9 | `wait_notifications` の `n` / `timeout_ms` 境界 | `n < 1` → `USAGE`、`timeout_ms` は `_reject_bad_timeout` | 格子: `n ∈ {0, -1, 1, 2, Int.MAX}`、`timeout_ms ∈ {-2, -1, 0, 200, TIMEOUT_MS_MAX, TIMEOUT_MS_MAX+1, 2**32}`。`n = Int.MAX, timeout_ms = 200` は 200 ms で部分返却 |
+| P10 | `wait_notifications` の `_pending` 順序（1 往復で余った通知が次回に先に出る） | `found` の余りを `_pending` に append（現状の順序） | test_notify 1 件: 2 件 NOTIFY → `wait_notifications(1)` → `wait_notification` が 2 件目を待たずに返す（既存 `test_second_wait_notification_answers_without_waiting` の n 版） |
+| P11 | Windows の `get_errno()`（§2.3 #6） | `WSAGetLastError` | 照合表 #6 の行が TRACE にあり、`grep -c WSAGetLastError src/pq/_platform/poll.mojo` = 1。Linux の `test_poll` 11 件が不変 |
+| P12 | `else` 分岐は Linux で型検査されない | scratch で `if True:` 側に複製して `mojo build` | TRACE に「複製ビルドの結果」1 行（通らなければその旨） |
+| P13 | `platform_map` の削除で macOS の候補を落とす | 4 候補を `elif` に全部移す | `grep -c "/opt/homebrew/opt/libpq" src/pq/_ffi/loader.mojo` = 1 のまま |
+| P14 | bench の揺れ（exec ±5 ms） | README は 3 回の値を並べる or 中央値。計測は `check` 直後ではなくアイドル時 | verify が再実行して decode の binary < text だけを断定 |
+| P15 | `pixi run bench-psycopg` の初回が環境作成で遅い / オフラインで失敗 | README に「初回は `pixi install -e bench` 相当で 1 分」 | `pixi list -e bench` に `psycopg-c` がある |
+| P16 | `pixi.lock` の差分が大きい（3 プラットフォーム × bench） | 1 コミットにまとめる | `git diff --stat pixi.lock` を PROGRESS に 1 行 |
+| P17 | `hello_libpq` の `raise Error`（§2.9） | 他 6 本と同じ `try / except / exit(1)` | `turn-001-examples-robust.sh` 再実行で `unhandled_markers=0` 15/15 |
+| P18 | README のコード片が examples と乖離 | 抜粋元ファイル名を各コード片に書く | verify が `examples/` の該当行と照合（REQ §5） |
+| P19 | `check` の所要 | 新テスト: test_async +1（≤ 0.5 s）、test_notify +5〜6（DROP/CREATE 2 回 ≈ 0.3 s、通知待ち ≤ 1 s）、test_decode_binary +2（0 s）、test_errors +1 | 見込み `check` = 167〜187 + ≤ 10 s。超えたら PROGRESS |
+| P20 | TestSuite の単位（ms）の再読み違い | PROGRESS / TRACE に時間を書くとき単位を明記 | reflect が確認 |
 
 ## 5. 要件への影響
 
-**直した（REQUIREMENTS.md に `（research turn 1 訂正）` 印）**:
-1. §4.7 NOTIFY テスト: 「`notifications()` が 2 件」→「`wait_notification(2000)` を 2 回（または揃うまで 2 s 上限で再試行）で 2 件」（§2.2 到着行、P18）
-2. §4.1 Windows 分岐の記述: `@parameter if` → `comptime if`、判定は `CompilationTarget.is_linux()` / `is_macos()` の `else`（P8）
-3. §4.1 `POLL*` の値: 「OS で異なる → research が確定」→ Linux / macOS 同一（§2.3）、Windows のみ別値、を本文に
-
-**提案（REQ は変えていない。plan が採否を決める）**:
-4. §4.2 `state()` の `Sending` は「観測できることもある」扱い。テストは最終状態と値だけを断定（P12）
-5. §4.2 `set_single_row_mode` の `USAGE` 条件を「`send*` の後、`poll_result` / `consume_input` / `is_busy` のどれかを呼ぶ前」と明記（libpq の戻り値は使わない。P13）
-6. §4.2 `cancel()` を `Connecting` で呼んだら `USAGE`（`PQgetCancel` は非 NULL なので自前判定。P16）
-7. §4.7 の格子に「切断後」の 1 列を足す（`pg_terminate_backend`。P21）。テストは競合を許容する 2 値期待
-8. §4.7 タイムアウトテストは 54399 が refused なら `SKIP`（§4.8 の集計に乗る。P30）
-9. §5.2 の「cancel 後」状態は tx 内なら `INERROR` と明記（P15）
-10. §4.6 `examples/listen_notify.mojo` は `wait_notification(2000)` の戻りが `None` なら「no notification within 2 s」と表示して終了コード 0（CI 無しの手動実行で詰まらない）
-11. §4.2 `wait_*` の「`POLLERR` / `POLLHUP` で `CONNECTION`」は「`POLLIN` / `POLLOUT` を伴わない単独のとき」に限定（§3-14。`POLLIN|POLLHUP` = 未読データ + 切断は readable として返し
-    `consume_input` が libpq の文言で `CONNECTION` を出す）
-12. §4.2 `cancel()` docstring に PG18 の deprecated / insecure 注記（P31）。D6 は変えない
-13. `poll_connect` は `PGRES_POLLING_ACTIVE`(4) も `CONNECTION`（P33）
+- **REQ 本文を 2 箇所訂正した**（REQ §9「矛盾を見つけたら REQ 本文を直してよい」）:
+  1. §1「pixi 環境には python が無い」→ python 3.15.0 は mojo の依存で入っている（psycopg が無いだけ）。D2 の結論（feature で足す）は変わらない
+  2. §1 / §4.5「`test_zero_copy` が 1 テスト 3.4〜3.9 s（接続固定費）」→ **ms**。§4.5 は「原因特定済み。TRACE に転記のみ」に書き換えた。D12 の分岐（テスト側 / src 側）はどちらにも入らず「問題なし」
+- 提案（REQUIREMENTS には書かない。plan が採否）:
+  - §4.4 に「`WSAGetLastError` への置き換え」を照合結果として明記（§2.3 #6）。README の Windows 節に「Windows 10 2004 より前は非同期接続の失敗がタイムアウトまで分からない」（#8）
+  - §4.6 `notifications()` 先行チェックのテストは「message が呼ぶたびに伸びない」を断定する（§2.8。これが唯一の差分）
+  - §4.5 `fetch_all` のテストは `close(PQsocket)` 方式（§2.7）。`pg_terminate_backend` 方式は status が BAD になるので旧分岐でも止まり、差分が出ない
+  - §4.7 の DROP は `WITH (FORCE)` 付き（§2.6）
+  - §4.3 の「実行方法」は docstring に `pixi run <task>` を 1 行（§2.9）
+  - §4.1 README の表: psycopg の実装（`c`）・python 版も環境欄に（§1.1）
+- BLOCKED にする発見: なし
 
 ## 6. plan への申し送り
 
-- **モジュール配置案**: `src/pq/_platform/__init__.mojo`（空）+ `_platform/poll.mojo`（`PollFd` 2 種・`PollEvents` struct・`poll_socket(fd, want_read, want_write, timeout_ms)`、
-  約 150 行、docstring に Windows 未検証）/ `src/pq/async_conn.mojo`（`AsyncState`、`PollState`、`Notification`、`AsyncConnection`。約 900 行）/
-  `result.mojo` に `adopt_result` + `_error_field` 移設（`connection.mojo` から -80 行）/ `errors.mojo` に `TIMEOUT` / `_ffi/functions.mojo` に `PQsetSingleRowMode`（2 箇所）/
-  `decode_binary.mojo` に `_string_payload` と `_utf8_first_invalid` / `__init__.mojo` に再エクスポート
-- **テストファイル案**: `tests/test_poll.mojo`（サーバー不要。pipe / socketpair の 7 ケース、P5 / P6）、`tests/test_async.mojo`（接続・GUC・pg_sleep カウンタ・cancel 4 格子・USAGE 格子・
-  single-row・多文・エラー後復帰・切断・16 MB flush・タイムアウト。接続 10〜12 本 × 3〜7 s + pg_sleep 2 s + cancel + timeout 0.5 s ≈ **40〜60 s / サーバー**）、
-  `tests/test_notify.mojo`（2 件・順序・pid・7999 byte・クエリ中到着・tx 内 NOTIFY は COMMIT 後。接続 4 本 ≈ 15 s）、`tests/test_decode_binary.mojo` に UTF-8 スキャナ 5 件、
-  `test_leak.mojo` に非同期 10,000 回 + NOTIFY 1,000 件 + cancel 1,000 回（+10〜15 s、1 サーバー）
-- **所要見積もり**: `check` は前回末 112〜143 s + 新テスト（test_async 50 s + test_notify 15 s）× 2 サーバー + leak 15 s ≈ **260〜300 s**。plan は `final_check.sh` の
-  タイムアウトがあれば確認。examples 2 本は各 3〜5 s（`async_query` は pg_sleep 2 s 込み）
-- **期待値の出典**: 本書 §2.1 / §2.2 の sqlstate（`57014` / `57P01` / `22012` / `26000` / `25P02`）、メッセージ（`canceling statement due to user request` /
-  `another command is already in progress` / `no connection to the server`）、`PQconnectPoll` の列、single-row の件数は全部 PG17 / PG14 実測。
-  原本ログ: `scratch/turn-001-probe-async-pg17.log`（165 行）/ `-pg14.log`、`turn-001-probe-async2-pg17.log` / `-pg14.log`、`turn-001-probe-poll.log`
-- **サブエージェント推奨本数**（REQ §9 の実験）: `_platform/poll` + `test_poll`（1 ファイル完結 + テスト 1）は 0 本。`async_conn.mojo` は 1 ファイルだが大きく、
-  テスト 2 ファイル（`test_async` / `test_notify`）が「`src/` を触らずテスト 2 ファイル」型 → **1 本**（親が `test_notify` を書く。REQ §9 の実験条件）。
-  `adopt_result` 抜き出し・`TIMEOUT`・`_ffi` 追加・§4.9 / §4.10 は親が直接（0 本）
-- **陽性対照を完了基準に**: leak（`PQfreeCancel` / `PQfreemem` を消したコピーで FAIL。P17 / P19）、USAGE 格子（状態検査を外すと libpq のメッセージが `CONNECTION` で出る。P9）、
-  UTF-8 スキャナ（stdlib が raise する 5 入力で -1 を返さない。P26）、SKIP 集計（P28）
-- **チェックリストスクリプト（REQ §9）の行の候補**: `grep -c "def _take_result" src/pq/connection.mojo` = 1 / `grep -c "def adopt_result" src/pq/result.mojo` = 1 /
-  `grep -c "PQsetSingleRowMode" src/pq/_ffi/functions.mojo` = 2 / `grep -c "TIMEOUT" src/pq/errors.mojo` ≥ 2 / `grep -c "unsafe_from_utf8" src/pq/result.mojo src/pq/decode_binary.mojo`
-  = 0（検証付きに置換後）/ `grep -c "^SKIP " <test log>` / `grep -c "blackhole" tests/docker-compose.yml` = 1 / `grep -c "example-async\|example-notify" pixi.toml` = 2
-- **impl への申し送り**: 親が同期 `Connection` で `pg_backend_pid()` / `57014` の message / NOTIFY payload を取り直す（REQ §9 常設）。`PGnotify` の読み出しは
-  `_ffi/types.mojo` の `PGnotify` struct を `Pointer[PGnotify, MutUntrackedOrigin](unsafe_from_address=n._addr)[]` で読む（offset は §2.2 で照合済み）
-- **REQ §9 の verify 申し送り**: `adopt_result` 抜き出し・§4.9・§4.10 で既存テストの期待値変更ゼロ（§4.10 だけ新規 5 件が増える）
+- **タスク分割の提案**（REQ §9「持ち越し整理は T1 に 1 コミット」を踏まえて）:
+  T1 持ち越し + 後始末（`fetch_all` break / `_after_send` -1 / test_notify の DROP / `db-reset` / `hello_libpq` 修正 / zero_copy の TRACE 転記）、
+  T2 `ENCODING` + 契約外 7 件（errors.mojo / 4 raise / docstring / `notifications()` 先行チェック / `wait_notifications` / テスト 4 + 境界格子）、
+  T3 Windows（poll.mojo #6 / loader.mojo / 照合表 TRACE / 複製ビルド）、
+  T4 bench（pixi feature / `examples/bench_psycopg.py` / 実測ログ）、
+  T5 README + LICENSE + examples docstring、
+  T6 統合（`check` / examples 格子 / `pg_database` 確認 / 未確認行の処分表）
+- **サブエージェント**: T2 は「src 2 ファイル + tests 3 ファイル」なので 1 本（テスト側）を既定、他は 0 本（親が全部）。T5 の README は親が書く（verify が実装と照合するので転記元を把握している親が有利）
+- **チェックリスト（`turn-002-checklist.sh` の key 候補と期待値）**: `loader_libpq_dll=1`、`loader_platform_map=0`、`poll_WSAGetLastError=1`、`poll_external_call_symbols=3`（`poll` / `WSAPoll` / `WSAGetLastError`）、
+  `errors_kind_count=8`、`src_invalid_utf8_type_mismatch=0`、`tests_invalid_utf8_type_mismatch=0`、`lock_psycopg_c≥3`、`pixi_tasks_bench_psycopg=1`、`pixi_tasks_db_reset=1`、`notify_drop_database=2`、
+  `examples_raise_error=0`（`grep -c "raise Error" examples/*.mojo`）、`readme_sections≥10`、`license_head=Apache License`、`test_async_tests=31`（30 + P1）、
+  `test_notify_tests=11 + 新規件数`（plan が §4.6 の件数で確定。先行チェック 1 + `wait_notifications` 4〜5 + UNLISTEN / 未 LISTEN / Mixed Case 3）、`test_decode_binary_tests=90`（88 + 2）
+- **所要見積もり**: `check` 167〜187 + ≤ 10 s（P19）。bench 2 本 ≈ 20 s + bench 環境作成 1 分（初回）。examples 格子 60 s。`test_zero_copy` 対応は 0 s（転記のみ）
+- **陽性対照を完了基準に**: P1（`probe-closefd.log` A の `TIMEOUT` → `CONNECTION`）、P4（message 長）、P6（DROP を外した scratch）、P8（`grep -c TYPE_MISMATCH` の増減）、P17（格子 15/15）
+- **README の計測環境欄（そのまま使える）**: Ubuntu 24.04.5 LTS (kernel 6.8.0-147, aarch64, 4 コア仮想マシン, 15 GiB) / Mojo 1.1.0 (8189361e) / libpq 18.6 (conda-forge) / PostgreSQL 17.11 (docker `postgres:17`) /
+  psycopg 3.3.4 + psycopg-c 3.3.4 (conda-forge, python 3.14.8) / 2026-10-NN（impl の実測日）
+- **impl への注意**: bench は `check` の直後に測らない（コンパイルの残熱で exec が 5〜10 ms 振れる）。README の数値は `scratch/turn-NNN-bench.log` から転記し、PROGRESS にパスを書く
+- **verify への注意**: Windows 照合表は URL の 12 行を TRACE と突き合わせる。`pg_database` の確認は両サーバー。README の型表は `__init__.mojo:42-62` と、`PgErrorKind` は `errors.mojo` と

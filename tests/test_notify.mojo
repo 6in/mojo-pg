@@ -375,14 +375,40 @@ def _wait_notification_error(
     raise Error("expected a PgError from wait_notification")
 
 
+def _drop_ascii_database() -> Bool:
+    """Drop `pq_test_ascii` if it is there, reporting instead of raising.
+
+    `DROP DATABASE` cannot be issued from the database it drops, nor from
+    inside a transaction block, so this opens its own synchronous connection
+    to `pq_test` and runs the one statement on it directly. `WITH (FORCE)`
+    terminates whatever is still attached.
+
+    Returns:
+        True when the statement ran, False when anything went wrong.
+
+    Notes:
+        Callers discard the result with `_ = `: a drop that failed must never
+        hide the test result that has already been established.
+    """
+    try:
+        var admin = _open(_conninfo())
+        _ = _execute(
+            admin, "DROP DATABASE IF EXISTS pq_test_ascii WITH (FORCE)"
+        )
+        _ = admin^
+    except:
+        return False
+    return True
+
+
 def _ascii_conninfo() raises -> String:
-    """Return the conninfo of the `SQL_ASCII` database, creating it if needed.
+    """Return the conninfo of the `SQL_ASCII` database, creating it fresh.
 
     `pq_test_ascii` is the only way to get bytes that are not UTF-8 out of a
     server: every other database under test is UTF-8 and rejects them on the
     way in. It is created on demand -- `pq` is superuser on both servers --
-    and left behind, so a second run reuses it (`42P04`,
-    `duplicate_database`, is the expected outcome then).
+    and dropped at the end of each test and, in case an assertion skipped
+    that, at the start of the next.
 
     The `dbname` is appended rather than substituted: libpq takes the last
     occurrence of a repeated keyword, so this redirects `PQ_TEST_CONNINFO`
@@ -392,9 +418,11 @@ def _ascii_conninfo() raises -> String:
         The conninfo of the server under test with `dbname=pq_test_ascii`.
 
     Raises:
-        Error: If the database could not be created for a reason other than
-            already existing.
+        Error: If the database could not be created. The `CREATE` follows a
+            `DROP DATABASE IF EXISTS`, so it has nothing left to collide
+            with and has to succeed.
     """
+    _ = _drop_ascii_database()
     var admin = _open(_conninfo())
     try:
         _ = admin.execute(
@@ -404,8 +432,7 @@ def _ascii_conninfo() raises -> String:
             )
         )
     except e:
-        if e.sqlstate != "42P04":
-            raise Error(String(e))
+        raise Error(String(e))
     _ = admin^
     return _conninfo() + " dbname=pq_test_ascii"
 
@@ -449,6 +476,67 @@ def _payload_at_the_limit() -> String:
     return out^
 
 
+def _wait_notifications(
+    mut conn: AsyncConnection, n: Int, timeout_ms: Int
+) raises -> List[Notification]:
+    """Wait for `n` notifications.
+
+    Args:
+        conn: The listening connection.
+        n: How many notifications to wait for.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        Exactly `n` notifications, oldest first, or everything collected when
+        the budget ran out first.
+
+    Raises:
+        Error: If `wait_notifications` raised a `PgError`.
+    """
+    try:
+        return conn.wait_notifications(n, timeout_ms)
+    except e:
+        raise Error(String(e))
+
+
+def _wait_notifications_error(
+    mut conn: AsyncConnection, n: Int, timeout_ms: Int
+) raises -> PgError:
+    """Return the `PgError` raised by a wait that must not succeed.
+
+    Args:
+        conn: The listening connection.
+        n: How many notifications the refused call asked for.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If the wait returned instead of raising.
+    """
+    try:
+        var got = conn.wait_notifications(n, timeout_ms)
+        _ = got^
+    except e:
+        return e^
+    raise Error("expected a PgError from wait_notifications")
+
+
+def _assert_timeout_too_large(error: PgError) raises:
+    """Check that `error` is the refusal of a budget above the `c_int` bound.
+
+    Args:
+        error: The error the refused call raised.
+
+    Raises:
+        Error: If the kind or the message does not hold.
+    """
+    assert_true(error.kind == PgErrorKind.USAGE, String(error))
+    assert_true(error.message.find("timeout_ms must be") >= 0, error.message)
+    assert_true(error.message.find("2147483647") >= 0, error.message)
+
+
 # --- tests -------------------------------------------------------------------
 
 
@@ -489,7 +577,7 @@ def test_a_payload_that_is_not_utf8_is_rejected_and_dropped() raises:
     # same bytes, so a notification must not quietly carry them.
     _ = _execute(sender, "NOTIFY pq_f1, E'ab\\xC3\\x28'")
     var error = _wait_notification_error(listener, 2000)
-    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
     assert_true(
         error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
     )
@@ -506,6 +594,8 @@ def test_a_payload_that_is_not_utf8_is_rejected_and_dropped() raises:
     assert_equal(got.value().channel, "pq_f1")
     assert_equal(got.value().payload, "ok")
     _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
 
 
 def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
@@ -531,13 +621,15 @@ def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
         ),
     )
     var error = _wait_notification_error(listener, 2000)
-    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
     assert_true(
         error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
     )
     assert_true(error.message.find("notification channel") >= 0, error.message)
     assert_true(listener.state() == AsyncState.IDLE)
     _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
 
 
 def test_notifications_is_empty_before_anything_is_sent() raises:
@@ -700,6 +792,293 @@ def test_notifications_reports_a_lost_connection() raises:
         error.value().kind == PgErrorKind.CONNECTION, String(error.value())
     )
     _ = killer^
+
+
+def test_a_lost_connection_is_reported_with_a_fixed_message() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_fixed")
+    var listener_pid = _async_backend_pid(listener)
+    var killer = _open(_conninfo())
+    _ = _execute(
+        killer, "SELECT pg_terminate_backend(" + String(listener_pid) + ")"
+    )
+    # Same retry as the test above: the loss is only observable once the
+    # kernel has seen the end of the stream.
+    var error = Optional[PgError](None)
+    var tries = 0
+    while tries < 20:
+        tries += 1
+        error = _notifications_error(listener)
+        if error:
+            break
+        _pause_until_readable(listener, 50)
+    assert_true(
+        Bool(error),
+        "notifications() still succeeded after " + String(tries) + " tries",
+    )
+    # Every later call has to answer with exactly the same message. libpq
+    # appends to its own error buffer, so reading `PQerrorMessage` after a
+    # lost connection grows the text on each call; the message asserted
+    # here is ours, and three calls must not make it any longer.
+    for _ in range(3):
+        var again = _notifications_error(listener)
+        assert_true(Bool(again), "notifications() succeeded after the loss")
+        assert_true(
+            again.value().kind == PgErrorKind.CONNECTION, String(again.value())
+        )
+        assert_equal(
+            again.value().message, "notifications() called on a lost connection"
+        )
+    # `wait_notification` refuses the same connection under its own name,
+    # so the message names the method the caller actually called.
+    var waited = _wait_notification_error(listener, 100)
+    assert_true(waited.kind == PgErrorKind.CONNECTION, String(waited))
+    assert_equal(
+        waited.message, "wait_notification() called on a lost connection"
+    )
+    _ = killer^
+
+
+def test_wait_notifications_collects_exactly_n() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_pair")
+    var sender = _open(_conninfo())
+    # One transaction, two distinct payloads: both are delivered together at
+    # commit -- identical payloads on one channel would be collapsed into one
+    # -- so one round trip can carry the pair.
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t5_pair, 'first'")
+    _ = _execute(sender, "NOTIFY pq_t5_pair, 'second'")
+    _ = _execute(sender, "COMMIT")
+    var found = _wait_notifications(listener, 2, 5000)
+    assert_equal(len(found), 2)
+    assert_equal(found[0].payload, "first")
+    assert_equal(found[1].payload, "second")
+    _ = sender^
+
+
+def test_wait_notifications_returns_what_it_has_on_an_expired_budget() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_short")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "NOTIFY pq_t5_short, 'only'")
+    # Three were asked for and one was sent: running out of budget is not an
+    # error, so what arrived is returned rather than raised away.
+    var t0 = monotonic()
+    var found = _wait_notifications(listener, 3, 300)
+    var took = _elapsed_ms(t0)
+    assert_equal(len(found), 1)
+    assert_equal(found[0].payload, "only")
+    assert_true(took >= 290, "gave up after only " + String(took) + " ms")
+    assert_true(took < 2000, "the wait took " + String(took) + " ms")
+    _ = sender^
+
+
+def test_wait_notifications_of_one_matches_wait_notification() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_one")
+    var sender = _open(_conninfo())
+    var sender_pid = _backend_pid(sender)
+    _ = _execute(sender, "NOTIFY pq_t5_one, 'one'")
+    var found = _wait_notifications(listener, 1, 2000)
+    assert_equal(len(found), 1)
+    assert_equal(found[0].channel, "pq_t5_one")
+    assert_equal(found[0].payload, "one")
+    assert_equal(found[0].backend_pid, sender_pid)
+    _ = sender^
+
+
+def test_wait_notifications_rejects_n_below_one() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    # `n` is how many to return, so there is no reading of zero or less that
+    # could be served: both are refused before anything is waited on.
+    var zero = _wait_notifications_error(listener, 0, 100)
+    assert_true(zero.kind == PgErrorKind.USAGE, String(zero))
+    assert_true(zero.message.find("n must be at least 1") >= 0, zero.message)
+    assert_true(zero.message.find("got 0") >= 0, zero.message)
+    var negative = _wait_notifications_error(listener, -1, 100)
+    assert_true(negative.kind == PgErrorKind.USAGE, String(negative))
+    assert_true(
+        negative.message.find("n must be at least 1") >= 0, negative.message
+    )
+    assert_true(negative.message.find("got -1") >= 0, negative.message)
+
+
+def test_wait_notifications_budget_grid() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_budget")
+    # The budget is checked before `n`, so a budget that would not survive the
+    # trip through `poll`'s `c_int` is refused whatever `n` says. 2147483648 is
+    # one past the maximum.
+    _assert_timeout_too_large(_wait_notifications_error(listener, 1, -2))
+    _assert_timeout_too_large(
+        _wait_notifications_error(listener, 1, 2147483648)
+    )
+    _assert_timeout_too_large(
+        _wait_notifications_error(listener, 1, 4294967296)
+    )
+    _assert_timeout_too_large(_wait_notifications_error(listener, 1, Int.MAX))
+    # Zero is a budget of nothing: with nothing held it answers empty at once.
+    var t0 = monotonic()
+    var none = _wait_notifications(listener, 1, 0)
+    var took = _elapsed_ms(t0)
+    assert_equal(len(none), 0)
+    assert_true(took < 50, "the zero budget took " + String(took) + " ms")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t5_budget, 'a'")
+    _ = _execute(sender, "NOTIFY pq_t5_budget, 'b'")
+    _ = _execute(sender, "COMMIT")
+    var first = _wait_notifications(listener, 1, 5000)
+    assert_equal(len(first), 1)
+    assert_equal(first[0].payload, "a")
+    # -1 is unbounded, so it is only ever called with something left to find:
+    # `b` is either already held from the round trip above or one socket wait
+    # away, and the wait returns it either way.
+    var second = _wait_notifications(listener, 1, -1)
+    assert_equal(len(second), 1)
+    assert_equal(second[0].payload, "b")
+    _ = sender^
+
+
+def test_wait_notifications_with_int_max_n_stops_at_the_budget() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_many")
+    # Nothing is ever sent, so the only thing that can end the wait is the
+    # budget: an `n` that can never be reached must not wait forever.
+    var t0 = monotonic()
+    var found = _wait_notifications(listener, Int.MAX, 200)
+    var took = _elapsed_ms(t0)
+    assert_equal(len(found), 0)
+    assert_true(took >= 190, "gave up after only " + String(took) + " ms")
+    assert_true(took < 1000, "the wait took " + String(took) + " ms")
+
+
+def test_wait_notifications_surplus_feeds_the_next_wait() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_surplus")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t5_surplus, 'one'")
+    _ = _execute(sender, "NOTIFY pq_t5_surplus, 'two'")
+    _ = _execute(sender, "NOTIFY pq_t5_surplus, 'three'")
+    _ = _execute(sender, "COMMIT")
+    var found = _wait_notifications(listener, 2, 5000)
+    assert_equal(len(found), 2)
+    assert_equal(found[0].payload, "one")
+    assert_equal(found[1].payload, "two")
+    # Whatever the collecting wait picked up beyond the two it returned is
+    # held, so this call answers from that queue instead of the socket.
+    var t0 = monotonic()
+    var third = _wait_notification(listener, 5000)
+    var took = _elapsed_ms(t0)
+    assert_true(Bool(third), "the third notification never arrived")
+    assert_equal(third.value().payload, "three")
+    assert_true(took < 50, "the queued notification took " + String(took))
+    _ = sender^
+
+
+def test_wait_notifications_keeps_collected_ones_when_a_later_one_is_rejected() raises:
+    var ascii_conninfo = _ascii_conninfo()
+    var listener = _connect_blocking(ascii_conninfo.copy(), 5000)
+    _assert_sql_ascii(listener)
+    _listen(listener, "pq_f2")
+    var sender = _open(ascii_conninfo.copy())
+    # The wait for the socket between the two separate transactions is what
+    # makes the first round trip carry `ok` alone: only then is `ok` already
+    # in `out` when the second round trip raises, which is the case the
+    # assertion is about. On a machine that delivers both in one round trip
+    # `ok` is kept through `_pending` instead, so either path answers the same.
+    _ = _execute(sender, "NOTIFY pq_f2, 'ok'")
+    _pause_until_readable(listener, 500)
+    _ = _execute(sender, "NOTIFY pq_f2, E'ab\\xC3\\x28'")
+    var error = _wait_notifications_error(listener, 2, 1500)
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
+    var kept = _notifications(listener)
+    assert_true(len(kept) >= 1, "the collected notification was lost")
+    assert_equal(kept[0].payload, "ok")
+    _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
+
+
+def test_wait_notifications_keeps_collected_ones_across_two_round_trips() raises:
+    var ascii_conninfo = _ascii_conninfo()
+    var listener = _connect_blocking(ascii_conninfo.copy(), 5000)
+    _assert_sql_ascii(listener)
+    _listen(listener, "pq_f3")
+    var sender = _open(ascii_conninfo.copy())
+    _ = _execute(sender, "NOTIFY pq_f3, 'ok'")
+    _pause_until_readable(listener, 500)
+    # The test above cannot force the two round trips: whoever delivers both
+    # notifications in one of them keeps `ok` through `notifications`' own
+    # queue rather than through the wait's. The bad one is therefore committed
+    # by a *second* connection while the wait is already running -- the sleep
+    # is sent without being awaited -- so the first round trip can only carry
+    # `ok` and the rejection can only happen once `ok` is in the wait's hands.
+    var delayed = _connect_blocking(ascii_conninfo.copy(), 5000)
+    _send(delayed, "SELECT pg_sleep(0.3); NOTIFY pq_f3, E'ab\\xC3\\x28'")
+    var error = _wait_notifications_error(listener, 2, 3000)
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
+    var kept = _notifications(listener)
+    assert_true(len(kept) >= 1, "the collected notification was lost")
+    assert_equal(kept[0].payload, "ok")
+    var results = _fetch_all(delayed, 5000)
+    assert_equal(len(results), 2)
+    _ = delayed^
+    _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
+
+
+def test_unlisten_stops_delivery() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_un")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "NOTIFY pq_t5_un, 'before'")
+    var got = _wait_notification(listener, 2000)
+    assert_true(Bool(got), "the notification never arrived")
+    assert_equal(got.value().payload, "before")
+    _send(listener, "UNLISTEN pq_t5_un")
+    var results = _fetch_all(listener, 5000)
+    assert_equal(len(results), 1)
+    # The subscription is gone, so the second NOTIFY has nobody to reach and
+    # the wait spends its budget.
+    _ = _execute(sender, "NOTIFY pq_t5_un, 'after'")
+    var late = _wait_notification(listener, 300)
+    assert_false(Bool(late), "a notification arrived after UNLISTEN")
+    _ = sender^
+
+
+def test_a_channel_not_listened_to_is_not_delivered() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_a")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "NOTIFY pq_t5_b, 'other'")
+    var other = _wait_notification(listener, 300)
+    assert_false(Bool(other), "a notification arrived from pq_t5_b")
+    # The control: the same sender on the subscribed channel does arrive, so
+    # the silence above was the channel and not the plumbing.
+    _ = _execute(sender, "NOTIFY pq_t5_a, 'mine'")
+    var mine = _wait_notification(listener, 2000)
+    assert_true(Bool(mine), "nothing arrived on the subscribed channel")
+    assert_equal(mine.value().channel, "pq_t5_a")
+    assert_equal(mine.value().payload, "mine")
+    _ = sender^
+
+
+def test_mixed_case_channel_keeps_its_case() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    # Quoted on both sides: an unquoted identifier would be folded to lower
+    # case by the server, and the name is reported back exactly as listened.
+    _listen(listener, '"Mixed Case"')
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "NOTIFY \"Mixed Case\", 'x'")
+    var got = _wait_notification(listener, 2000)
+    assert_true(Bool(got), "the notification never arrived")
+    assert_equal(got.value().channel, "Mixed Case")
+    assert_equal(got.value().payload, "x")
+    _ = sender^
 
 
 def main() raises:

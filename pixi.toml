@@ -26,6 +26,24 @@ test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
 db-up = "docker compose -f tests/docker-compose.yml up -d --wait"
 db-down = "docker compose -f tests/docker-compose.yml down -v"
+# フィクスチャ再適用（pq_test_ascii も消える）。`check` は呼ばない。
+db-reset = { depends-on = ["db-down", "db-up"] }
 check = "bash tests/final_check.sh"
 # .mojoc, not .mojopkg: Mojo 1.1.0 rejects a .mojopkg output here.
 package = "mkdir -p build && mojo precompile src/pq -o build/pq.mojoc"
+
+# psycopg 3 (conda-forge `psycopg` = pure-Python package that *requires*
+# `psycopg-c` of the same version, i.e. the C implementation) lives in its own
+# feature so the default environment -- what `pixi run check` uses -- stays
+# untouched. `solve-group = "default"` pins libpq / python to the same builds
+# in both environments, so the comparison runs against the very libpq the Mojo
+# side loads.
+[feature.bench.dependencies]
+python = ">=3.10"
+psycopg = ">=3.2"
+
+[feature.bench.tasks]
+bench-psycopg = "python examples/bench_psycopg.py"
+
+[environments]
+bench = { features = ["bench"], solve-group = "default" }

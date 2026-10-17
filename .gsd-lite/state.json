@@ -18,26 +18,26 @@
     "name": "",
     "path": "."
   },
-  "milestone": "phase4-async-cancel-notify",
-  "phase": "done",
-  "next_command": "DONE",
+  "milestone": "phase5-polish-bench-readme",
+  "phase": "verify",
+  "next_command": "/gsd-lite-verify",
   "branch": {
-    "name": "gsd-lite/phase4-async-cancel-notify",
+    "name": "gsd-lite/phase5-polish-bench-readme",
     "base": "main"
   },
   "research": {
     "targets": [
-      "similar_oss",
-      "official_docs"
+      "official_docs",
+      "similar_oss"
     ],
     "local_search_paths": [
       "~/workspaces"
     ]
   },
-  "turn": 14,
+  "turn": 13,
   "max_turns": 60,
   "retry_max": 2,
-  "verify_round": 1,
+  "verify_round": 2,
   "verify_round_max": 3,
   "model": {
     "research": "claude-fable-5-1",
@@ -46,5 +46,5 @@
     "verify": "claude-fable-5-1",
     "reflect": "claude-fable-5-1"
   },
-  "updated_at": "2026-10-17T19:29:17+09:00"
+  "updated_at": "2026-10-18T00:53:56+09:00"
 }

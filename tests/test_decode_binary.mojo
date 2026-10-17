@@ -467,7 +467,7 @@ def test_text_rejects_invalid_utf8_naming_the_byte_offset() raises:
     # `61 62 c3 28 63` is "ab" then a two-byte lead whose continuation byte
     # is "(", so the first ill-formed sequence starts at offset 2.
     var raised = _utf8_error("6162c32863", 25, 3)
-    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_equal(raised.kind, PgErrorKind.ENCODING)
     assert_true("invalid UTF-8" in raised.message, raised.message)
     assert_true("at byte 2" in raised.message, raised.message)
     assert_true("of column 3" in raised.message, raised.message)
@@ -478,7 +478,7 @@ def test_text_rejects_truncated_utf8_sequence() raises:
     # early, so the lead byte at offset 1 is the failure. Decoded without a
     # column, so the message has to say it does not know which one.
     var raised = _utf8_error_no_column("61e282", 25)
-    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_equal(raised.kind, PgErrorKind.ENCODING)
     assert_true("at byte 1" in raised.message, raised.message)
     assert_true("of column ?" in raised.message, raised.message)
 
@@ -486,7 +486,7 @@ def test_text_rejects_truncated_utf8_sequence() raises:
 def test_text_rejects_overlong_utf8_encoding() raises:
     # `c0 80` is NUL written in two bytes: decodable, but not well-formed.
     var raised = _utf8_error("c080", 25, 0)
-    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_equal(raised.kind, PgErrorKind.ENCODING)
     assert_true("at byte 0" in raised.message, raised.message)
     assert_true("of column 0" in raised.message, raised.message)
 
@@ -494,7 +494,7 @@ def test_text_rejects_overlong_utf8_encoding() raises:
 def test_text_rejects_utf8_encoded_surrogate() raises:
     # `ed a0 80` is U+D800, a UTF-16 surrogate half, which UTF-8 excludes.
     var raised = _utf8_error("eda080", 25, 1)
-    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_equal(raised.kind, PgErrorKind.ENCODING)
     assert_true("at byte 0" in raised.message, raised.message)
     assert_true("of column 1" in raised.message, raised.message)
 
@@ -519,6 +519,13 @@ def test_utf8_first_invalid_finds_each_malformed_input() raises:
     assert_true(_first_invalid("61e282") >= 0)
     assert_true(_first_invalid("c080") >= 0)
     assert_true(_first_invalid("eda080") >= 0)
+    # The four-byte boundary, where the scanner has to stop at U+10FFFF
+    # rather than at whatever four bytes can encode: `f4 90 80 80` is
+    # U+110000 and `f5` cannot lead at all, while `f4 8f bf bf` is the
+    # last code point RFC 3629 allows and has to pass.
+    assert_equal(_first_invalid("f4908080"), 0)
+    assert_equal(_first_invalid("f5808080"), 0)
+    assert_equal(_first_invalid("f48fbfbf"), -1)
     assert_equal(_first_invalid("68c3a9"), -1)
     assert_equal(_first_invalid(""), -1)
 
@@ -535,7 +542,7 @@ def test_jsonb_utf8_offset_skips_the_version_byte() raises:
     # `01 61 c3 28` is version byte 1 then `61 c3 28`, and the offset
     # counts from the JSON text, so the failure is at byte 1, not byte 2.
     var raised = _utf8_error("0161c328", 3802, 2)
-    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_equal(raised.kind, PgErrorKind.ENCODING)
     assert_true("at byte 1" in raised.message, raised.message)
     assert_true("of column 2" in raised.message, raised.message)
 

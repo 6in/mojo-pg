@@ -264,7 +264,7 @@ def _reject_bad_notification_text[
     `SQL_ASCII` database accepts `NOTIFY ch, E'ab\\xC3\\x28'` and libpq hands
     the bytes over untouched, so without this a `Notification` could carry a
     `String` that is not UTF-8 -- while `get_text` rejects the very same bytes
-    as `TYPE_MISMATCH`.
+    as `ENCODING`.
 
     The message names the offset but never the bytes, for the reason
     `_validated_utf8` gives: text that is not UTF-8 cannot be quoted in an
@@ -278,7 +278,7 @@ def _reject_bad_notification_text[
         what: Which part of the notification it is, for the message.
 
     Raises:
-        PgError: `PgErrorKind.TYPE_MISMATCH` with the message `invalid UTF-8
+        PgError: `PgErrorKind.ENCODING` with the message `invalid UTF-8
             at byte N of notification <what>` when `bytes` are not
             well-formed UTF-8.
     """
@@ -292,11 +292,11 @@ def _reject_bad_notification_text[
         # Unreachable unless the scanner and the stdlib disagree; still a
         # rejection, just without a position to name.
         raise PgError(
-            PgErrorKind.TYPE_MISMATCH,
+            PgErrorKind.ENCODING,
             String("invalid UTF-8 of notification ", what),
         )
     raise PgError(
-        PgErrorKind.TYPE_MISMATCH,
+        PgErrorKind.ENCODING,
         String("invalid UTF-8 at byte ", offset, " of notification ", what),
     )
 
@@ -591,6 +591,28 @@ struct AsyncConnection(Movable):
             raise PgError(
                 PgErrorKind.USAGE,
                 String(method, "() called while ", self._state),
+            )
+
+    def _reject_lost(self, method: StaticString) raises PgError:
+        """Raise `CONNECTION` when the connection is already known lost.
+
+        Asked before libpq is, so a caller that keeps polling a dead
+        connection gets the same message every time. libpq appends to its
+        own error buffer on every refused call, so without this the message
+        from `PQerrorMessage` grows by a `connection not open` line per
+        call -- the same failure, reported differently each time.
+
+        Args:
+            method: Name of the calling method, without parentheses.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` with `<method>() called on a
+                lost connection` when `PQstatus` is `CONNECTION_BAD`.
+        """
+        if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(method, "() called on a lost connection"),
             )
 
     def _connection_error(self) -> PgError:
@@ -903,6 +925,17 @@ struct AsyncConnection(Movable):
     def _after_send(mut self) raises PgError:
         """Flush what was just queued and move out of `IDLE`.
 
+        The `-1` branch is unreachable from a single thread. `PQflush` returns
+        `-1` only when the status is already `CONNECTION_BAD` (`fe-exec.c`),
+        and a send that fails sets `write_failed` and reports success instead
+        (`pqSendSome` returns 0; `pqsecure_raw_write` answers `n = len`,
+        `fe-misc.c` / `fe-secure.c`) -- so a `PQsendQuery` that just succeeded
+        cannot be followed by a `-1` flush. It is still answered the way libpq
+        does: libpq is in `PGASYNC_BUSY` from the moment `PQsendQuery`
+        succeeds, so `pq` moves to `BUSY` too, and a caller that ignores the
+        error and sends again gets `pq`'s own `USAGE` first rather than a
+        second libpq error.
+
         Raises:
             PgError: `PgErrorKind.CONNECTION` when `PQflush` fails outright.
         """
@@ -912,8 +945,8 @@ struct AsyncConnection(Movable):
         elif flushed == 1:
             self._state = AsyncState.SENDING
         else:
-            # -1: the command is lost along with the connection. The state is
-            # left at IDLE because there are no results to drain.
+            # -1: the command is lost along with the connection.
+            self._state = AsyncState.BUSY
             raise self._connection_error()
         self._single_row_allowed = True
 
@@ -1358,8 +1391,8 @@ struct AsyncConnection(Movable):
 
         Channel and payload are checked as UTF-8 before they become a
         `Notification`, the way `Row.get_text` checks a cell: a `SQL_ASCII`
-        database can deliver bytes that are not UTF-8, and that is a
-        `TYPE_MISMATCH` rather than a silently mangled string. Only the
+        database can deliver bytes that are not UTF-8, and that is an
+        `ENCODING` error rather than a silently mangled string. Only the
         offending notification is lost -- the connection stays usable, its
         state is untouched, and notifications already collected by the same
         call are delivered by the next one.
@@ -1370,12 +1403,15 @@ struct AsyncConnection(Movable):
 
         Raises:
             PgError: `PgErrorKind.USAGE` with `notifications() called while
-                Connecting`, `PgErrorKind.TYPE_MISMATCH` with `invalid UTF-8
+                Connecting`, `PgErrorKind.ENCODING` with `invalid UTF-8
                 at byte N of notification channel` / `... payload`, or
-                `PgErrorKind.CONNECTION` when the connection is lost,
-                carrying libpq's own message.
+                `PgErrorKind.CONNECTION` when the connection is lost --
+                `notifications() called on a lost connection` once the
+                status has turned `CONNECTION_BAD`, otherwise libpq's own
+                message.
         """
         self._reject_connecting("notifications")
+        self._reject_lost("notifications")
         if self._pq[].PQconsumeInput(self._conn) == 0:
             raise self._connection_error()
         var found = self._pending.copy()
@@ -1462,8 +1498,10 @@ struct AsyncConnection(Movable):
         really is over and the connection is `IDLE`, and only then is the
         error raised -- which is why a failing statement in the middle of a
         multi-statement `send` does not leave the connection unusable. On a
-        connection the server has dropped, draining stops as soon as libpq
-        reports the connection lost.
+        connection that is gone, draining stops at the first `CONNECTION`
+        error, whether or not `PQstatus` has turned `CONNECTION_BAD` (a
+        `close(2)`d socket is reported by libpq as a read failure with the
+        status still `OK`).
 
         An `IDLE` connection has nothing in flight, so this answers with an
         empty list rather than an error.
@@ -1520,8 +1558,15 @@ struct AsyncConnection(Movable):
                     first_error = e.copy()
                 # Keep draining: the command is over only once the NULL
                 # result has been read. A lost connection is the exception --
-                # nothing more can be read, so stop and report.
-                if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+                # nothing more can be read, so stop and report. The kind is
+                # checked as well as the status: libpq reports a read failure
+                # on a `close(2)`d descriptor without turning the status BAD,
+                # and polling a descriptor that is gone would spin until the
+                # budget ran out.
+                if (
+                    e.kind == PgErrorKind.CONNECTION
+                    or self._pq[].PQstatus(self._conn) == CONNECTION_BAD
+                ):
                     break
                 continue
             if got:
@@ -1534,15 +1579,92 @@ struct AsyncConnection(Movable):
             raise first_error.take()
         return results^
 
+    def _collect_notifications(
+        mut self, method: StaticString, n: Int, timeout_ms: Int
+    ) raises PgError -> List[Notification]:
+        """Collect up to `n` notifications on one budget.
+
+        The `notifications` / wait loop written once, for both public waits.
+        Running out of budget is **not** an error here, unlike every other
+        budget in this struct: nothing arriving is the ordinary outcome of
+        listening, so this answers with whatever it has -- between none and
+        `n - 1` of them.
+
+        A round trip can deliver more notifications than are asked for, so
+        the surplus is held on `_pending`, oldest first, and the next call
+        answers from it without touching the socket.
+
+        Args:
+            method: Name of the public method, without parentheses, for the
+                messages of the entry checks.
+            n: How many to collect before returning, at least 1.
+            timeout_ms: Milliseconds allowed for the whole collection, at most
+                `TIMEOUT_MS_MAX`. `0` looks once without waiting, `-1` waits
+                forever.
+
+        Returns:
+            The notifications collected, oldest first; fewer than `n` when the
+            budget ran out first.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `<method>() called while
+                Connecting` or when `timeout_ms` is outside
+                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.ENCODING` for a
+                notification whose text is not UTF-8 (see `notifications`),
+                or `PgErrorKind.CONNECTION` when the connection is lost --
+                `<method>() called on a lost connection` once the status has
+                turned `CONNECTION_BAD`.
+        """
+        _reject_bad_timeout(timeout_ms)
+        self._reject_connecting(method)
+        self._reject_lost(method)
+        var out = List[Notification]()
+        var deadline = monotonic() + timeout_ms * 1_000_000
+        while True:
+            var found: List[Notification]
+            try:
+                found = self.notifications()
+            except e:
+                # A rejection on a later round trip must not cost the caller
+                # the notifications of the earlier ones: what this call has
+                # collected goes back in front of `_pending`, so the next
+                # call delivers it in the order it arrived.
+                var restored = List[Notification]()
+                for i in range(len(out)):
+                    restored.append(out[i].copy())
+                for i in range(len(self._pending)):
+                    restored.append(self._pending[i].copy())
+                self._pending = restored^
+                raise e^
+            for i in range(len(found)):
+                if len(out) < n:
+                    out.append(found[i].copy())
+                else:
+                    self._pending.append(found[i].copy())
+            if len(out) >= n:
+                return out^
+            var remaining = -1
+            if timeout_ms >= 0:
+                var left = deadline - monotonic()
+                # Round up, as `fetch_all` does: a sub-millisecond remainder
+                # is still time the caller allowed.
+                remaining = (left + 999_999) // 1_000_000 if left > 0 else 0
+                if remaining <= 0:
+                    return out^
+            try:
+                self.wait_readable(remaining)
+            except e:
+                if e.kind == PgErrorKind.TIMEOUT:
+                    return out^
+                raise e^
+
     def wait_notification(
         mut self, timeout_ms: Int
     ) raises PgError -> Optional[Notification]:
         """Wait for one `LISTEN` / `NOTIFY` message and return it.
 
-        The `notifications` / wait loop written once, with a budget for the
-        whole wait. Running out of it is **not** an error here, unlike every
-        other budget in this struct: nothing arriving is the ordinary outcome
-        of listening, so it answers None.
+        `_collect_notifications` asked for one: running out of the budget is
+        not an error, it is None.
 
         A round trip can deliver several notifications at once while this
         returns one, so the surplus is held and the next call answers from it
@@ -1559,30 +1681,61 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.USAGE` with `wait_notification() called
                 while Connecting` or when `timeout_ms` is outside
-                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.TYPE_MISMATCH` for a
+                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.ENCODING` for a
                 notification whose text is not UTF-8 (see `notifications`),
-                or `PgErrorKind.CONNECTION` when the connection is lost.
+                or `PgErrorKind.CONNECTION` when the connection is lost --
+                `wait_notification() called on a lost connection` once the
+                status has turned `CONNECTION_BAD`.
+        """
+        var found = self._collect_notifications(
+            "wait_notification", 1, timeout_ms
+        )
+        if len(found) == 0:
+            return None
+        return found[0].copy()
+
+    def wait_notifications(
+        mut self, n: Int, timeout_ms: Int
+    ) raises PgError -> List[Notification]:
+        """Wait for `n` `LISTEN` / `NOTIFY` messages and return them.
+
+        One budget for the whole batch rather than one per notification, and
+        an expired budget is an answer rather than an error: a reader that
+        wants five and gets two in the time it allowed is told so, and the
+        two are real. That is what distinguishes this from a `wait_notification`
+        loop, which cannot tell a caller how much of its budget is left.
+
+        The surplus of a round trip that delivers more than `n` is held, so a
+        following `wait_notification` or `wait_notifications` answers from it
+        without waiting. `n = Int.MAX` is therefore a way to say "everything
+        that arrives within the budget" rather than an error.
+
+        Args:
+            n: How many notifications to collect, at least 1.
+            timeout_ms: Milliseconds allowed for the whole batch, at most
+                `TIMEOUT_MS_MAX`. `0` looks once without waiting, `-1` waits
+                forever.
+
+        Returns:
+            Exactly `n` notifications, oldest first, or the 0 to `n - 1` that
+            arrived before the budget ran out.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `wait_notifications: n must be
+                at least 1 (got N)` for an `n` below 1, with
+                `wait_notifications() called while Connecting`, or when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`,
+                `PgErrorKind.ENCODING` for a notification whose text is not
+                UTF-8 (see `notifications`) -- the ones already collected are
+                kept for the next call -- or `PgErrorKind.CONNECTION` when the
+                connection is lost.
         """
         _reject_bad_timeout(timeout_ms)
-        self._reject_connecting("wait_notification")
-        var deadline = monotonic() + timeout_ms * 1_000_000
-        while True:
-            var found = self.notifications()
-            if len(found) > 0:
-                for i in range(1, len(found)):
-                    self._pending.append(found[i].copy())
-                return found[0].copy()
-            var remaining = -1
-            if timeout_ms >= 0:
-                var left = deadline - monotonic()
-                # Round up, as `fetch_all` does: a sub-millisecond remainder
-                # is still time the caller allowed.
-                remaining = (left + 999_999) // 1_000_000 if left > 0 else 0
-                if remaining <= 0:
-                    return None
-            try:
-                self.wait_readable(remaining)
-            except e:
-                if e.kind == PgErrorKind.TIMEOUT:
-                    return None
-                raise e^
+        if n < 1:
+            raise PgError(
+                PgErrorKind.USAGE,
+                String(
+                    "wait_notifications: n must be at least 1 (got ", n, ")"
+                ),
+            )
+        return self._collect_notifications("wait_notifications", n, timeout_ms)

@@ -1,199 +1,229 @@
-# TRACE — phase4-async-cancel-notify
+# TRACE — phase5-polish-bench-readme
 
-- 作成: 2026-10-17 / gsd-lite-impl T8（turn 10）
-- 目的: PROGRESS を 40 行に収めるため、30 行超の表をここに置く（REQ §9）。
-  §1 は追従先チェックリストの最終実行、§2 は受け入れ基準の対応表、§3 は「未確認」行の処分。
+PROGRESS.md は 1 ターン 40 行上限なので、生の値・表・転記はここに置く（決めた事項 13）。
 
-## 1. 追従先チェックリストの最終実行
+## PLAN 訂正（turn N）
 
-スクリプト `.gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh` を **F1（turn 12）で再実行**した生の出力
-（生ログ: `scratch/turn-012-checklist.log`）。期待値は PLAN.md「追従先チェックリスト」の表。`absent` は 1 つも残っていない。
-T8（turn 10）の実行からの差は F1 が足した 5 行だけ: `init_TIMEOUT` 3 → 7、`test_poll_tests` 9 → 11、
-`test_async_tests` 29 → 30、`test_notify_tests` 9 → 11、`datetime_asia_tokyo` 2 → 3（F1 (c)⑤ の SKIP 文言に添えたコメントが当たる）。
+<!-- 1 件 1 行。`PLAN 訂正: <旧> → <新>（根拠）` の形 -->
+
+- turn 4 / PLAN 訂正: T2 (b) の docstring **16 行 → 18 行**（`src/pq/result.mojo` の `Raises:` 2 箇所、`get_text`（旧 `:557`）と
+  `get_text_slice`（旧 `:880`）が「`TYPE_MISMATCH` ... or when the cell is not valid UTF-8」と 1 つの項目で述べていた。
+  同一行 grep（`src_utf8_and_type_mismatch_same_line`）には当たらないが UTF-8 失敗を `TYPE_MISMATCH` と書いており、
+  `ENCODING` に分けた。決めた事項 3 の 16 行の列挙に漏れていただけで、要件・決定（D9）には反しない）
+- turn 4 / PLAN 訂正: T2 (c) の対象行番号 `tests/test_notify.mojo:492,534` → **`:519,563`**（T1 で同ファイルが +32 行ずれた。
+  `tests/test_decode_binary.mojo:470,481,489,497,538` は不変）
+- turn 5 / PLAN 訂正: 追従先チェックリストの `async_reject_lost_calls` の T3 期待値 **≥ 4 → 3（不変）**（PLAN の表は
+  `wait_notifications` が `_reject_lost` の 3 つ目の呼び出し元になると見込んでいたが、PLAN T3 (a) / 決めた事項 5 自身が
+  「入口検査は `_collect_notifications` の中で `_reject_lost(method)` を 1 回」「`wait_notification` は `_collect_notifications`
+  の薄いラッパ」と定めている。実装どおりに書くと呼び出し元は `notifications`（直接）と `_collect_notifications`（両公開待ちの
+  共通入口）の **2 箇所 + def 1 = 3**。表の見込みが (a) の設計と食い違っていただけで、要件・決定には反しない。
+  挙動は既存テスト `test_a_lost_connection_is_reported_with_a_fixed_message` が `wait_notification() called on a lost
+  connection` の完全一致で担保しており、`method` 経由で正しく届いている）
+- turn 5 / PLAN 訂正: T3 (c) の格子 **8 件 → 9 件**（⑧ `test_wait_notifications_keeps_collected_ones_when_a_later_one_is_rejected`
+  に加えて `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を足した。根拠は陽性対照の実測:
+  `_collect_notifications` の `except` から `out` を `_pending` に戻す 7 行を消しても ⑧ は **PASS した**
+  （`scratch/turn-005-notify-norestore.log`）。PLAN ⑧ の注が予見したとおりこのマシンは 2 件を 1 往復で届け、`ok` は
+  `notifications()` 内側の `self._pending = found^` で保全されるため、⑧ は `out` 保全を判別しない。
+  追加版は**第 3 の接続**から `SELECT pg_sleep(0.3); NOTIFY ...（不正 UTF-8）` を await せずに送り、listener が
+  `wait_notifications(2, 3000)` に入った後に commit させることで 1 往復目が `ok` だけを運ぶ形を強制する。
+  restore 7 行なしで **FAIL**（`scratch/turn-005-notify-norestore2.log`）、ありで PASS。
+  要件・決定の追加ではなく、決めた事項 5 が定めた「`out` を `_pending` の先頭に戻す」の検証手段を足しただけ）
+- turn 5 / PLAN 訂正: T3 (c) の前提「`tests/test_notify.mojo` の既存テストは 11 件」→ **12 件**
+  （T2 で足した `test_a_lost_connection_is_reported_with_a_fixed_message` を数え落としていた。
+  `test_notify_tests` = 12 + 12 = **24**。期待値 ≥ 21 の範囲内）
+- turn 6 / PLAN 訂正: 追従先チェックリストの `loader_libpq_dll` の T4 期待値 **1 → ≥ 2（実測 3）**
+  （表は RESEARCH §2.4 の「`grep -c "libpq.dll"` 0 → 1」をそのまま写していたが、PLAN T4 (c) 自身が
+  `_default_candidates` の `else` の戻り値に加えて**モジュール docstring にも**「`libpq.dll` on Windows -- the last
+  **unverified**」を書くことを完了基準にしている。実装どおりに書くと最低 2 箇所になる。実測 **2**
+  （module docstring / `_default_candidates` の `else` の戻り値）。
+  表の数え落としだけで、要件・決定には反しない。`loader_platform_map` = 0 は満たしている
+  — 当初 `_default_candidates` の docstring に「`platform_map` には `windows=` が無い」と識別子で書いて 1 件になったので、
+  同じ意味を「the stdlib's compile-time platform map」と言い換えて 0 に戻した）
+
+## `test_zero_copy` の所要
+
+転記元: `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-001-zerocopy-time.log`
+（2026-10-17 21:58 JST、pg17 54317）。**単位は 1 行目から最後まですべてミリ秒（ms）**。
+
+| 計測 | TestSuite の `Summary [ n ]` | wall（外側の計測） |
+|---|---|---|
+| `test_zero_copy`、`PQ_TEST_CONNINFO` 未設定（12 件） | 56.293 ms | 1835 ms |
+| `test_zero_copy`、`PQ_TEST_CONNINFO` 設定（`run_tests.sh` と同じ。12 件） | 48.866 ms | 1625 ms |
+| 対照 `test_result`（同じ `_connect` ヘルパ。15 件） | 65.512 ms | 1871 ms |
+| `test_zero_copy` をビルドしてバイナリで実行（12 件） | 48.829 ms | build 3140 ms / run 52 ms |
+| 対照 `test_result` をビルドしてバイナリで実行（15 件） | 71.727 ms | build 4145 ms / run 76 ms |
+
+単位の裏取り: `build/final_check.log:48` の `PASS [ 2033.338 ] test_poll_result_counts_while_sleeping`
+は `pg_sleep(2)` のテスト → `[ n ]` は秒ではなくミリ秒。
+
+**結論**: TestSuite の `[ n ]` はミリ秒。1 テスト 3.4〜3.9 ms は接続 1 本の固定費で、対照の
+`test_result` と同じ水準。REQ §1 / §4.5 が疑った「1 テスト 3.4〜3.9 秒」は単位の読み違いで、
+**直すものは無い**。wall の 1.6〜1.9 秒はほぼ `mojo run` のコンパイルで、バイナリ実行は 52〜76 ms。
+
+## `_after_send` -1 のコードレビュー
+
+`src/pq/async_conn.mojo` の `_after_send` の `else`（`PQflush` が `-1`）は**到達不能**。分岐は
+入れ（`AsyncState.BUSY` に置いてから raise）、陽性対照はテストではなくこのコードレビューで
+担保する（REQ §4.5 / RESEARCH §2.7 / 決めた事項 17）。
+
+libpq（PG18）の根拠 3 行:
+
+1. `PQflush`（`fe-exec.c`）: `if (!conn || conn->status == CONNECTION_BAD) return -1; return pqFlush(conn);`
+   → **`-1` を返すのは status が既に `CONNECTION_BAD` のときだけ**。
+2. `pqSendSome`（`fe-misc.c`）: `sock == PGINVALID_SOCKET` のとき `write_failed = true` +
+   「connection not open」+ `outCount = 0` + **`return 0`** → 送信先が無くても `-1` にならない。
+3. `pqsecure_raw_write`（`fe-secure.c`）: `EPIPE` / `ECONNRESET` / default（`EBADF` を含む）の
+   すべてで `write_failed = true` + `write_err_msg` を保存し **`n = len` を返す（成功したことにする）**
+   → 書き込みエラーは `PQflush` の戻り値に出ない。
+
+`PQsendQueryStart` は `status != CONNECTION_OK` なら 0 を返して失敗するので、`PQsendQuery` が
+成功した時点で status は `CONNECTION_OK`。同一スレッドで `PQsendQuery` と直後の `PQflush` の
+間に status が `CONNECTION_BAD` に変わる経路は無い → `_after_send` の `PQflush` は 0 か 1 のみ。
+
+実測 B（`scratch/turn-001-probe-closefd.log:10-13`）がこれを裏づける。`close(PQsocket)` した
+IDLE 接続に `send("SELECT 1")` を出しても:
 
 ```
-## T1 持ち越し整理 / blackhole / SKIP / §4.9
-params_libpq_takes_at_most=0          # 期待 0
-params_MaxAllocSize=3                 # 期待 ≥ 2
-testconn_from_the_environment=0       # 期待 0
-testconn_PGCLIENTENCODING=1           # 期待 1
-timetz_time_of_day_is_not=0           # 期待 0
-timetz_out_of_range_sites=1           # 期待 1
-datetime_is_utc_calls=2               # 期待 2
-datetime_asia_tokyo=3                 # 期待 ≥ 1
-compose_blackhole=1                   # 期待 1
-compose_54399=1                       # 期待 1
-run_tests_SKIP=2                      # 期待 ≥ 2
-run_tests_pipefail=2                  # 期待 ≥ 1
-tests_print_SKIP=5                    # 期待 ≥ 5
-leak_old_SKIP_colon=0                 # 期待 0
-string_payload_def=1                  # 期待 1
-string_payload_calls=2                # 期待 2
-jsonb_version_checks=2                # 期待 ≤ 2
-oid_varchar_checks=1                  # 期待 1
-test_decode_binary_tests=88           # 期待 ≥ 85
-test_extended_datetime_tests=19       # 期待 19
-## T2 土台: adopt_result / TIMEOUT / _ffi / _platform/poll
-conn_def_take_result=1                # 期待 1
-conn_def_error_field=0                # 期待 0
-result_def_adopt_result=1             # 期待 1
-result_def_error_field=1              # 期待 1
-result_SINGLE_TUPLE=3                 # 期待 ≥ 1
-conn_adopt_result_calls=1             # 期待 1
-errors_TIMEOUT=3                      # 期待 ≥ 2
-errors_six=0                          # 期待 0
-init_exactly_six=0                    # 期待 0
-init_TIMEOUT=7                        # 期待 ≥ 1
-ffi_PQsetSingleRowMode=3              # 期待 3（T2 で 2 → 3 に訂正済み）
-ffi_PQconnectStart_plain=1            # 期待 1
-testffi_PQsetSingleRowMode=1          # 期待 1
-testffi_PQconnectStart_plain=1        # 期待 1
-testffi_symbol_count_53=0             # 期待 0
-testffi_symbol_count_55=1             # 期待 1
-platform_init=exists                  # 期待 exists
-platform_poll=exists                  # 期待 exists
-poll_def_poll_socket=1                # 期待 1
-poll_comptime_if=1                    # 期待 ≥ 1
-poll_WSAPoll=10                       # 期待 ≥ 1
-poll_EINTR=3                          # 期待 ≥ 1
-poll_monotonic=4                      # 期待 ≥ 1
-poll_external_call_symbols=2          # 期待 ≤ 3
-test_poll=exists                      # 期待 exists
-test_poll_tests=11                    # 期待 ≥ 7（F1 で +2）
-## T3 / T4 AsyncConnection
-async_conn=exists                     # 期待 exists
-async_struct=1                        # 期待 1
-async_state_struct=1                  # 期待 1
-pollstate_struct=1                    # 期待 1
-notification_struct=1                 # 期待 1
-async_public_defs=27                  # 期待 ≥ 20
-async_called_while=7                  # 期待 ≥ 6
-async_cancel_insecure=2               # 期待 ≥ 1
-init_async_import=1                   # 期待 1
-conn_phase4_future=0                  # 期待 0
-init_phase4=1                         # 期待 1
-src_PQfinish_calls=5                  # 期待 ≥ 3
-src_PQfreemem_calls=3                 # 期待 3
-src_PQfreeCancel_calls=1              # 期待 1
-src_PQexec_calls=4                    # 期待 4
-test_async=exists                     # 期待 exists
-test_async_tests=30                   # 期待 ≥ 20（F1 で +1）
-test_notify=exists                    # 期待 exists
-test_notify_tests=11                  # 期待 ≥ 8（F1 で +2）
-example_async=exists                  # 期待 exists
-example_notify=exists                 # 期待 exists
-pixi_example_tasks=2                  # 期待 2
-final_check_examples=2                # 期待 2
-final_check_run_logged_examples=5     # 期待 5
-## T6 leak
-leak_tests=18                         # 期待 18
-leak_Fourteen=0                       # 期待 0
-leak_async_import=13                  # 期待 ≥ 1
-## T7 UTF-8
-utf8_unsafe_span=0                    # 期待 0
-result_unsafe_ptr=6                   # 期待 6
-utf8_from_utf8=2                      # 期待 ≥ 2
-utf8_scanner_def=1                    # 期待 1
-utf8_invalid_message=3                # 期待 ≥ 1
-docs_not_validated=0                  # 期待 0
-test_decode_binary_utf8_tests=8       # 期待 ≥ 5
-## 全体
-src_def_ref_return=0                  # 期待 0
-tests_files_count=24                  # 期待 24
-test_file_count=24                    # 期待 24
+B send succeeded; BUSY: True SENDING: False
+B state IDLE: False
+B PQstatus BAD: False
+B PQflush: 0
 ```
 
-**全 85 行が期待値に到達**（`absent` 0 件、下回る行 0 件）。
+送信は「成功」し、`PQflush` は 0、status は OK のまま。
 
-## 2. 受け入れ基準の対応表（REQ §5）
+**なぜ `BUSY` に置くか**: libpq は `PQsendQuery` が成功した時点で `PGASYNC_BUSY`
+（`pqAppendCmdQueueEntry`）。`pq` も `BUSY` に揃えておけば、エラーを無視して次に `send` した
+呼び出し元は libpq の「another command is already in progress」より先に `pq` 自身の `USAGE`
+（`send() called while Busy`）を受け取る。Phase 4 の「left at IDLE because there are no results
+to drain」というコメントは、到達不能な分岐で状態を libpq とずらす理由にならないので消した。
 
-### 2.1 §5.1 — HANDOFF §10 Phase 4 の 4 件
+## Windows 照合表（`_platform/poll.mojo` の `else` 分岐）
 
-| REQ §5.1 | 担うテスト関数 / コマンド | PASS |
-|---|---|---|
-| `pg_sleep(2)` 送信中に他の処理（カウンタ）が進む | `test_poll_result_counts_while_sleeping`（`tests/test_async.mojo:1071`）。判定は「カウンタ ≥ 1 **かつ** 経過 ≥ 2,000 ms」 | turn 5（T3 ④） |
-| `cancel()` で `pg_sleep(10)` が 1 秒以内に中断、SQLSTATE `57014` | `test_cancel_stops_a_running_statement`（`tests/test_async.mojo:1199`）。cancel 発行から raise まで < 1,000 ms を断定 | turn 6（T4 (b) ①） |
-| 別接続からの `NOTIFY ch, 'payload'` を受け取れる | `test_wait_notification_receives_both_payloads`（`tests/test_notify.mojo:373`）。2 件の payload と `backend_pid` 一致 | turn 6（T4 (c) ①） |
-| 応答しない接続先でタイムアウト付きの待ちが規定時間で戻る | `test_connect_blocking_times_out`（`tests/test_async.mojo:1131`、blackhole 54399）+ `wait_readable(50)` の `TIMEOUT` | turn 5（T3 ⑦） |
+RESEARCH §2.3 の照合表をそのまま写した（turn 6 / T4）。一次資料:
 
-### 2.2 §5.2 — 堅牢性の 4 項目
+- [F] https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll （WSAPoll function）
+- [S] https://learn.microsoft.com/en-us/windows/win32/api/winsock2/ns-winsock2-wsapollfd （WSAPOLLFD structure）
+- [E] https://learn.microsoft.com/en-us/windows/win32/winsock/windows-sockets-error-codes-2 （Windows Sockets Error Codes）
+- [H] https://raw.githubusercontent.com/mirror/mingw-w64/master/mingw-w64-headers/include/winsock2.h （フラグの数値。MS Learn には数値が無い）
 
-| REQ §5.2 | 担うテスト関数 / コマンド | PASS |
-|---|---|---|
-| 状態 9 種 × 入力でクラッシュせず `PgError` | 未接続: `test_send_while_connecting_is_usage`（`send`）/ `test_every_call_while_connecting_is_usage`（`cancel` / `consume_input` / `poll_result` / `notifications` / `fetch_all` の 5 本、いずれも握手は壊れない）。接続ポーリング中: `test_manual_connect_polling` / `test_connect_failures_name_their_cause`（3 種）。送信中・結果待ち: `test_send_while_a_command_is_in_flight_is_usage` / `test_a_large_statement_is_written_in_instalments`。結果取得後: `test_send_between_two_results_is_usage` / `test_single_row_mode_outside_its_window_is_usage`。切断: `test_a_terminated_backend_ends_the_command` / `test_cancel_after_the_backend_is_gone_is_connection` / `test_notifications_reports_a_lost_connection`。cancel 後: `test_cancel_inside_a_transaction_still_owes_a_rollback` / `test_cancel_while_idle_is_a_no_op`。タイムアウト後: `test_connect_blocking_times_out` / `test_a_budget_below_minus_one_is_usage` / `test_an_idle_connection_has_nothing_to_collect`。未読結果ありの drop: `test_dropping_a_connection_with_unread_results_is_safe` | turn 5〜7（T3 ⑨ / T4 / T5） |
-| `PQfinish` / `PQclear` / `PQfreeCancel` / `PQfreemem` が正常系・異常系で呼ばれ二重解放しない | `test_async_execute_does_not_leak`（10,000 回）/ `test_async_cancel_does_not_leak`（1,000 回）/ `test_notify_receive_does_not_leak`（1,000 回）/ `test_async_drop_with_pending_results_does_not_leak`（1,000 回）。呼び出し本数はチェックリスト `src_PQfinish_calls=5` / `src_PQfreemem_calls=3` / `src_PQfreeCancel_calls=1` | turn 8（T6） |
-| `AsyncConnection` は `Movable` のみ | `grep -c 'Copyable' src/pq/async_conn.mojo` = **2**: `struct Notification(Copyable, ...)`（`:196`）と、`AsyncConnection` の docstring が「`Movable` and not `Copyable`」と述べる 1 行（`:43`）。`struct AsyncConnection(Movable)`（`:277`）に `Copyable` は無い。**PLAN 訂正**: 表の「`Notification` の 1 行だけ」は docstring の 1 行を数え落としたもの | turn 5（T3 (a)） |
-| 10,000 回の非同期 execute と 1,000 回の NOTIFY 受信で RSS が単調増加しない | 上の 4 ループ（`MAIN_ITERATIONS = 10000` / `ERROR_ITERATIONS = 1000`、`TOLERANCE_PAGES = 256`） | turn 8（T6） |
-
-### 2.3 §5.3 — リーク測定方式
-
-| REQ §5.3 | 担うテスト関数 / コマンド | PASS |
-|---|---|---|
-| `mojo build` したバイナリで実行、`check` は 1 サーバー | `tests/run_tests.sh:90`（`build/test_leak`）、`tests/final_check.sh:133`（`PQ_TEST_LEAK_SERVERS=1`） | turn 3 以降 毎ターン |
-| `TOLERANCE_PAGES = 256` は恒久仕様 | `tests/test_leak.mojo`（変更なし） | — |
-| 新しい解放経路の陽性対照を同ターンで実測 | `PQfreemem`（`PGnotify`）除去 → `test_notify_receive_does_not_leak` が FAIL（turn 8 PROGRESS にサンプル列）。`PQfreeCancel` 除去は**フラットのまま = 陽性対照にならない**（`PGcancel` は数百 byte で RSS に出ない）。§3 の ④ として「契約外」に分類し、コードレビューで担保 | turn 8（T6 (b)） |
-
-### 2.4 §5.4 — 品質基準の 5 項目
-
-| REQ §5.4 | コマンド / 確認 | PASS |
-|---|---|---|
-| `pq` 直下の公開 struct / メソッドに docstring | `pixi run check` 3/6 段（`--diagnose-missing-doc-strings`、`_ffi` 除外）が **0** | turn 10（T8） |
-| `pixi run fmt` で差分なし | `52 files left unchanged` | turn 10（T8） |
-| `examples/async_query.mojo` / `listen_notify.mojo` が単体で実行できる | `pixi run example-async` / `pixi run example-notify`（`pixi.toml`）、`check` 4/6 段にも 2 行 | turn 10（T8）/ turn 6（T4 (d)） |
-| `pixi run package` が通る | 警告ゼロ | turn 10（T8） |
-| `pixi run check` が全段 PASS | 6/6（`final_check: PASS`、18:31:40 → 18:34:40 = **180 s**。6/6 段の `matched lines ... : 0`） | turn 10（T8） |
-
-`pixi run test`（両サーバー、T8 で再実行）: 18:26:15 → 18:31:29 = **314 s**、exit 0、
-**48 サマリすべて `0 failed`**（`grep 'tests run' | grep -vc ' 0 failed'` = 0）、
-SKIP 集計行は `-- 127.0.0.1:54317 skipped 1` と `-- 127.0.0.1:54314 skipped 1` の 2 本。
-examples の単体実行: `pixi run example-async` → `n = 1` / `empty polls while waiting = 19`、
-`pixi run example-notify` → `channel = pq_example` / `payload = hello from pq` / `backend_pid = 1541121`。
-
-### 2.5 §4.8 / §4.9 / §4.10 の担当タスク
-
-| REQ | 担うもの | PASS |
-|---|---|---|
-| §4.8 SKIP 集計 | `tests/run_tests.sh` の `tee` + `${PIPESTATUS[0]}` + `-- <label> skipped N`。陽性対照は port=1 での exit code ≠ 0 | turn 3（T1 (f)(g)） |
-| §4.9 文字列系 OID 判定の一元化 | `decode_binary._string_payload`（`decode_binary[String]` と `Row.get_text` の 2 呼び出し）+ 単体 1 件 | turn 3（T1 (h)） |
-| §4.10 UTF-8 検証 | `_utf8_first_invalid` / `_validated_utf8`、`String` になる 3 経路、`test_decode_binary.mojo` の 8 件 | turn 9（T7） |
-
-## 3. PROGRESS の「未確認」行の処分（REQ §9 impl 項目）
-
-PROGRESS 全 9 ターンの「未確認」行を列挙し、各行を **テスト追加 / 契約外 / verify 申し送り** のいずれか 1 つに振り分けた。
-「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べた行は**残っていない**（下表の「性質」列）。
-
-| # | 未確認の内容（初出） | 性質 | 処分 | 根拠 |
+| # | 項目 | poll.mojo の現状 | 根拠 | 判定 |
 |---|---|---|---|---|
-| 1 | `"x" * 16000000` の形の文字列反復が Mojo 1.1.0 にあるか（turn 2） | 実装手段の選択 | **テスト追加（済）** | `test_a_large_statement_is_written_in_instalments`（`test_async.mojo:1441`）が 16 MB 文を送る。turn 7 で実装手段ごと決着 |
-| 2 | `PGcancel` の確保サイズが leak の陽性対照に出るか（turn 2） | 測定の検出力 | **契約外** | turn 8 実測: `PQfreeCancel` を消してもフラット（数百 byte は RSS に出ない）。§2.3 に記載 |
-| 3 | `poll.mojo` の Windows 分岐（`WSAPoll` / 16 byte / 別定数）がコンパイルされていない（turn 4） | 他 OS での可動性 | **verify 申し送り** | `comptime if` の非選択側。モジュール docstring に **unverified** と明記済み（`_platform/poll.mojo:17-23`、P8）。Phase 5「Windows 用コードパスのレビュー」が引き取る |
-| 4 | `EINTR` の実挙動（シグナル下での再試行）（turn 4） | 到達困難な分岐 | **契約外** | RESEARCH §2.3 の方針どおりテストしない。コードレビューで担保: `_platform/poll.mojo:236`（`err == ErrNo.EINTR`）と `:228,238`（`monotonic()` の締め切りからの残り ms 再計算） |
-| 5 | `_after_send` で `PQflush` が -1 を返したときに状態を `IDLE` のままにしている（turn 6） | 到達困難な分岐 | **契約外** | turn 7 の T5 ④（切断テスト）でも再現せず。libpq に -1 を返させる条件（送信途中の切断）を同一スレッドから作れない。状態機械は壊れない（結果が無いので drain 不要） |
-| 6 | `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）（turn 6） | 到達困難な分岐 | **契約外** | turn 7 の T5 ②（切断後 cancel）は `PQgetCancel` が NULL を返す側に当たった。どちらに転んでも `CONNECTION` なので誤値は返らない |
-| 7 | `PQsetSingleRowMode` が 0 を返す経路（turn 6） | 到達困難な分岐 | **契約外** | クライアント側ガード（`_single_row_allowed`）を通った後は libpq が 0 を返さない（決めた事項 12）。返っても `USAGE` 同文 |
-| 8 | `PQfreeCancel` 欠落の陽性対照が見えない（turn 8） | 測定の検出力 | **契約外** | #2 と同一事象。コードレビュー担保（`src_PQfreeCancel_calls=1`） |
-| 9 | `_validated_utf8` の「スキャナが -1 を返した（stdlib と食い違った）」分岐（turn 9） | 到達不能な分岐 | **契約外** | `decode_binary.mojo:339-345`（`if offset < 0:` の分岐）。どちらに転んでも `TYPE_MISMATCH` を投げる（位置が出ないだけ）ので誤値は返らない |
-| 10 | `test_zero_copy` が 1 テスト 3.4〜3.9 s かかる原因（turn 9） | 性能の未調査 | **verify 申し送り** | turn 9 に A/B 済み（Phase 4 以前からの既存の性質。接続あたりの固定費）。正しさには影響しない。Phase 5 の「ベンチマーク」が引き取る |
+| 1 | `WSAPOLLFD` = `{ SOCKET fd; SHORT events; SHORT revents; }`、`SOCKET` = `UINT_PTR`（x64 で 8 byte）→ 16 byte | `_WsaPollFd(fd: Int, events: Int16, revents: Int16)`、`size_of` = 16（実測） | [S] 構造体定義、[H] typedef、`probe-lang.log` | **一致** |
+| 2 | `POLLRDNORM 0x0100`、`POLLRDBAND 0x0200`、`POLLIN = RDNORM\|RDBAND = 0x0300`、`POLLWRNORM 0x0010 = POLLOUT`、`POLLERR 0x0001`、`POLLHUP 0x0002`、`POLLNVAL 0x0004` | `_WSA_POLLIN 0x0300`、`_WSA_POLLOUT 0x0010`、`_WSA_POLLERR 0x0001`、`_WSA_POLLHUP 0x0002`、`_WSA_POLLNVAL 0x0004` | [H] `#define` 行、[S]「POLLIN は RDNORM と RDBAND の組」 | **一致** |
+| 3 | `events` に置けるのは `POLLPRI` / `POLLRDBAND` / `POLLRDNORM` / `POLLWRNORM` のみ。他の値は `SOCKET_ERROR` + `WSAEINVAL`。`POLLPRI` は MS プロバイダで失敗 | ERR / HUP / NVAL を `events` に入れない（docstring 明記）、`POLLPRI` を使わない | [F] Remarks、[S] events | **一致**（`POLLRDBAND` を要求するのは許容範囲。`0x0100` だけにする案は任意） |
+| 4 | `timeout`（INT）: > 0 は ms、0 は即時、< 0 は無期限 | `c_int(timeout_ms)`、-1 で無期限 | [F] Parameters / Remarks | **一致** |
+| 5 | 戻り値: 0 = タイムアウト、> 0 = `revents` 非 0 の要素数、`SOCKET_ERROR`(-1) = 失敗 | `ret == 0` → timeout、`ret < 0` → エラー、それ以外は flags | [F] Return value | **一致** |
+| 6 | **失敗理由は `WSAGetLastError()`**（`ws2_32.dll`）。Winsock は errno を設定しない。`WSAEINVAL` 10022 / `WSAENOTSOCK` 10038 / `WSAEBADF` 10009 / `WSAEFAULT` 10014 / `WSAENETDOWN` 10050 / `WSAENOBUFS` 10055 / `WSANOTINITIALISED` 10093 / `WSAEINTR` 10004（`WSACancelBlockingCall` 時のみ） | `poll_socket` が `get_errno()` → `ErrNo.EINTR` / `EBADF` / `EINVAL` を見る（POSIX の値 4 / 9 / 22） | [E] 冒頭「WSAGetLastError を直後に呼ぶ」+ 一覧、[F] Return value「Call the WSAGetLastError function」 | **不一致 → 直す**。`_poll_once` の `else` 分岐で `external_call["WSAGetLastError", c_int]()` を読み、10022 / 10038 / 10009 → `USAGE`、それ以外 → `CONNECTION`、`EINTR` 再試行はしない（§3-2 の形） |
+| 7 | `revents` の `POLLNVAL` = 無効なソケット。`fd` が負の要素は無視され `revents` は [F] では `POLLNVAL`、[S] では「クリア」（**公式同士で食い違い**） | `POLLNVAL` → `USAGE`（`poll: fd N is not open`） | [F] Remarks 末尾、[S] Remarks | **一致**（`PQsocket` = -1 のときは [F] なら `USAGE`、[S] なら要素 0 個扱いで `WSAEINVAL`「none of the sockets valid」→ #6 修正後は同じ `USAGE`） |
+| 8 | **Windows 10 2004 以降**、TCP 接続失敗は `POLLHUP \| POLLERR \| POLLWRNORM` で通知。それ以前は通知されない（既知の仕様差） | 非同期接続は `wait_writable` で待つ → 古い Windows では接続失敗が予算切れ（`TIMEOUT`）まで分からない | [F] Remarks の Note | **README に明記**（コード変更なし。「Windows 10 2004 より前は接続失敗の検出がタイムアウト頼み」） |
+| 9 | `WSAPoll` は Vista 以降、`Ws2_32.dll`、`WSAAPI` = `WINAPI`（x64 では既定の呼出規約と同一） | `external_call["WSAPoll", c_int](Pointer, Int(1), c_int)` | [F] Requirements、[H] `#define WSAAPI WINAPI` | **一致**（x64 前提。シンボル解決は未検証のまま） |
+| 10 | `nfds` は `ULONG`（32 bit） | `Int(1)`（64 bit） | [F] Syntax | **許容**（x64 ABI は下位 32 bit を使う。POSIX 側の `nfds_t` も 64 bit で同じ書き方） |
+| 11 | `WSAStartup` 未実行だと `WSANOTINITIALISED` 10093 | `poll_socket` は libpq の `PQsocket` にしか使わない。libpq は接続開始時に `WSAStartup` を呼ぶ（fe-connect.c、`#ifdef WIN32`。未取得） | [E] 10093 | **一致の見込み**（docstring に「libpq の socket 以外に使う場合は WSAStartup が要る」を 1 行） |
+| 12 | `SOCKET` は符号なし、`PQsocket` は `int` | `fd: Int` | libpq の `PQsocket` は `int` を返す（全 OS） | **一致** |
 
-## 4. F1（verify round 1 の差し戻し）の期待結果 7 件（turn 12）
+**#6 を直した**（`_poll_once` が `Tuple[Int, Int, Int]`（ret, flags, err）を返し、err は POSIX なら
+`get_errno().value`、Windows なら `WSAGetLastError()`。分類は `_is_interrupted`（Windows は常に False）と
+`_is_usage_error`（Windows は 10009 / 10022 / 10038）の 2 ヘルパ。message は `poll failed: errno <N>`）。
+**#8 / #11 は docstring と README**（コード変更なし。docstring はモジュール冒頭の Windows 注記に入れた。
+README は T6）。他の 10 行は一致のまま、コードは触っていない。
 
-PLAN F1「期待結果」の表の各行と、それを担うテスト。
+`else` 分岐の複製ビルド（T4 (d)、P12）:
 
-| # | 担うテスト関数 / 実測 | PASS |
-|---|---|---|
-| 1 | `test_timeout_above_c_int_max_is_rejected`（`test_poll.mojo`、経過 < 100 ms）/ `test_a_budget_above_c_int_max_is_usage_at_every_entry`（`test_async.mojo`、`wait_readable` / `fetch_all` / `wait_notification` / `connect_blocking` の 4 入口） | turn 12 |
-| 2 | `test_timeout_at_c_int_max_is_accepted`（1 byte 書いた pipe、`readable=True`・経過 < 100 ms） | turn 12 |
-| 3 | 既存の `test_timeout_below_minus_one_is_rejected` / `test_a_budget_below_minus_one_is_usage`（部分文字列 `"timeout_ms must be"` のまま無変更） | turn 12 |
-| 4 | `test_a_payload_that_is_not_utf8_is_rejected_and_dropped`（`TYPE_MISMATCH` / `invalid UTF-8 at byte 2` + `notification payload` / `"ab"` を含まない / `state()` = Idle） | turn 12 |
-| 5 | 同テスト後半（`NOTIFY pq_f1, 'ok'` が届く） | turn 12 |
-| 6 | 既存の `test_payload_survives_the_byte_limit_and_utf8`（`héllo`、期待値変更ゼロ） | turn 12 |
-| 7 | 4・5 とも `wait_notification` 経由（`None` に写らず `TYPE_MISMATCH` が伝播） | turn 12 |
+```
+pixi run mojo build -I src .gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-006-win-typecheck.mojo -o build/win-typecheck
+```
 
-陽性対照（`_reject_bad_notification_text` の先頭に `if True: return` を入れたコピーで 1 回実測し、すぐ戻した）:
-`scratch/turn-012-ascii-notify.mojo` が `notification payload bytes: 0x61 0x62 0xc3 0x28  byte_length 4` を印字。
-検査を戻すと同じプローブが `PgError(kind=TypeMismatch, message=invalid UTF-8 at byte 2 of notification payload)`。
+→ **出力ゼロ・exit 0 で `build/win-typecheck`（74,472 bytes）が生成された**。`_WsaPollFd` と `_WSA_POLL*`、
+`_poll_once` の `else` 本体、`_is_interrupted` / `_is_usage_error` の Windows 側を `comptime if True:` 側に
+複製したもので、型検査だけでなくリンクも通った（`external_call` は実行時解決なので Linux に `WSAPoll` /
+`WSAGetLastError` が無くてもリンクは成功する）。**実行はしていない**（`main` は `size_of` を出すだけだが
+PLAN T4 (d) のとおり走らせない。`size_of(_WsaPollFd)` = 16 は RESEARCH の `probe-lang.log` が実測済み）。
+Windows 実機での動作は依然として未検証（REQ §3）。
 
-契約外の提案（サブエージェントが挙げ、実装しなかったもの。Phase 5 以降の判断）:
-`AsyncConnection.wait_notifications(n, timeout_ms)` / `notifications()` 側での `PQstatus == CONNECTION_BAD` 先行チェック /
-`UNLISTEN` 後に来ないことのテスト / LISTEN していないチャンネルの無視 / `LISTEN "Mixed Case"` /
-`f4 90 80 80` と `f5 80 80 80` の 4 バイト境界をスキャナの単体に足す案 / 検証失敗に専用の `PgErrorKind.ENCODING` を作る案。
+## examples 堅牢性の格子
+
+<!-- T7 (b)。REQ §5 堅牢性（D4）/ P17 -->
+
+スクリプト `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-009-examples-robust.sh`
+（turn 1 のプローブ 15 本に `bench_psycopg` の badpw / badport 2 本を足した 17 本）。
+生ログ `scratch/turn-009-examples-robust.log`（2026-10-18 00:18、`pixi run check` の後）。
+判定は 3 つ: `rc=1` / `unhandled_markers=0`（`traceback|unhandled|abort|segfault|core dumped|fatal error` を
+大小無視で grep）/ 出力が `failed: ...` の 1 レコード。
+
+- `BADPW` = `host=127.0.0.1 port=54317 user=pq password=wrong dbname=pq_test`
+- `BADPORT` = `host=127.0.0.1 port=54390 user=pq password=pq dbname=pq_test connect_timeout=3`
+
+| # | ケース | rc | lines | unhandled | 出力の 1 行目 |
+|---|---|---|---|---|---|
+| 1 | `basic` badpw | 1 | 2 | 0 | `failed: PgError(kind=Connection, message=connection to server ... password authentication failed ...)` |
+| 2 | `basic` badport | 1 | 3 | 0 | `failed: PgError(kind=Connection, ... Connection refused` + libpq のヒント行） |
+| 3 | `params` badpw | 1 | 2 | 0 | 同上（`kind=Connection`） |
+| 4 | `params` badport | 1 | 3 | 0 | 同上 |
+| 5 | `binary` badpw | 1 | 2 | 0 | 同上 |
+| 6 | `binary` badport | 1 | 3 | 0 | 同上 |
+| 7 | `async_query` badpw | 1 | 2 | 0 | 同上 |
+| 8 | `async_query` badport | 1 | 3 | 0 | 同上 |
+| 9 | `listen_notify` badpw | 1 | 2 | 0 | 同上 |
+| 10 | `listen_notify` badport | 1 | 3 | 0 | 同上 |
+| 11 | `bench_formats` badpw | 1 | 2 | 0 | 同上 |
+| 12 | `bench_formats` badport | 1 | 3 | 0 | 同上 |
+| 13 | `hello_libpq` nolib（`PQ_MOJO_LIBPQ=/nonexistent/libpq.so`） | 1 | 1 | 0 | `failed: PgError(kind=LibpqLoad, message=libpq not found. tried: /nonexistent/libpq.so: dlopen failed ...)` |
+| 14 | `basic` 不正 conninfo（`port=abc`） | 1 | 2 | 0 | `failed: PgError(kind=Connection, message=invalid integer value "abc" for connection option "port")` |
+| 15 | `basic` nolib | 1 | 1 | 0 | `failed: PgError(kind=LibpqLoad, ...)` |
+| 16 | `bench_psycopg` badpw | 1 | 2 | 0 | `failed: OperationalError connection failed: ... FATAL:  password authentication failed for user "pq"`（1 行目は pixi のタスクバナー） |
+| 17 | `bench_psycopg` badport | 1 | 3 | 0 | `failed: OperationalError connection failed: ... Connection refused` + libpq のヒント行 |
+
+**結果 17/17**: 全行 `rc=1` かつ `unhandled_markers=0`。`Traceback` / `Unhandled` / `stack trace` は 1 行も出ていない
+（`lines` の 2〜3 は libpq 自身が message に含める改行・ヒント行と pixi のバナーで、レコードは 1 件。PLAN T5 (c) の訂正と同じ判定）。
+examples 7 本（`hello_libpq` を含む）と bench 2 本（Mojo の `bench_formats`、psycopg）がすべて `PgError` /
+`psycopg.Error` を印字して終了コード 1 で終わる。この格子は `check` に入れていない（決めた事項 / RESEARCH §3-9:
+`check` に + 70 s 載せない）ので、verify は上記スクリプトを再実行して再現できる
+（PLAN の見積もり ≈ 70 s。今回はログの書き込み完了が 00:18:24、起動が 00:17:45 以降なので **40 s 弱**）。
+
+## 受け入れ基準対応表
+
+<!-- T7 (d)。HANDOFF §10 Phase 5 の 3 項目 + REQ §5 の各行 -->
+
+| 受け入れ基準（出典） | 担保したタスク | テスト / 検査 | ログ |
+|---|---|---|---|
+| HANDOFF §10-1: ベンチマーク結果が README にある | T5 (d) + T6 (b) | `README.md` §6（Mojo / psycopg × text / binary、3 回の値を `a / b / c`、計測環境 + 日付 + 再現手順）。12 セルを原本ログと 1 つずつ照合（turn 8） | `scratch/turn-007-bench.log`（原本・pass 1）、`turn-007-bench-first.log` |
+| HANDOFF §10-2: `examples/` が全部実行できる | T1 (g) + T6 (c) + T7 (a)(b) | `check` 4/6 段が 5 本を実行、`pixi run hello-libpq` と `pixi run bench`/`bench-psycopg` は `check` 外で別途。7 本すべて docstring に `pixi run <task>`（`examples_pixi_run` = 7） | `scratch/turn-009-check.log`、`turn-008-hello.log`、`turn-007-bench.log` |
+| HANDOFF §10-3: Windows 用コード（`WSAPoll`、DLL 名）が存在し、未検証であることが README に明記 | T4 (a)(b)(c)(e) | `poll.mojo` の `WSAPoll` / `WSAGetLastError` / 10009・10022・10038 分類、`loader.mojo` の `libpq.dll`、TRACE 照合表 12 行 + URL 4 本、`README.md` §8（`readme_unverified_windows` = 3） | `scratch/turn-006-win-typecheck.log`、`turn-009-checklist.log` |
+| REQ §5 共通: `pixi run check` が PASS（fmt / precompile / docstring / examples / tests 両サーバー / 警告ゼロ） | T7 (a) | `pixi run check` 6/6 PASS（`final_check: PASS`）。`pixi run test` も両サーバー PASS（leak 両方） | `scratch/turn-009-check.log`、`turn-009-test.log` |
+| REQ §5 堅牢性（D4）: DB 未起動・認証失敗・切断・不正引数でトレースバックを出さず、既存データを失わない。examples / bench は `PgError` を印字して exit 1 | T1 (g) + T5 (c) + T7 (b) + T3 (a) | 格子 17 本が全行 `rc=1` / `unhandled_markers=0`。既存データの保全は `wait_notifications` の `out` 復元テスト ⑧⑨（`test_notify.mojo`）と `_drop_ascii_database` の「失敗を握って元の結果を隠さない」形で担保 | `scratch/turn-009-examples-robust.log`、`turn-007-bench-robust.log`、`turn-005-notify-norestore2.log` |
+| REQ §5 持ち越し: `fetch_all` が `kind == CONNECTION` で打ち切る | T1 (a)(b) | `test_fetch_all_stops_draining_on_a_closed_socket`（`tests/test_async.mojo`。修正前は 2000 ms 後に `TIMEOUT` で FAIL = 陽性対照） | `scratch/turn-001-probe-closefd.log`、`turn-003-check.log` |
+| REQ §5 持ち越し: `PQflush` -1 の分岐がコードにある（到達困難ならレビューで担保し TRACE に記載） | T1 (c) | TRACE「`_after_send` -1 のコードレビュー」節（libpq 根拠 3 行）。`async_after_send_PGASYNC_BUSY` ≥ 1 / `left_at_idle` = 0 | `scratch/turn-003-checklist.log`、`turn-009-checklist.log` |
+| REQ §5 持ち越し: `test_notify` 実行後に `pq_test_ascii` が残らない | T1 (d)(e) + T7 (c) | `_drop_ascii_database()` を先頭と末尾（`WITH (FORCE)`）。`docker exec psql ... pg_database` が pg17 / pg14 とも 0 行（turn 3・4・5・6 と T7 で再確認）。陽性対照は末尾 DROP を外した scratch が 1 行残すこと | `scratch/turn-003-{db-reset,check}.log`、`turn-009-pgdatabase.log` |
+| REQ §5 持ち越し: `test_zero_copy` の原因が TRACE に記録されている | T1 (h) | TRACE「`test_zero_copy` の所要」節（5 行の表、単位 ms、結論「接続 1 本の固定費。直すものは無い」） | `scratch/turn-001-zerocopy-time.log` |
+| REQ §5 契約外提案: 新テストがすべて PASS | T2 / T3 | `test_errors` 9 / `test_decode_binary` 88 / `test_notify` 24 / `test_async` 31 / `test_poll` 11（全サマリ `0 failed`） | `scratch/turn-009-test.log` |
+| REQ §5 契約外提案: `ENCODING` への期待値変更で取りこぼしが無い（`grep -rn 'invalid UTF-8' tests/` の全件が `ENCODING`） | T2 (c) | `tests_TYPE_MISMATCH` = 91 / `tests_ENCODING` ≥ 8 / `src_utf8_and_type_mismatch_same_line` = 0 / `src_invalid_utf8_raise_sites` = 4。変更した 7 行は PROGRESS turn 4 に全列挙 | `scratch/turn-004-checklist.log`、`turn-009-checklist.log` |
+| REQ §5 Windows: 照合表が TRACE にあり `loader.mojo` に `libpq.dll` の行がある。Linux / macOS の挙動は変わらない | T4 (c)(e)(f) | `trace_wsapoll_table` ≥ 1 / `loader_libpq_dll` ≥ 2 / `test_poll_tests` = 11（不変）。挙動不変は `check` PASS で担保 | `scratch/turn-006-{checklist,check}.log`、`turn-009-check.log` |
+| REQ §5 README: コード片は `examples/` から抜粋し `examples/` の実行で検証済み。型表と `PgErrorKind` 一覧が実装と一致 | T6 (b)(d) | `turn-008-readme-excerpts.py`（6 ブロック逐語一致 `missing_total=0`）、`turn-008-typetable.py`（OID 19 行・Mojo 型列が `__init__.mojo:42-62` と一致）、`PgErrorKind` 8 値が `errors.mojo` の宣言順・印字名と一致 | `scratch/turn-008-{readme-excerpts,typetable}.log` |
+| REQ §5 所要: `check` が 167〜187 s + 60 s = 247 s を超えない | T7 (a) | 各ターンの `check` 実測（185 / 177 / 177 / 182・215 / 169 / 187 s）と T7 の実測。すべて閾値以内 | `scratch/turn-00{3,4,5,6,7,8,9}-check*.log` |
+
+## 未確認行の処分表
+
+<!-- T7 (e)。REQ §9 impl 項目 -->
+
+`grep -n '未確認' .gsd-lite/PROGRESS.md` の実行結果は turn 3〜8 の本文に **0 件**
+（2 件のヒットは turn 8「次への注意」が T7 (e) の手順を書いた行そのもので、未確認事項ではない）。
+そこで同じ趣旨の「このターンでは断定しきれなかった／追わなかった」行を turn 3〜8 の
+**想定外・陽性対照・やり直し**から全部拾い、各行を 1 つの処分先に振り分けた。
+「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べる行は ★ を付けた。
+
+| # | turn | 拾った行（要旨） | 処分 | 根拠 / 行き先 |
+|---|---|---|---|---|
+| 1 | 3 (c) | `_after_send` の `PQflush == -1` 分岐は同一スレッドでは到達不能（★ 状態機械: ここで `IDLE` のままだと次の `send` が libpq の文言で落ちる） | **契約外と明記** | テストを書けないのでコードレビューで担保。TRACE「`_after_send` -1 のコードレビュー」節（libpq 根拠 3 行 + `probe-closefd.log` B）。`BUSY` を置く 1 行は `check` のコンパイルで存在を担保 |
+| 2 | 3 (4) | `test_notify` 実行中に stderr に `NOTICE: database "pq_test_ascii" does not exist, skipping` が 1 行出る | **契約外と明記** | 2 件目の ASCII テストの先頭 `DROP IF EXISTS` が出す NOTICE で、1 件目の末尾 DROP が効いている証拠。`check` 6/6 段のパターン（`warning:|WARNING:|implicit ROLLBACK failed`）には当たらない（RESEARCH P7）。T7 (a) の `check` で 0 件を再確認 |
+| 3 | 4 (3) | `src_TYPE_MISMATCH` が目安 105 ではなく 106（`decode_binary.mojo:46` に両方の語が残る） | **PLAN 訂正済み** | 期待値 ≤ 106 の範囲内。チェックリスト `src_TYPE_MISMATCH` で毎ターン監視（T7 (f) で再確認） |
+| 4 | 4 (2) | `test_errors` / `test_notify` は `discover_tests[__functions_in_module()]` 方式で `main()` への登録が不要だった | **契約外と明記** | 依頼文の前提が古かっただけで実装は正しい。テスト件数（`test_errors_tests` = 9 / `test_notify_tests` = 24）がチェックリストで担保 |
+| 5 | 5 (陽性対照) | PLAN T3 (c)⑧ は restore 7 行なしでも PASS = `out` 保全を判別しない（★ 誤った値: 保全が壊れると集めた通知が黙って消える） | **テスト追加** | ⑨ `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を追加（restore なしで FAIL を確認。`turn-005-notify-norestore2.log`）。PLAN 訂正（turn 5）に記載 |
+| 6 | 5 (1) | `async_reject_lost_calls` の T3 期待値 ≥ 4 → 3（不変） | **PLAN 訂正済み** | `_collect_notifications` に 1 箇所集約した結果。PLAN 表と TRACE「PLAN 訂正（turn 5）」 |
+| 7 | 6 (d) | Windows `else` 分岐は複製ビルドで型検査・リンクが通るところまで。**Windows 実機での動作は未検証**（★ 状態機械: `_is_usage_error` の分類違いは Windows でだけ出る） | **verify 申し送り**（スコープ外） | REQ §3「Windows での実行・コンパイルは対象外」。TRACE「Windows 照合表」+ `README.md` §8「未検証」の明記 + `loader.mojo` docstring の `unverified` で開示。照合表 12 行は verify が URL と突き合わせる |
+| 8 | 6 (1)(2) | `loader_libpq_dll` 1 → ≥ 2、`loader_platform_map` が最初 1 だった | **PLAN 訂正済み / 実装修正済み** | 前者は PLAN 訂正（turn 6）、後者は docstring の言い換えで 0 に戻した（識別子を使わずに理由を残す形） |
+| 9 | 6 (3), 8 (3) | `check` の所要が 215 s / 187 s と揺れる（同時実行のノイズ） | **契約外と明記** | 閾値 247 s（決めた事項 20）以内なので追わない。T7 (a) の実測を基線として PROGRESS に記録 |
+| 10 | 7 (1) | bench の堅牢性は「`failed: OperationalError` の 1 行」ではなく物理 2 行（libpq のヒント行） | **PLAN 訂正済み** | 判定を「`^failed: OperationalError` が 1 行 + `Traceback` 0 行 + exit 1」に訂正（PLAN T5 (c)）。T7 (b) の格子でも同じ判定 |
+| 11 | 7 (2) | bench 環境の初回作成が 3 s（見込み 1 分前後） | **契約外と明記** | 遅いほうに外れていないので追わない。README の再現手順は「初回は bench 環境の作成が入る」と書き、秒数を約束していない |
+| 12 | 8 (1) | `head -3 LICENSE` が 1 行ずれていた（公式ファイルは先頭が空行） | **PLAN 訂正済み** | `head -4` に訂正。全文同一の裏は行数 202 / 11,358 bytes が公式値と一致していることで取っている |
+| 13 | 8 (やり直し 1 回) | README のコード片が最初 `examples/` と逐語一致していなかった | **テスト追加（機械確認）** | `scratch/turn-008-readme-excerpts.py` で 6 ブロックを行単位に照合（`blocks=6 missing_total=0`）。verify も同スクリプトで再現できる |

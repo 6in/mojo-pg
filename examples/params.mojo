@@ -9,8 +9,9 @@ The run inserts one row through the connection and one through the block, with a
 second insert inside the block undone by `rollback_to("sp")`. Two rows therefore
 survive the `commit()`, and a different count is reported and exits non-zero.
 
-The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
-`postgres://` URI), falling back to the local container. Any `PgError` is
+Run it with `pixi run example-params`. The server comes from
+`PQ_TEST_CONNINFO` (a `key=value ...` string or a `postgresql://` URI, passed
+to `PQconnectdb` as is), falling back to the local container. Any `PgError` is
 printed and turned into a non-zero exit status.
 """
 

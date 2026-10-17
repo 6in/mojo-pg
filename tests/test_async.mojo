@@ -22,6 +22,7 @@ timeout test additionally needs the `blackhole` service from
 says nothing -- and skips itself when nothing is listening there.
 """
 
+from std.ffi import c_int, external_call
 from std.os import getenv
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from std.time import monotonic
@@ -1002,6 +1003,30 @@ def _wait_notification_error(
     raise Error("expected a PgError from wait_notification")
 
 
+def _wait_notifications_error(
+    mut conn: AsyncConnection, n: Int, timeout_ms: Int
+) raises -> PgError:
+    """Return the `PgError` raised by a `wait_notifications` that must fail.
+
+    Args:
+        conn: The connection to listen on.
+        n: How many notifications to ask for.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If the call returned instead of raising.
+    """
+    try:
+        var got = conn.wait_notifications(n, timeout_ms)
+        _ = got^
+    except e:
+        return e^
+    raise Error("expected a PgError from wait_notifications")
+
+
 def _assert_timeout_too_large(error: PgError) raises:
     """Check that `error` is the refusal of a budget above the `c_int` bound.
 
@@ -1377,6 +1402,9 @@ def test_every_call_while_connecting_is_usage() raises:
     _assert_connecting_usage(_consume_input_error(conn), "consume_input")
     _assert_connecting_usage(_poll_result_error(conn), "poll_result")
     _assert_connecting_usage(_notifications_error(conn), "notifications")
+    _assert_connecting_usage(
+        _wait_notifications_error(conn, 1, 100), "wait_notifications"
+    )
     _assert_connecting_usage(_fetch_all_error(conn, 100), "fetch_all")
     # None of them touched the handshake, which still completes.
     _poll_to_ready(conn)
@@ -1414,6 +1442,7 @@ def test_a_budget_above_c_int_max_is_usage_at_every_entry() raises:
     # connection is still `Busy` and the results are still collectable.
     assert_true(conn.state() == AsyncState.BUSY)
     _assert_timeout_too_large(_wait_notification_error(conn, 4294967296))
+    _assert_timeout_too_large(_wait_notifications_error(conn, 1, 4294967296))
     _assert_timeout_too_large(_connect_blocking_error(_conninfo(), 4294967296))
     var took = _elapsed_ms(t0)
     assert_true(took < 1000, "the rejections took " + String(took) + " ms")
@@ -1645,6 +1674,29 @@ def test_send_paths_reject_an_embedded_nul() raises:
     var results = _fetch_all(conn, 5000)
     assert_equal(len(results), 1)
     assert_equal(_int32_at(results[0], 0, 0), Int32(1))
+
+
+# --- T5 (Phase 5) ---
+
+
+def test_fetch_all_stops_draining_on_a_closed_socket() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    _send(conn, "SELECT pg_sleep(0.3), 1")
+    # Closing the descriptor under libpq is the one way to make a read fail
+    # while `PQstatus` still answers `OK`: the server is fine, so it never
+    # sends the notice that would turn the status BAD. Draining has to stop on
+    # the error itself. Nothing may open a descriptor between here and the
+    # destructor, or `PQfinish` would close a file that belongs to someone
+    # else.
+    _ = external_call["close", c_int](c_int(conn.socket()))
+    var t0 = monotonic()
+    var error = _fetch_all_error(conn, 2000)
+    assert_true(error.kind == PgErrorKind.CONNECTION, String(error))
+    # Before the fix this spun on `poll_result` until the 2000 ms budget ran
+    # out and reported TIMEOUT instead.
+    var elapsed = _elapsed_ms(t0)
+    assert_true(elapsed < 500, String("fetch_all took ", elapsed, " ms"))
+    _ = conn^
 
 
 def main() raises:
