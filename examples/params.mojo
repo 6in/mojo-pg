@@ -10,9 +10,9 @@ second insert inside the block undone by `rollback_to("sp")`. Two rows therefore
 survive the `commit()`, and a different count is reported and exits non-zero.
 
 Run it with `pixi run example-params`. The server comes from
-`PQ_TEST_CONNINFO` (`key=value ...` form only, never a `postgres://` URI),
-falling back to the local container. Any `PgError` is printed and turned into
-a non-zero exit status.
+`PQ_TEST_CONNINFO` (a `key=value ...` string or a `postgresql://` URI, passed
+to `PQconnectdb` as is), falling back to the local container. Any `PgError` is
+printed and turned into a non-zero exit status.
 """
 
 from std.os import getenv

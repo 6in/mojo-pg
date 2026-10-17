@@ -13,8 +13,9 @@ summed, and the `Timestamp` is summed as micros, so nothing can be optimized
 away unread.
 
 Run it with `pixi run bench`. The server comes from `PQ_TEST_CONNINFO`
-(`key=value ...` form only, never a `postgres://` URI), falling back to the
-local container; it is read-only, so any database will do.
+(a `key=value ...` string or a `postgresql://` URI, passed to `PQconnectdb` as
+is), falling back to the local container; it is read-only, so any database will
+do.
 """
 
 from std.os import getenv

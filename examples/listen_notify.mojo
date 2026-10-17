@@ -11,9 +11,9 @@ Nothing arriving within the budget is a normal outcome rather than an error,
 so that case prints a line and still exits 0.
 
 Run it with `pixi run example-notify`. The server comes from
-`PQ_TEST_CONNINFO` (`key=value ...` form only, never a `postgres://` URI),
-falling back to the local container. Any `PgError` is printed and turned into
-a non-zero exit status.
+`PQ_TEST_CONNINFO` (a `key=value ...` string or a `postgresql://` URI, passed
+to `PQconnectdb` as is), falling back to the local container. Any `PgError` is
+printed and turned into a non-zero exit status.
 """
 
 from std.os import getenv

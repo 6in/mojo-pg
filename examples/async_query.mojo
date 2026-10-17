@@ -9,9 +9,9 @@ until `poll_result` answers None with the connection back in `IDLE`, which is
 what ends a command -- a result is not the end of one.
 
 Run it with `pixi run example-async`. The server comes from
-`PQ_TEST_CONNINFO` (`key=value ...` form only, never a `postgres://` URI),
-falling back to the local container. Any `PgError` is printed and turned into
-a non-zero exit status.
+`PQ_TEST_CONNINFO` (a `key=value ...` string or a `postgresql://` URI, passed
+to `PQconnectdb` as is), falling back to the local container. Any `PgError` is
+printed and turned into a non-zero exit status.
 """
 
 from std.os import getenv
