@@ -979,6 +979,43 @@ def _assert_nul_error(error: PgError, what: String) raises:
     assert_false(error.message.find(NUL_MARKER) >= 0)
 
 
+def _wait_notification_error(
+    mut conn: AsyncConnection, timeout_ms: Int
+) raises -> PgError:
+    """Return the `PgError` raised by a `wait_notification` that must fail.
+
+    Args:
+        conn: The connection to listen on.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If the call returned instead of raising.
+    """
+    try:
+        var got = conn.wait_notification(timeout_ms)
+        _ = got^
+    except e:
+        return e^
+    raise Error("expected a PgError from wait_notification")
+
+
+def _assert_timeout_too_large(error: PgError) raises:
+    """Check that `error` is the refusal of a budget above the `c_int` bound.
+
+    Args:
+        error: The error the refused call raised.
+
+    Raises:
+        Error: If the kind or the message does not hold.
+    """
+    assert_true(error.kind == PgErrorKind.USAGE, String(error))
+    assert_true(error.message.find("timeout_ms must be") >= 0, error.message)
+    assert_true(error.message.find("2147483647") >= 0, error.message)
+
+
 def _assert_connecting_usage(error: PgError, method: String) raises:
     """Check that `error` is the refusal of `method` during the handshake.
 
@@ -1361,6 +1398,28 @@ def test_a_budget_below_minus_one_is_usage() raises:
     var error = _wait_readable_error(conn, -2)
     assert_true(error.kind == PgErrorKind.USAGE, String(error))
     assert_true(error.message.find("timeout_ms must be") >= 0, error.message)
+
+
+def test_a_budget_above_c_int_max_is_usage_at_every_entry() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    var t0 = monotonic()
+    # Every entry point that takes a budget rejects one that would not
+    # survive the trip through `poll`'s `c_int`: without the check
+    # `wait_readable(2**32)` waits 0 ms and `fetch_all(Int.MAX)` reports an
+    # immediate `TIMEOUT`, both of them silently.
+    _assert_timeout_too_large(_wait_readable_error(conn, 4294967296))
+    _send(conn, "SELECT 1")
+    _assert_timeout_too_large(_fetch_all_error(conn, Int.MAX))
+    # The refused `fetch_all` did not touch the command in flight, so the
+    # connection is still `Busy` and the results are still collectable.
+    assert_true(conn.state() == AsyncState.BUSY)
+    _assert_timeout_too_large(_wait_notification_error(conn, 4294967296))
+    _assert_timeout_too_large(_connect_blocking_error(_conninfo(), 4294967296))
+    var took = _elapsed_ms(t0)
+    assert_true(took < 1000, "the rejections took " + String(took) + " ms")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    assert_true(conn.state() == AsyncState.IDLE)
 
 
 def test_cancel_after_the_backend_is_gone_is_connection() raises:

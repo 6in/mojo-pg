@@ -16,7 +16,7 @@ from std.io import FileDescriptor
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from std.time import monotonic
 
-from pq._platform.poll import PollEvents, poll_socket
+from pq._platform.poll import TIMEOUT_MS_MAX, PollEvents, poll_socket
 from pq.errors import PgError, PgErrorKind
 
 
@@ -160,6 +160,48 @@ def test_timeout_below_minus_one_is_rejected() raises:
     _close(ends[0])
     _close(ends[1])
     assert_true(raised, "timeout_ms = -2 did not raise")
+
+
+def test_timeout_above_c_int_max_is_rejected() raises:
+    var ends = _pipe()
+    var raised = False
+    var t0 = monotonic()
+    try:
+        # One past `TIMEOUT_MS_MAX`: as a `c_int` this wraps to -2147483648,
+        # which `poll` reads as "wait forever", so the call must be refused
+        # before libpq or the kernel ever sees it.
+        _ = poll_socket(ends[0], True, False, TIMEOUT_MS_MAX + 1)
+    except e:
+        raised = True
+        assert_equal(e.kind, PgErrorKind.USAGE)
+        assert_true(
+            "timeout_ms must be" in e.message,
+            "message was: " + e.message,
+        )
+        assert_true(
+            "2147483647" in e.message,
+            "message was: " + e.message,
+        )
+    var took = _elapsed_ms(t0)
+    _close(ends[0])
+    _close(ends[1])
+    assert_true(raised, "timeout_ms = 2147483648 did not raise")
+    assert_true(took < 100, "it waited " + String(took) + " ms")
+
+
+def test_timeout_at_c_int_max_is_accepted() raises:
+    var ends = _pipe()
+    _write_byte(ends[1])
+    var t0 = monotonic()
+    # The bound itself is a legal budget: with a byte already waiting the
+    # call returns at once rather than sitting on the 24-day timeout.
+    var ev = poll_socket(ends[0], True, False, TIMEOUT_MS_MAX)
+    var took = _elapsed_ms(t0)
+    _close(ends[0])
+    _close(ends[1])
+    assert_true(ev.readable)
+    assert_false(ev.timeout)
+    assert_true(took < 100, "it waited " + String(took) + " ms")
 
 
 def test_socketpair_peer_close_sets_hangup_both_ways() raises:

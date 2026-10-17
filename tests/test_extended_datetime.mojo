@@ -784,7 +784,9 @@ def test_timestamp_params_round_trip() raises:
             "2024-02-29 12:34:56.789+00",
         )
     else:
-        print("SKIP test_timestamp_params_round_trip: TimeZone is not UTC")
+        # `(main)` because the function goes on to run its `Asia/Tokyo` case:
+        # only the main connection's UTC assertion is skipped.
+        print("SKIP test_timestamp_params_round_trip(main): TimeZone not UTC")
 
     # The zone dependence itself is pinned on a connection that asks for one,
     # whatever the server's default is: the same instant prints as 21:34:56.789

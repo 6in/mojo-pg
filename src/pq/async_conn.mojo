@@ -65,8 +65,9 @@ from pq._ffi.types import (
     PGconnPtr,
     PGnotify,
 )
-from pq._platform.poll import poll_socket
+from pq._platform.poll import _reject_bad_timeout, poll_socket
 from pq.connection import _SESSION_SETUP_SQL
+from pq.decode_binary import _utf8_first_invalid
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
 from pq.result import Result, ResultFormat, adopt_result
@@ -252,26 +253,52 @@ struct Notification(Copyable, Equatable, Movable, Writable):
         )
 
 
-def _reject_bad_timeout(timeout_ms: Int) raises PgError:
-    """Reject a `timeout_ms` below `-1` with the wording `poll_socket` uses.
+def _reject_bad_notification_text[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin], what: StaticString) raises PgError:
+    """Raise unless a notification's channel or payload is valid UTF-8.
 
-    The blocking helpers that compute a deadline have to check the budget
-    before any waiting happens, so they cannot rely on `poll_socket` to
-    reject it for them. The text is identical either way.
+    `_validated_utf8` for text that is not a column: the same stdlib fast
+    path and the same `_utf8_first_invalid` scanner behind it, with `what`
+    (`"channel"` or `"payload"`) where the column index would go. A
+    `SQL_ASCII` database accepts `NOTIFY ch, E'ab\\xC3\\x28'` and libpq hands
+    the bytes over untouched, so without this a `Notification` could carry a
+    `String` that is not UTF-8 -- while `get_text` rejects the very same bytes
+    as `TYPE_MISMATCH`.
+
+    The message names the offset but never the bytes, for the reason
+    `_validated_utf8` gives: text that is not UTF-8 cannot be quoted in an
+    error without corrupting it or spilling the payload into a log.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
 
     Args:
-        timeout_ms: The budget to validate.
+        bytes: The notification text, without its terminating NUL.
+        what: Which part of the notification it is, for the message.
 
     Raises:
-        PgError: `PgErrorKind.USAGE` when `timeout_ms` is below `-1`.
+        PgError: `PgErrorKind.TYPE_MISMATCH` with the message `invalid UTF-8
+            at byte N of notification <what>` when `bytes` are not
+            well-formed UTF-8.
     """
-    if timeout_ms < -1:
+    try:
+        _ = StringSlice[origin](from_utf8=bytes)
+        return
+    except:
+        pass
+    var offset = _utf8_first_invalid(bytes)
+    if offset < 0:
+        # Unreachable unless the scanner and the stdlib disagree; still a
+        # rejection, just without a position to name.
         raise PgError(
-            PgErrorKind.USAGE,
-            String(
-                "timeout_ms must be -1, 0 or positive (got ", timeout_ms, ")"
-            ),
+            PgErrorKind.TYPE_MISMATCH,
+            String("invalid UTF-8 of notification ", what),
         )
+    raise PgError(
+        PgErrorKind.TYPE_MISMATCH,
+        String("invalid UTF-8 at byte ", offset, " of notification ", what),
+    )
 
 
 struct AsyncConnection(Movable):
@@ -689,7 +716,7 @@ struct AsyncConnection(Movable):
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
                 the connection has no socket or the socket reported only
                 hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                below `-1`.
+                outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -722,7 +749,7 @@ struct AsyncConnection(Movable):
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
                 the connection has no socket or the socket reported only
                 hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                below `-1`.
+                outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -814,10 +841,15 @@ struct AsyncConnection(Movable):
         A failure destroys the half-built connection on the way out, so
         `PQfinish` still runs and no handle leaks.
 
+        `timeout_ms = 0` is a budget of nothing rather than a single look: the
+        handshake needs at least one wait, so it runs out before that wait and
+        raises `TIMEOUT`. This is the opposite of `wait_readable(0)`, where
+        `0` means "look once and do not wait".
+
         Args:
             conninfo: The conninfo string or connection URI.
-            timeout_ms: Milliseconds allowed for the whole handshake, `-1` for
-                no limit.
+            timeout_ms: Milliseconds allowed for the whole handshake, at most
+                `TIMEOUT_MS_MAX`, `-1` for no limit.
 
         Returns:
             An `AsyncConnection` in state `IDLE`, its session settings pinned.
@@ -826,8 +858,10 @@ struct AsyncConnection(Movable):
             PgError: `PgErrorKind.TIMEOUT` with `connect_blocking timed out
                 after N ms` when the budget runs out, or whatever `start` and
                 `poll_connect` raise -- `TYPE_MISMATCH` for a NUL byte,
-                `CONNECTION` for a rejected or unreachable server,
-                `USAGE` when `timeout_ms` is below `-1`.
+                `CONNECTION` for a rejected or unreachable server, `SERVER`
+                when the server rejects the session settings `poll_connect`
+                pins, `USAGE` when `timeout_ms` is outside
+                `-1 .. TIMEOUT_MS_MAX`.
         """
         _reject_bad_timeout(timeout_ms)
         var conn = AsyncConnection.start(conninfo^)
@@ -843,17 +877,23 @@ struct AsyncConnection(Movable):
         The `start(Dict)` counterpart of `connect_blocking(String)`; every
         value is taken literally rather than parsed.
 
+        `timeout_ms` means what it means in `connect_blocking(String)`,
+        including `0` being a budget of nothing.
+
         Args:
             params: Connection keywords mapped to their values.
-            timeout_ms: Milliseconds allowed for the whole handshake, `-1` for
-                no limit.
+            timeout_ms: Milliseconds allowed for the whole handshake, at most
+                `TIMEOUT_MS_MAX`, `-1` for no limit.
 
         Returns:
             An `AsyncConnection` in state `IDLE`, its session settings pinned.
 
         Raises:
-            PgError: Exactly what `connect_blocking(String)` documents, with
-                `TYPE_MISMATCH` raised for a NUL byte in any key or value.
+            PgError: Exactly what `connect_blocking(String)` documents --
+                `TIMEOUT`, `CONNECTION`, `SERVER` for rejected session
+                settings, `USAGE` for a budget outside `-1 ..
+                TIMEOUT_MS_MAX` -- with `TYPE_MISMATCH` raised for a NUL byte
+                in any key or value.
         """
         _reject_bad_timeout(timeout_ms)
         var conn = AsyncConnection.start(params)
@@ -1316,14 +1356,24 @@ struct AsyncConnection(Movable):
         they arrive when they arrive -- so a test or a loop that needs *n* of
         them calls this (or `wait_notification`) until it has *n*.
 
+        Channel and payload are checked as UTF-8 before they become a
+        `Notification`, the way `Row.get_text` checks a cell: a `SQL_ASCII`
+        database can deliver bytes that are not UTF-8, and that is a
+        `TYPE_MISMATCH` rather than a silently mangled string. Only the
+        offending notification is lost -- the connection stays usable, its
+        state is untouched, and notifications already collected by the same
+        call are delivered by the next one.
+
         Returns:
             The notifications, oldest first, each with owned strings. Empty
             when none had arrived.
 
         Raises:
             PgError: `PgErrorKind.USAGE` with `notifications() called while
-                Connecting`, or `PgErrorKind.CONNECTION` when the connection
-                is lost, carrying libpq's own message.
+                Connecting`, `PgErrorKind.TYPE_MISMATCH` with `invalid UTF-8
+                at byte N of notification channel` / `... payload`, or
+                `PgErrorKind.CONNECTION` when the connection is lost,
+                carrying libpq's own message.
         """
         self._reject_connecting("notifications")
         if self._pq[].PQconsumeInput(self._conn) == 0:
@@ -1339,22 +1389,31 @@ struct AsyncConnection(Movable):
             )[]
             # Both strings are copied out before the PGnotify is freed: libpq
             # hands over the allocation, text and all.
+            var channel = String(
+                unsafe_from_utf8_ptr=CStr(unsafe_from_address=message.relname)
+            )
+            var payload = String(
+                unsafe_from_utf8_ptr=CStr(unsafe_from_address=message.extra)
+            )
+            var backend_pid = Int(message.be_pid)
+            self._pq[].PQfreemem(MutRawPtr(unsafe_from_address=raw._addr))
+            # Validated only after the PGnotify is freed, so the rejection
+            # below cannot leak libpq's allocation. The offending notification
+            # is dropped; the ones already collected go back on `_pending` so
+            # the next call still delivers them.
+            try:
+                _reject_bad_notification_text(channel.as_bytes(), "channel")
+                _reject_bad_notification_text(payload.as_bytes(), "payload")
+            except e:
+                self._pending = found^
+                raise e^
             found.append(
                 Notification(
-                    channel=String(
-                        unsafe_from_utf8_ptr=CStr(
-                            unsafe_from_address=message.relname
-                        )
-                    ),
-                    payload=String(
-                        unsafe_from_utf8_ptr=CStr(
-                            unsafe_from_address=message.extra
-                        )
-                    ),
-                    backend_pid=Int(message.be_pid),
+                    channel=channel^,
+                    payload=payload^,
+                    backend_pid=backend_pid,
                 )
             )
-            self._pq[].PQfreemem(MutRawPtr(unsafe_from_address=raw._addr))
         return found^
 
     def _wait_for(
@@ -1409,9 +1468,14 @@ struct AsyncConnection(Movable):
         An `IDLE` connection has nothing in flight, so this answers with an
         empty list rather than an error.
 
+        `timeout_ms = 0` is a budget of nothing, not a single look: the first
+        thing the loop does is notice it has no time left, so it raises
+        `TIMEOUT` without waiting and without collecting results libpq may
+        already hold. `wait_readable(0)`, in contrast, does look once.
+
         Args:
-            timeout_ms: Milliseconds allowed for the whole command, `-1` for
-                no limit.
+            timeout_ms: Milliseconds allowed for the whole command, at most
+                `TIMEOUT_MS_MAX`, `-1` for no limit.
 
         Returns:
             One `Result` per statement of the command, in order. Empty when
@@ -1420,7 +1484,8 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.TIMEOUT` with `fetch_all timed out after N
                 ms` when the budget runs out, `PgErrorKind.USAGE` when the
-                handshake is still running or `timeout_ms` is below `-1`, or
+                handshake is still running or `timeout_ms` is outside
+                `-1 .. TIMEOUT_MS_MAX`, or
                 the first `PgErrorKind.SERVER` / `PgErrorKind.CONNECTION` the
                 statements produced.
         """
@@ -1484,16 +1549,19 @@ struct AsyncConnection(Movable):
         without waiting.
 
         Args:
-            timeout_ms: Milliseconds to wait in total. `0` looks once without
-                waiting, `-1` waits forever.
+            timeout_ms: Milliseconds to wait in total, at most
+                `TIMEOUT_MS_MAX`. `0` looks once without waiting, `-1` waits
+                forever.
 
         Returns:
             The oldest notification, or None when the budget ran out first.
 
         Raises:
             PgError: `PgErrorKind.USAGE` with `wait_notification() called
-                while Connecting` or when `timeout_ms` is below `-1`, or
-                `PgErrorKind.CONNECTION` when the connection is lost.
+                while Connecting` or when `timeout_ms` is outside
+                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.TYPE_MISMATCH` for a
+                notification whose text is not UTF-8 (see `notifications`),
+                or `PgErrorKind.CONNECTION` when the connection is lost.
         """
         _reject_bad_timeout(timeout_ms)
         self._reject_connecting("wait_notification")

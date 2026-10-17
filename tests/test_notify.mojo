@@ -352,6 +352,88 @@ def _wait_until_active(mut conn: Connection, pid: Int, timeout_ms: Int) raises:
             raise Error(String("backend ", pid, " never became active in time"))
 
 
+def _wait_notification_error(
+    mut conn: AsyncConnection, timeout_ms: Int
+) raises -> PgError:
+    """Return the `PgError` raised by a wait that must not succeed.
+
+    Args:
+        conn: The listening connection.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If the wait returned instead of raising.
+    """
+    try:
+        var got = conn.wait_notification(timeout_ms)
+        _ = got^
+    except e:
+        return e^
+    raise Error("expected a PgError from wait_notification")
+
+
+def _ascii_conninfo() raises -> String:
+    """Return the conninfo of the `SQL_ASCII` database, creating it if needed.
+
+    `pq_test_ascii` is the only way to get bytes that are not UTF-8 out of a
+    server: every other database under test is UTF-8 and rejects them on the
+    way in. It is created on demand -- `pq` is superuser on both servers --
+    and left behind, so a second run reuses it (`42P04`,
+    `duplicate_database`, is the expected outcome then).
+
+    The `dbname` is appended rather than substituted: libpq takes the last
+    occurrence of a repeated keyword, so this redirects `PQ_TEST_CONNINFO`
+    whatever database it names (verified against both servers).
+
+    Returns:
+        The conninfo of the server under test with `dbname=pq_test_ascii`.
+
+    Raises:
+        Error: If the database could not be created for a reason other than
+            already existing.
+    """
+    var admin = _open(_conninfo())
+    try:
+        _ = admin.execute(
+            String(
+                "CREATE DATABASE pq_test_ascii ENCODING 'SQL_ASCII'"
+                " TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'"
+            )
+        )
+    except e:
+        if e.sqlstate != "42P04":
+            raise Error(String(e))
+    _ = admin^
+    return _conninfo() + " dbname=pq_test_ascii"
+
+
+def _assert_sql_ascii(mut conn: AsyncConnection) raises:
+    """Check that `conn` really is attached to the `SQL_ASCII` database.
+
+    The guard that keeps the two non-UTF-8 cases honest: on a UTF-8 database
+    the server would reject the bytes itself and the test would pass for the
+    wrong reason.
+
+    Args:
+        conn: The connection to interrogate.
+
+    Raises:
+        Error: If the query failed or the encoding is not `SQL_ASCII`.
+    """
+    _send(conn, "SHOW server_encoding")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    var encoding: String
+    try:
+        encoding = String(results[0][0].get_text(0))
+    except e:
+        raise Error(String(e))
+    assert_equal(encoding, "SQL_ASCII")
+
+
 def _payload_at_the_limit() -> String:
     """Build the longest payload `NOTIFY` accepts.
 
@@ -393,6 +475,68 @@ def test_wait_notification_receives_both_payloads() raises:
     # None rather than raising: nothing arriving is a normal outcome.
     var third = _wait_notification(listener, 200)
     assert_false(Bool(third), "a third notification arrived")
+    _ = sender^
+
+
+def test_a_payload_that_is_not_utf8_is_rejected_and_dropped() raises:
+    var ascii_conninfo = _ascii_conninfo()
+    var listener = _connect_blocking(ascii_conninfo.copy(), 5000)
+    _assert_sql_ascii(listener)
+    _listen(listener, "pq_f1")
+    var sender = _open(ascii_conninfo.copy())
+    # `ab` then a lead byte with no continuation: ill-formed at offset 2, and
+    # a SQL_ASCII database hands it over unchanged. `get_text` rejects the
+    # same bytes, so a notification must not quietly carry them.
+    _ = _execute(sender, "NOTIFY pq_f1, E'ab\\xC3\\x28'")
+    var error = _wait_notification_error(listener, 2000)
+    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(
+        error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
+    )
+    assert_true(error.message.find("notification payload") >= 0, error.message)
+    # The payload is named, never quoted: it cannot be put in a message
+    # without corrupting the message or spilling the payload into a log.
+    assert_false(error.message.find("ab") >= 0, error.message)
+    # Only that one notification is lost. The connection never left `Idle`
+    # and the next notification arrives on the same listener.
+    assert_true(listener.state() == AsyncState.IDLE)
+    _ = _execute(sender, "NOTIFY pq_f1, 'ok'")
+    var got = _wait_notification(listener, 2000)
+    assert_true(Bool(got), "nothing arrived after the rejected notification")
+    assert_equal(got.value().channel, "pq_f1")
+    assert_equal(got.value().payload, "ok")
+    _ = sender^
+
+
+def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
+    var ascii_conninfo = _ascii_conninfo()
+    var listener = _connect_blocking(ascii_conninfo.copy(), 5000)
+    _assert_sql_ascii(listener)
+    # The channel name itself carries the ill-formed bytes. `LISTEN` takes an
+    # identifier rather than an expression, so the bytes are smuggled in
+    # through `format('%I', ...)` inside a `DO` block -- the SQL text sent
+    # over the wire stays ASCII.
+    _send(
+        listener,
+        "DO $$ BEGIN EXECUTE format('LISTEN %I', E'ch\\xC3\\x28'); END $$",
+    )
+    var listened = _fetch_all(listener, 5000)
+    assert_equal(len(listened), 1)
+    var sender = _open(ascii_conninfo.copy())
+    _ = _execute(
+        sender,
+        (
+            "DO $$ BEGIN EXECUTE format('NOTIFY %I, ''x''',"
+            " E'ch\\xC3\\x28'); END $$"
+        ),
+    )
+    var error = _wait_notification_error(listener, 2000)
+    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(
+        error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
+    )
+    assert_true(error.message.find("notification channel") >= 0, error.message)
+    assert_true(listener.state() == AsyncState.IDLE)
     _ = sender^
 
 

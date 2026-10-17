@@ -214,7 +214,12 @@ print(results[0][0].get[Int32](1))
 - **Timeouts.** Running out of budget is `PgErrorKind.TIMEOUT` and nothing
   else: the connection is untouched and still usable, and the command it was
   waiting for is still in flight. `timeout_ms` is `-1` for no limit and `0`
-  to test the current state without waiting.
+  to test the current state without waiting. Its largest accepted value is
+  `2147483647` ms (about 24 days), the maximum of the `c_int` that `poll(2)`
+  takes; anything above it is `USAGE` rather than a budget that silently
+  wraps, so "effectively forever" is spelled `-1`. On the loops that own a
+  whole operation -- `connect_blocking`, `fetch_all` -- `0` is a budget of
+  nothing and therefore an immediate `TIMEOUT`, not a single look.
 - **One command at a time.** `send*` is accepted only in `IDLE`, and a
   command is over when `poll_result` has seen the None, which is later than
   `is_busy` turning False -- `SELECT 1; SELECT 2` answers with two results
@@ -244,6 +249,10 @@ print(results[0][0].get[Int32](1))
   that one call sees every notification already sent, so a reader that needs
   *n* of them keeps calling. `wait_notification` answers None when its
   budget runs out -- nothing arriving is a normal outcome, not a `TIMEOUT`.
+  Channel and payload are checked as UTF-8 like any text value, so a
+  notification carrying other bytes (which a `SQL_ASCII` database allows) is
+  dropped with a `TYPE_MISMATCH` instead of arriving mangled; the connection
+  stays usable and the next call delivers the rest.
 
 ```mojo
 conn.send("LISTEN jobs")
@@ -254,14 +263,14 @@ if note:
 ```
 
 The whole surface, with the `PgErrorKind` each method can raise. Every
-method that takes a `timeout_ms` also raises `USAGE` for a budget below
-`-1`, and every one that talks to libpq raises `USAGE` when called in a
-state the step does not belong to:
+method that takes a `timeout_ms` also raises `USAGE` for a budget outside
+`-1 .. 2147483647`, and every one that talks to libpq raises `USAGE` when
+called in a state the step does not belong to:
 
 | Method | Answers | Raises |
 |---|---|---|
 | `start(conninfo)`, `start(params)` | an `AsyncConnection` in `CONNECTING` | `TYPE_MISMATCH`, `LIBPQ_LOAD`, `CONNECTION` |
-| `connect_blocking(conninfo, timeout_ms)`, `connect_blocking(params, timeout_ms)` | an `AsyncConnection` in `IDLE` | those, plus `TIMEOUT` and `USAGE` |
+| `connect_blocking(conninfo, timeout_ms)`, `connect_blocking(params, timeout_ms)` | an `AsyncConnection` in `IDLE` | those, plus `TIMEOUT`, `USAGE` and `SERVER` (rejected session settings) |
 | `poll_connect()` | `PollState` | `CONNECTION`, `SERVER` |
 | `socket()`, `state()`, `status()`, `transaction_status()` | `Int`, `AsyncState`, `Int`, `Int` | nothing |
 | `send(sql)`, `send(sql, params, result_format)` | nothing | `TYPE_MISMATCH`, `USAGE`, `CONNECTION` |
@@ -273,8 +282,8 @@ state the step does not belong to:
 | `poll_result()` | `Optional[Result]` | `USAGE`, `CONNECTION`, `SERVER` |
 | `fetch_all(timeout_ms)` | `List[Result]` | `TIMEOUT`, `USAGE`, `SERVER`, `CONNECTION` |
 | `cancel()` | nothing | `USAGE`, `CONNECTION` |
-| `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION` |
-| `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION` |
+| `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION`, `TYPE_MISMATCH` (channel or payload is not UTF-8) |
+| `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION`, `TYPE_MISMATCH` |
 | `wait_readable(timeout_ms)`, `wait_writable(timeout_ms)` | nothing | `TIMEOUT`, `CONNECTION`, `USAGE` |
 
 `AsyncState` is `CONNECTING` / `IDLE` / `SENDING` / `BUSY` and `PollState`

@@ -64,6 +64,47 @@ comptime _WSA_POLLHUP = Int16(0x0002)
 comptime _WSA_POLLNVAL = Int16(0x0004)
 """Windows `POLLNVAL`."""
 
+comptime TIMEOUT_MS_MAX = 2_147_483_647
+"""The largest `timeout_ms` any waiting entry point accepts: `c_int`'s own
+maximum.
+
+The budget ends up as the `c_int` third argument of `poll`, where anything
+wider wraps instead of saturating: `2**32 + 50` would wait 50 ms and report a
+timeout, and `2**31` would turn into a negative value and wait forever. Both
+are a silent misreading of what the caller asked for, so the value is rejected
+instead. The bound doubles as the guarantee that `timeout_ms * 1_000_000` --
+every deadline in this package -- stays inside `Int`.
+"""
+
+
+def _reject_bad_timeout(timeout_ms: Int) raises PgError:
+    """Reject a `timeout_ms` outside `-1 .. TIMEOUT_MS_MAX`.
+
+    The one definition of what a millisecond budget may be, and of the wording
+    used to refuse one. `poll_socket` calls it on the way in; the callers that
+    compute a deadline before any waiting happens (`AsyncConnection`'s
+    blocking helpers) call it themselves so they reject the budget just as
+    early, with the identical text.
+
+    Args:
+        timeout_ms: The budget to validate.
+
+    Raises:
+        PgError: `PgErrorKind.USAGE` when `timeout_ms` is below `-1` or above
+            `TIMEOUT_MS_MAX`.
+    """
+    if timeout_ms < -1 or timeout_ms > TIMEOUT_MS_MAX:
+        raise PgError(
+            PgErrorKind.USAGE,
+            String(
+                "timeout_ms must be -1, 0 or at most ",
+                TIMEOUT_MS_MAX,
+                " (got ",
+                timeout_ms,
+                ")",
+            ),
+        )
+
 
 @fieldwise_init
 struct _PollFd(TrivialRegisterPassable):
@@ -204,27 +245,23 @@ def poll_socket(
         fd: The descriptor to poll, normally libpq's `PQsocket`.
         want_read: Whether to wait for readability.
         want_write: Whether to wait for writability.
-        timeout_ms: Milliseconds to wait. `0` returns immediately with the
-            current state; `-1` waits forever.
+        timeout_ms: Milliseconds to wait, at most `TIMEOUT_MS_MAX`. `0`
+            returns immediately with the current state; `-1` waits forever.
 
     Returns:
         The conditions observed, or a `PollEvents` with only `timeout` set.
 
     Raises:
-        PgError: `PgErrorKind.USAGE` when `timeout_ms` is below `-1`, when the
-            descriptor is not open (`POLLNVAL`), or when the kernel rejects
-            the call with `EBADF` / `EINVAL`; `PgErrorKind.CONNECTION` for any
-            other `poll` failure, carrying the `errno` text.
+        PgError: `PgErrorKind.USAGE` when `timeout_ms` is below `-1` or above
+            `TIMEOUT_MS_MAX`, when the descriptor is not open (`POLLNVAL`), or
+            when the kernel rejects the call with `EBADF` / `EINVAL`;
+            `PgErrorKind.CONNECTION` for any other `poll` failure, carrying
+            the `errno` text.
     """
-    if timeout_ms < -1:
-        raise PgError(
-            PgErrorKind.USAGE,
-            String(
-                "timeout_ms must be -1, 0 or positive (got ", timeout_ms, ")"
-            ),
-        )
+    _reject_bad_timeout(timeout_ms)
     # A finite budget is anchored to a deadline so an EINTR retry resumes
-    # with what is left rather than restarting the full wait.
+    # with what is left rather than restarting the full wait. The nanosecond
+    # product cannot overflow: `timeout_ms` is at most `TIMEOUT_MS_MAX`.
     var deadline = monotonic() + timeout_ms * 1_000_000 if timeout_ms > 0 else 0
     var remaining = timeout_ms
     while True:
