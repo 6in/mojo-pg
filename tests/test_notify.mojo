@@ -375,14 +375,40 @@ def _wait_notification_error(
     raise Error("expected a PgError from wait_notification")
 
 
+def _drop_ascii_database() -> Bool:
+    """Drop `pq_test_ascii` if it is there, reporting instead of raising.
+
+    `DROP DATABASE` cannot be issued from the database it drops, nor from
+    inside a transaction block, so this opens its own synchronous connection
+    to `pq_test` and runs the one statement on it directly. `WITH (FORCE)`
+    terminates whatever is still attached.
+
+    Returns:
+        True when the statement ran, False when anything went wrong.
+
+    Notes:
+        Callers discard the result with `_ = `: a drop that failed must never
+        hide the test result that has already been established.
+    """
+    try:
+        var admin = _open(_conninfo())
+        _ = _execute(
+            admin, "DROP DATABASE IF EXISTS pq_test_ascii WITH (FORCE)"
+        )
+        _ = admin^
+    except:
+        return False
+    return True
+
+
 def _ascii_conninfo() raises -> String:
-    """Return the conninfo of the `SQL_ASCII` database, creating it if needed.
+    """Return the conninfo of the `SQL_ASCII` database, creating it fresh.
 
     `pq_test_ascii` is the only way to get bytes that are not UTF-8 out of a
     server: every other database under test is UTF-8 and rejects them on the
     way in. It is created on demand -- `pq` is superuser on both servers --
-    and left behind, so a second run reuses it (`42P04`,
-    `duplicate_database`, is the expected outcome then).
+    and dropped at the end of each test and, in case an assertion skipped
+    that, at the start of the next.
 
     The `dbname` is appended rather than substituted: libpq takes the last
     occurrence of a repeated keyword, so this redirects `PQ_TEST_CONNINFO`
@@ -392,9 +418,11 @@ def _ascii_conninfo() raises -> String:
         The conninfo of the server under test with `dbname=pq_test_ascii`.
 
     Raises:
-        Error: If the database could not be created for a reason other than
-            already existing.
+        Error: If the database could not be created. The `CREATE` follows a
+            `DROP DATABASE IF EXISTS`, so it has nothing left to collide
+            with and has to succeed.
     """
+    _ = _drop_ascii_database()
     var admin = _open(_conninfo())
     try:
         _ = admin.execute(
@@ -404,8 +432,7 @@ def _ascii_conninfo() raises -> String:
             )
         )
     except e:
-        if e.sqlstate != "42P04":
-            raise Error(String(e))
+        raise Error(String(e))
     _ = admin^
     return _conninfo() + " dbname=pq_test_ascii"
 
@@ -506,6 +533,8 @@ def test_a_payload_that_is_not_utf8_is_rejected_and_dropped() raises:
     assert_equal(got.value().channel, "pq_f1")
     assert_equal(got.value().payload, "ok")
     _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
 
 
 def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
@@ -538,6 +567,8 @@ def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
     assert_true(error.message.find("notification channel") >= 0, error.message)
     assert_true(listener.state() == AsyncState.IDLE)
     _ = sender^
+    _ = listener^
+    _ = _drop_ascii_database()
 
 
 def test_notifications_is_empty_before_anything_is_sent() raises:

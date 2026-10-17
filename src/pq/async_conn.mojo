@@ -903,6 +903,17 @@ struct AsyncConnection(Movable):
     def _after_send(mut self) raises PgError:
         """Flush what was just queued and move out of `IDLE`.
 
+        The `-1` branch is unreachable from a single thread. `PQflush` returns
+        `-1` only when the status is already `CONNECTION_BAD` (`fe-exec.c`),
+        and a send that fails sets `write_failed` and reports success instead
+        (`pqSendSome` returns 0; `pqsecure_raw_write` answers `n = len`,
+        `fe-misc.c` / `fe-secure.c`) -- so a `PQsendQuery` that just succeeded
+        cannot be followed by a `-1` flush. It is still answered the way libpq
+        does: libpq is in `PGASYNC_BUSY` from the moment `PQsendQuery`
+        succeeds, so `pq` moves to `BUSY` too, and a caller that ignores the
+        error and sends again gets `pq`'s own `USAGE` first rather than a
+        second libpq error.
+
         Raises:
             PgError: `PgErrorKind.CONNECTION` when `PQflush` fails outright.
         """
@@ -912,8 +923,8 @@ struct AsyncConnection(Movable):
         elif flushed == 1:
             self._state = AsyncState.SENDING
         else:
-            # -1: the command is lost along with the connection. The state is
-            # left at IDLE because there are no results to drain.
+            # -1: the command is lost along with the connection.
+            self._state = AsyncState.BUSY
             raise self._connection_error()
         self._single_row_allowed = True
 
@@ -1462,8 +1473,10 @@ struct AsyncConnection(Movable):
         really is over and the connection is `IDLE`, and only then is the
         error raised -- which is why a failing statement in the middle of a
         multi-statement `send` does not leave the connection unusable. On a
-        connection the server has dropped, draining stops as soon as libpq
-        reports the connection lost.
+        connection that is gone, draining stops at the first `CONNECTION`
+        error, whether or not `PQstatus` has turned `CONNECTION_BAD` (a
+        `close(2)`d socket is reported by libpq as a read failure with the
+        status still `OK`).
 
         An `IDLE` connection has nothing in flight, so this answers with an
         empty list rather than an error.
@@ -1520,8 +1533,15 @@ struct AsyncConnection(Movable):
                     first_error = e.copy()
                 # Keep draining: the command is over only once the NULL
                 # result has been read. A lost connection is the exception --
-                # nothing more can be read, so stop and report.
-                if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+                # nothing more can be read, so stop and report. The kind is
+                # checked as well as the status: libpq reports a read failure
+                # on a `close(2)`d descriptor without turning the status BAD,
+                # and polling a descriptor that is gone would spin until the
+                # budget ran out.
+                if (
+                    e.kind == PgErrorKind.CONNECTION
+                    or self._pq[].PQstatus(self._conn) == CONNECTION_BAD
+                ):
                     break
                 continue
             if got:

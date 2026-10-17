@@ -89,7 +89,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
 
 ## Tasks
 
-- [ ] T1: 持ち越し整理（§4.5 / §4.7）+ `hello_libpq` の堅牢性（§4.3）+ `TRACE.md` 新設（1 コミット。REQ §9）
+- [x] T1: 持ち越し整理（§4.5 / §4.7）+ `hello_libpq` の堅牢性（§4.3）+ `TRACE.md` 新設（1 コミット。REQ §9）
   - 完了基準:
     - (a) §4.5 / RESEARCH §2.7 P1: `src/pq/async_conn.mojo:1518-1526` の `except e:` を「`first_error` に保存 → **`e.kind == PgErrorKind.CONNECTION` または `PQstatus == CONNECTION_BAD` なら break**、
       それ以外は continue」に。docstring `:1465-1466`「draining stops as soon as libpq reports the connection lost」→「draining stops at the first `CONNECTION` error, whether or not `PQstatus`

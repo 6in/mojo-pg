@@ -26,6 +26,8 @@ test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
 db-up = "docker compose -f tests/docker-compose.yml up -d --wait"
 db-down = "docker compose -f tests/docker-compose.yml down -v"
+# フィクスチャ再適用（pq_test_ascii も消える）。`check` は呼ばない。
+db-reset = { depends-on = ["db-down", "db-up"] }
 check = "bash tests/final_check.sh"
 # .mojoc, not .mojopkg: Mojo 1.1.0 rejects a .mojopkg output here.
 package = "mkdir -p build && mojo precompile src/pq -o build/pq.mojoc"

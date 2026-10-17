@@ -22,6 +22,7 @@ timeout test additionally needs the `blackhole` service from
 says nothing -- and skips itself when nothing is listening there.
 """
 
+from std.ffi import c_int, external_call
 from std.os import getenv
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from std.time import monotonic
@@ -1645,6 +1646,29 @@ def test_send_paths_reject_an_embedded_nul() raises:
     var results = _fetch_all(conn, 5000)
     assert_equal(len(results), 1)
     assert_equal(_int32_at(results[0], 0, 0), Int32(1))
+
+
+# --- T5 (Phase 5) ---
+
+
+def test_fetch_all_stops_draining_on_a_closed_socket() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    _send(conn, "SELECT pg_sleep(0.3), 1")
+    # Closing the descriptor under libpq is the one way to make a read fail
+    # while `PQstatus` still answers `OK`: the server is fine, so it never
+    # sends the notice that would turn the status BAD. Draining has to stop on
+    # the error itself. Nothing may open a descriptor between here and the
+    # destructor, or `PQfinish` would close a file that belongs to someone
+    # else.
+    _ = external_call["close", c_int](c_int(conn.socket()))
+    var t0 = monotonic()
+    var error = _fetch_all_error(conn, 2000)
+    assert_true(error.kind == PgErrorKind.CONNECTION, String(error))
+    # Before the fix this spun on `poll_result` until the 2000 ms budget ran
+    # out and reported TIMEOUT instead.
+    var elapsed = _elapsed_ms(t0)
+    assert_true(elapsed < 500, String("fetch_all took ", elapsed, " ms"))
+    _ = conn^
 
 
 def main() raises:
