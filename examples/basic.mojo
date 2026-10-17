@@ -3,9 +3,10 @@
 Imports nothing but `Connection` and `PgError` from `pq`, which is the point:
 the whole round trip is reachable through the package's re-exported surface.
 
-The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
-`postgres://` URI), falling back to the local container. Any `PgError` is
-printed and turned into a non-zero exit status.
+Run it with `pixi run example-basic`. The server comes from
+`PQ_TEST_CONNINFO` (`key=value ...` form only, never a `postgres://` URI),
+falling back to the local container. Any `PgError` is printed and turned into
+a non-zero exit status.
 """
 
 from std.os import getenv

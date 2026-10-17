@@ -9,9 +9,10 @@ and the caller's `get[T]` calls do not change: `Row.get` reads `PQfformat` and
 picks the decoder. The run proves that by asserting `column_format(0)` is
 `BINARY` and exiting non-zero if it is not.
 
-The server comes from `PQ_TEST_CONNINFO` (`key=value ...` form only, never a
-`postgres://` URI), falling back to the local container. Any `PgError` is
-printed and turned into a non-zero exit status.
+Run it with `pixi run example-binary`. The server comes from
+`PQ_TEST_CONNINFO` (`key=value ...` form only, never a `postgres://` URI),
+falling back to the local container. Any `PgError` is printed and turned into
+a non-zero exit status.
 """
 
 from std.os import getenv

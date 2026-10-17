@@ -261,13 +261,13 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
   - 依存: T1（`pixi.toml` の `db-reset` と同じファイル。順序のため）
   - 並列サブ作業: サブエージェント **0 本（親が全部）**。3 ファイルとも雛形があり、実測は親が順に回す
 
-- [ ] T6: `README.md`（§4.2 / D7 日本語）+ `LICENSE`（D11）+ examples 5 本の docstring（§4.3）
+- [x] T6: `README.md`（§4.2 / D7 日本語）+ `LICENSE`（D11）+ examples 5 本の docstring（§4.3）
   - 完了基準:
     - (a) RESEARCH §2.11 / 決めた事項 12: `LICENSE` = https://www.apache.org/licenses/LICENSE-2.0.txt の全文（APPENDIX 含む。改変しない）。取得は scratch の 5 行スクリプト
       `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-NNN-fetch-license.py`（`urllib.request.urlretrieve(URL, "LICENSE")`）を `pixi run python <scratch>` で（`curl` は allowlist 外）。
-      ダメなら `WebFetch` で本文を取って `Write`。検証: `head -3 LICENSE` が `Apache License` / `Version 2.0, January 2004` / `http://www.apache.org/licenses/`（前後の空白は可）、
+      ダメなら `WebFetch` で本文を取って `Write`。検証: `head -4 LICENSE` が `Apache License` / `Version 2.0, January 2004` / `http://www.apache.org/licenses/`（前後の空白は可。**PLAN 訂正 turn 8**: 公式ファイルは先頭が空行なので期待の 3 行は 2〜4 行目。`head -3` → `head -4`）、
       `grep -c APPENDIX LICENSE` = 1、`wc -l LICENSE` が 200〜205（公式 202 行）、`wc -c` を TRACE に（公式 11,358 bytes の見込み）
-    - (b) `README.md`（日本語。決めた事項 11 の節立て 11 節、`## ` 見出し ≥ 10）。**コード片は `examples/` から抜粋し、各コード片の直前に抜粋元ファイル名を書く**（P18。verify が照合）:
+    - (b) `README.md`（日本語。決めた事項 11 の節立て **10 節**（**PLAN 訂正 turn 8**: 「11 節」→「10 節」。決めた事項 11 の列挙が 1〜10 の 10 節）、`## ` 見出し ≥ 10）。**コード片は `examples/` から抜粋し、各コード片の直前に抜粋元ファイル名を書く**（P18。verify が照合）:
       概要と対応環境（Mojo 1.1.0 / libpq 14+ / Linux・macOS、Windows は未検証）／インストール（pixi、libpq の探索順 = `loader.mojo` の `_default_candidates` の 3 OS と `PQ_MOJO_LIBPQ`）／
       クイックスタート（同期 `examples/basic.mojo`、パラメータ `examples/params.mojo`、トランザクション（`params.mojo` か `basic.mojo` の該当部。無ければ `__init__.mojo:173-183` の説明を日本語で）、
       バイナリ `examples/binary.mojo`、非同期 `examples/async_query.mojo`、LISTEN/NOTIFY `examples/listen_notify.mojo`。各 5〜15 行の抜粋 + `pixi run example-*` の実行行）／
