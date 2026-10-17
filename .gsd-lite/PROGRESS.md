@@ -91,3 +91,46 @@
     誤った値が黙って返る経路ではなく「Windows では動かない可能性」なので、処分先は T8 (d) の「未確認の処分」= モジュール docstring の **unverified** 表記を残すことで足りる（P8）。
     `EINTR` の実挙動（シグナル下での再試行）は未確認のまま（RESEARCH §2.3 どおりテストしない。コードレビューで代替、上の P4 行）
   - `check` は 133 s。T3 で `test_async`（pg_sleep 2 s ×2 サーバー）が乗ると PLAN の見込み 260〜300 s に近づく見込み
+
+## turn 5 — impl — T3 AsyncConnection 前半（接続 / 送信 / 受信 / 状態機械 / ブロッキング補助）
+- やったこと: (a)〜(e) を 1 人で実装（推奨 1 本 / 実 0 本。サブ作業は `tests/test_async.mojo` の 1 本だけなのでサブエージェントは使わず）。
+  `src/pq/async_conn.mojo`（新設 1,233 行）に `AsyncState` / `PollState` / `Notification` と `AsyncConnection` の 21 メソッド
+  （`start` 2 形 / `poll_connect` / `connect_blocking` 2 形 / `socket` / `state` / `status` / `transaction_status` / `send` 2 形 /
+  `send_prepare` / `send_prepared` / `flush` / `consume_input` / `is_busy` / `poll_result` / `fetch_all` / `wait_readable` / `wait_writable` / `__deinit__`）、
+  `__init__.mojo` に 4 型の再エクスポート + Layout 行 + `## Asynchronous use` 節（43 行）、`connection.mojo:164` を現在形に、`tests/test_async.mojo` 9 件
+- 期待値の取り直し（REQ §9 常設。プローブ `scratch/turn-005-probe-expect.mojo`、同期 `Connection` のみ）: `SHOW DateStyle` = `ISO, YMD` /
+  `SHOW IntervalStyle` = `postgres` / `SELECT 1/0` は `Server` `22012` `division by zero` / 空クエリは `Server` `empty query` / 未知の prepared は `26000` —
+  すべて (c) の期待値と一致。`send_prepare` + `fetch_all` の `command_tag() == ""`（async2 B）もテストで実測一致（SQL の `PREPARE` は `PREPARE` タグを返すが別経路）
+- 既存テストの期待値変更: **ゼロ**（`connection.mojo` と `__init__.mojo` は docstring のみ。追加は `test_async.mojo` 9 件だけ）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（23 ファイル × 2 = **46 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、16:42:35 → 16:46:11 = **216 s**）、`pixi run check` **6/6 PASS**（16:49:34 → 16:53:15 = **221 s**。PLAN の見込み 260〜300 s 内）、
+  `pixi run package` 警告ゼロ、`pixi run fmt` 差分なし。`test_async` 単体は **2.6〜2.9 s**（PG17 を 3 回 + PG14 を 1 回、すべて 9/9 PASS。
+  内訳は `pg_sleep(2)` 2,023〜2,075 ms + connect タイムアウト 575〜596 ms + 残り 7 件で 60 ms 前後。PLAN の見込み 40〜60 s/サーバーより大幅に短い）
+- チェックリスト（T3 行）: `async_conn=exists` / `async_struct=1` / `async_state_struct=1` / `pollstate_struct=1` / `notification_struct=1` /
+  `async_public_defs=23`（≥20） / `init_async_import=1` / `conn_phase4_future=0` / `init_phase4=1` / `test_async=exists` / `test_async_tests=9`（≥8） /
+  `src_PQexec_calls=4`（`async_conn.mojo` に `PQexec(` は無し） / `src_PQfinish_calls=5`（≥3） / `src_def_ref_return=0` / `tests_files_count=23`・`test_file_count=23`（T8 で 24）— **期待値**。
+  例外 2 件: `async_called_while=5`（期待 ≥6 は T3+T4 の合算。下記 PLAN 訂正）、`tests_print_SKIP` はスクリプトが `absent(tests/test_notify.mojo)` を返すので手で数えて **5**（datetime 3 + leak 1 + async 1。T3 で +1 の予定どおり）
+- PLAN 訂正 4 件:
+  - (c) ⑥（と ④）の終端判定: 「エラー raise のあと**もう 1 回** `poll_result()` が `None` で `state() == IDLE`」は**不成立**。終端 NULL は別ラウンドトリップで届くので
+    1 回目は `None` + `BUSY` になり得る（`pixi run test` 中に 1 回失敗、単体 4 回は通る頻度）。`None` の意味は契約どおり「`BUSY` ならまだ / `IDLE` なら終了」なので
+    テスト側のループが正。ヘルパ `_poll_to_idle` に集約して ④⑥ の両方で使う（`src/` は無変更。契約どおりの挙動）
+  - (c) のヘルパ `_error_of(...)` → 入口ごとに分割（Mojo にクロージャ引数の形が無い）: `_connect_blocking_error` / `_send_error` / `_fetch_all_error` /
+    `_poll_result_error` / `_wait_readable_error`。成功側と読み出し側のヘルパ名も PLAN に列挙済み（T5 はこの名前に追記する）
+  - チェックリスト `async_called_while` の T3 時点の実測は **5**（期待 ≥6 は T4 まで）。理由: 状態文言を `_require_state` / `_reject_connecting` の 2 本に集約したので
+    メソッド数ぶんは増えない。T4 の `cancel` / `notifications` の docstring で 6 を超える
+  - T5 ⑪ の NUL 文言: `name` 引数は `"embedded NUL byte in name"`（`transaction.mojo` の savepoint 名と同じ `what`）。`send_prepare` は `name` → `sql` の順に検査
+- 想定外: (1) 上記の終端 NULL の 1 ラウンドトリップ遅れ（P11 の実地。PLAN の期待が楽観的だった）。
+  (2) `try` 本体の例外型が `except` 側に引っぱられる: `except e: return e^`（`PgError` を返す）形の `try` の中では `Error` を投げる関数（`assert_*` / 他のヘルパ）を呼べない
+  → PgError を出す呼び出しだけを `try` に入れ、判定は外に出す（`_poll_result_error` / `_column_format`）。
+  (3) `var got: Optional[Result] = None` は「代入が使われない」警告になる（`except` が必ず脱出するので初期化子が死ぬ）→ `var got: Optional[Result]` と宣言だけにする（`package` の警告ゼロ条件）
+- やり直し: 3 回（上記 (1) テスト修正 1 回、(2) コンパイルエラー 1 回、(3) 警告 1 回。いずれも 1 回で直った）
+- 次への注意:
+  - 確認済み: `fetch_all` は「書き切る → 取り切る」の順で、途中のエラーは `first_error` に保持して NULL まで取り切ってから投げる。
+    切断時は無限ループ回避のため `PQstatus == CONNECTION_BAD` を見たら drain を打ち切る（T5 ④ の 2 値期待はこれで満たせる見込み）。
+    `wait_*` の `TIMEOUT` は `fetch_all` / `connect_blocking` が自分の文言に包み直す（`_wait_for` / `_poll_to_ready`）ので、
+    テストの部分文字列は `"timed out after"` で 3 経路に当たる。`_single_row_allowed` は `send*` 成功で True、`poll_result` / `consume_input` / `is_busy` で False（T4 はガードを足すだけ）。
+    `_pending` フィールドは宣言済みで空のまま（T4 が使う）。`PQsetnonblocking(1)` は `start` 直後（RESEARCH §2.1 A どおり問題なし）
+  - 未確認: `_after_send` で `PQflush` が **-1** を返したときの状態を `IDLE` のままにしている（結果が無いので drain 不要という判断）。
+    実測していない経路で、「状態機械が壊れる経路」ではなく「送信直後に接続が死ぬ稀なケース」。処分先は **T5 ④ の切断テスト**に 1 行足せれば足りるが、
+    `send` 中の切断は競合で再現できないので、再現しなければ「契約外（libpq が -1 を返す条件を作れない）」と T8 (d) に書く
+  - `check` は 221 s（T2 の 133 s + 88 s。増分の大半は `test_async` の `pg_sleep(2)` × 2 サーバーと connect タイムアウト 0.5 s × 2）。T4 で NOTIFY と cancel が乗ると 5 分に近づく

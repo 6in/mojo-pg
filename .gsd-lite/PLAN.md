@@ -69,7 +69,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 | `ffi_PQsetSingleRowMode` / `ffi_PQconnectStart_plain` / `testffi_*` / `testffi_symbol_count_53` / `_55` | §4.5: `_ffi/functions.mojo` に 2 バインド（宣言 + `_dl_sym`）、`tests/test_ffi.mojo:40-92` の名前表と `:102` の件数 53 → 55 | 0 / 0 / 0 / 0 / 1 / 0 | **3 / 1 / 1 / 1 / 0 / 1**（T2。**訂正（T2 実装時）**: `ffi_PQsetSingleRowMode` の期待 2 → **3**。`mojo format` が `_dl_sym[...](self._lib, "PQsetSingleRowMode")` を 3 行に割るため宣言 1 + 代入 1 + 名前文字列 1 で 3 行当たる） |
 | `platform_init` / `platform_poll` / `poll_*` / `test_poll` / `test_poll_tests` | §4.1: `src/pq/_platform/__init__.mojo` + `poll.mojo`、`tests/test_poll.mojo` | absent | **exists / exists / `def poll_socket` 1 / `comptime if` ≥ 1 / `WSAPoll` ≥ 1 / `EINTR` ≥ 1 / `monotonic` ≥ 1 / `external_call["` ≤ 3 / exists / ≥ 7**（T2） |
 | `async_conn` / `async_struct` / `async_state_struct` / `pollstate_struct` / `notification_struct` / `async_public_defs` | §4.2 / §4.3: `src/pq/async_conn.mojo` | absent | **exists / 1 / 1 / 1 / 1 / ≥ 20**（T3 で struct 4 つと接続〜`fetch_all`、T4 で cancel / notify / single-row が加わる） |
-| `async_called_while` / `async_cancel_insecure` | USAGE 格子のメッセージ（決めた事項 8）、P31 の docstring | absent | **≥ 6 / ≥ 1**（T3 / T4） |
+| `async_called_while` / `async_cancel_insecure` | USAGE 格子のメッセージ（決めた事項 8）、P31 の docstring | absent → **5 / 0**（T3 後の実測） | **≥ 6 / ≥ 1**（T3 / T4。T3 時点は 5 で、`_require_state` / `_reject_connecting` の 2 本に文言を集約したため。T4 の `cancel` / `notifications` の docstring で 6 を超える） |
 | `init_async_import` / `conn_phase4_future` / `init_phase4` | `__init__.mojo` の再エクスポート + Layout 行に Phase 4、`connection.mojo:164`「Phase 4's asynchronous connect will send」を現在形（`AsyncConnection.poll_connect` sends the same SQL）に | 0 / 1 / 0 | **1 / 0 / 1**（T3） |
 | `src_PQfinish_calls` / `src_PQfreemem_calls` / `src_PQfreeCancel_calls` / `src_PQexec_calls` | libpq の解放・直呼び経路の本数（REQ §5.2） | absent（connection 2 / 2 / — / 4） | **≥ 3 / 3 / 1 / 4**（T3 / T4。`async_conn.mojo` に `PQexec(` は書かない） |
 | `test_async` / `test_async_tests` / `test_notify` / `test_notify_tests` | §4.7 | absent | **exists / ≥ 8（T3）→ ≥ 20（T5）/ exists / ≥ 3（T4）→ ≥ 8（T5）** |
@@ -158,7 +158,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: (d)(e) `src/pq/_platform/__init__.mojo` + `src/pq/_platform/poll.mojo` + `tests/test_poll.mojo`（契約は決めた事項 1。**最初に `poll_socket` 1 本 + テスト①をコンパイルしてから**残りを書く）
     - 親: (a)(b)(c)(f)
 
-- [ ] T3: `AsyncConnection` 接続・送信・受信・状態機械・ブロッキング補助（`src/pq/async_conn.mojo` 前半）+ `__init__.mojo` 再エクスポート + `tests/test_async.mojo` 第 1 弾（受け入れ §5.1 の 1・4 件目）
+- [x] T3: `AsyncConnection` 接続・送信・受信・状態機械・ブロッキング補助（`src/pq/async_conn.mojo` 前半）+ `__init__.mojo` 再エクスポート + `tests/test_async.mojo` 第 1 弾（受け入れ §5.1 の 1・4 件目）
   - 完了基準:
     - (a) `src/pq/async_conn.mojo`（新設）: **決めた事項 2**（`AsyncState` / `PollState`）、**決めた事項 3**（`Notification` は struct 定義だけ先に置く。T4 が使う）、**決めた事項 6**（`AsyncConnection` のフィールドと接続・送信・受信 API）、
       **決めた事項 7**（`state()` 遷移）、**決めた事項 8**（`USAGE` 格子の文言）、**決めた事項 9**（ブロッキング補助）。この時点で実装するメソッド:
@@ -177,15 +177,22 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - (b) `src/pq/__init__.mojo`: `from .async_conn import AsyncConnection, AsyncState, Notification, PollState`、`:3-7` の Layout 行に「Phase 4 adds `_platform/poll` and `async_conn`」、
       新節 `## Asynchronous use`（15〜25 行: 状態機械の図 `Connecting → Idle → (send) → Sending | Busy → (poll_result が None で state Idle) → Idle`、`wait_*` と `connect_blocking` / `fetch_all` / `wait_notification`、`TIMEOUT` の意味、`cancel` と NOTIFY は T4 で追記）。
       `src/pq/connection.mojo:164-165` の「Phase 4's asynchronous connect will send the same SQL as its first query step」→「`AsyncConnection.poll_connect` sends the same SQL as its first query step」
-    - (c) `tests/test_async.mojo`（新設。雛形は `tests/test_connection.mojo:54-120` のラッパー群。`raises PgError` → `Error` 変換のヘルパ `_start` / `_connect_blocking` / `_send` / `_fetch_all` / `_poll_result` / `_wait_readable` / `_error_of(...)`）。
+    - (c) `tests/test_async.mojo`（新設。雛形は `tests/test_connection.mojo:54-120` のラッパー群。`raises PgError` → `Error` 変換のヘルパ `_start` / `_connect_blocking` / `_send` / `_fetch_all` / `_poll_result` / `_wait_readable` / `_error_of(...)`。
+      **訂正（T3 実装時）**: `_error_of(...)` は Mojo にクロージャ引数の形が無いので入口ごとに分けた —
+      `_connect_blocking_error` / `_send_error` / `_fetch_all_error` / `_poll_result_error` / `_wait_readable_error`。
+      成功側は `_connect_blocking_params` / `_send_params` / `_send_prepare` / `_send_prepared` / `_poll_connect` / `_wait_writable`、
+      読み出しは `_text_at` / `_int32_at` / `_int64_at` / `_column_format`、待ちは `_wait_readable_allowing_timeout` / `_poll_to_idle`、経過は `_elapsed_ms`。T5 はこの名前に追記する）。
       両サーバー同一期待値。第 1 弾は次の 8 件以上:
       ① `connect_blocking(_conninfo(), 5000)` が成功し `state() == AsyncState.IDLE`、`status() == CONNECTION_OK`、`transaction_status() == PQTRANS_IDLE`、`socket() >= 0`；`send("SHOW DateStyle")` → `fetch_all(5000)` が 1 件で `get[String](0) == "ISO, YMD"`、`SHOW IntervalStyle` → `"postgres"`（D13 / P10）；
       ② `connect_blocking(_params(), 5000)`（Dict 版）でも ①の `DateStyle`；
       ③ **手動ポーリング**: `start` → `state() == CONNECTING`、`poll_connect()` の最初の戻りが `NEED_READ` または `NEED_WRITE`（断定しない。P2）→ 戻り値に応じて `wait_readable(2000)` / `wait_writable(2000)` → `READY` まで。`READY` 後 `state() == IDLE`。`READY` 後にもう 1 回 `poll_connect()` を呼んでも `READY`；
       ④ **受け入れ §5.1-1（pg_sleep カウンタ）**: `send("SELECT pg_sleep(2), 1")` → ループ `poll_result()`: `None` かつ `state() == BUSY` ならカウンタ +1 して `wait_readable(100)`（`TIMEOUT` は捕まえて続行）→ `Some` が来たら `get[Int32](1) == 1`、次の `poll_result()` が `None` で `state() == IDLE`。
-      判定は「カウンタ ≥ 1 **かつ** 経過 ≥ 2,000 ms（`monotonic()`）」（REQ §4.7。実測は 20 回 / 2,006 ms）；
+      判定は「カウンタ ≥ 1 **かつ** 経過 ≥ 2,000 ms（`monotonic()`）」（REQ §4.7。実測は 20 回 / 2,006 ms）。終端は ⑥ と同じ `_poll_to_idle`；
       ⑤ 多文 `send("SELECT 1; SELECT 2; SELECT 3")` → `fetch_all(5000)` が 3 件、各 `get[Int32](0)` が 1 / 2 / 3（RESEARCH F3）；`send("")` → `fetch_all` が `SERVER` で message `"empty query"`（F4。`adopt_result` 流用の確認）；
-      ⑥ エラー後の復帰（P11）: `send("SELECT 1/0")` → `poll_result()` をループ（`None` + `BUSY` なら `wait_readable(2000)`）→ `SERVER 22012` が raise → **もう 1 回** `poll_result()` が `None` で `state() == IDLE` → `send("SELECT 1")` が成功し値 1；
+      ⑥ エラー後の復帰（P11）: `send("SELECT 1/0")` → `poll_result()` をループ（`None` + `BUSY` なら `wait_readable(2000)`）→ `SERVER 22012` が raise → raise 直後は `state() == BUSY`、
+      **`poll_result()` を `IDLE` になるまでループ**して終端（**訂正（T3 実装時）**: 元の「もう 1 回 `poll_result()` が `None` で `state() == IDLE`」は不成立。
+      終端 NULL は別ラウンドトリップで届くので 1 回目は `None` + `BUSY` になり得る——実測で約 1/5 の頻度で失敗した。`None` の意味は契約どおり
+      「`BUSY` ならまだ、`IDLE` なら終了」なので、テスト側はループが正。ヘルパ `_poll_to_idle` に集約し ④ でも使う）→ `send("SELECT 1")` が成功し値 1；
       ⑦ **受け入れ §5.1-4（タイムアウト）**: `connect_blocking("host=127.0.0.1 port=54399 user=pq password=pq dbname=pq_test", 500)` が `TIMEOUT` でメッセージに `"timed out after"`、経過 500 ms 以上 1,500 ms 未満（P23。`connect_timeout` は conninfo に入れない）。
       54399 が接続拒否（`CONNECTION` で message に `"Connection refused"`）なら `print("SKIP test_connect_blocking_times_out: port 54399 refused (blackhole not running)")` して return（P30）。
       `wait_readable(50)`（アイドル接続）→ `TIMEOUT`、`wait_writable(0)`（アイドル接続）→ 例外なし（書ける）（P24）；
@@ -250,7 +257,9 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
       悪いパスワード（`_conninfo() + " password=WRONG"`）は `connect_blocking(..., 5000)` が `CONNECTION`、message に `"password authentication failed"`、`"WRONG"` を含まない；
       ⑨ **未読結果ありの drop**（P22）: `send("SELECT 1; SELECT 2")` → `wait_readable(2000)` → `consume_input()` → `_ = conn^`（クラッシュ無し。leak は T6）；
       ⑩ **`PQsendQueryParams` 後のバッファ**（RESEARCH I。仕様上の非対称）: `send("SELECT $1::text", [String("hello-param")])` の直後にパラメータを作った `String` を上書き（`var p = String("hello-param"); send(..., [p]); p = "XXXX"`）→ `fetch_all` の値が `"hello-param"`；
-      ⑪ NUL を含む sql / name → `TYPE_MISMATCH` `"embedded NUL byte in sql"`（`send` / `send_prepare` / `send_prepared` の 3 経路）
+      ⑪ NUL を含む sql / name → `TYPE_MISMATCH` `"embedded NUL byte in sql"`（`send` / `send_prepare` / `send_prepared` の 3 経路。
+      **注（T3 実装時）**: `name` 引数の方は `_reject_nul(name, "name")` なので `"embedded NUL byte in name"`。`transaction.mojo` の savepoint 名と同じ `what` を使った。
+      `send_prepare` は `name` → `sql` の順に検査するので、両方 NUL のときのメッセージは `name` 側）
     - (b) `tests/test_notify.mojo` 完成（5 件以上追加。RESEARCH §2.2 の表の各行）:
       ① クエリ実行中の NOTIFY（P20）: async `send("SELECT pg_sleep(0.3)")` 直後に同期側が `NOTIFY` → async `fetch_all` 後の `notifications()` が 1 件；② payload 7999 byte と UTF-8 `héllo`（`byte_length() == 6`）が一致；③ 通知側 `BEGIN; NOTIFY` では `wait_notification(300)` が `None`、`COMMIT` 後に届く（async2 E2）；
       ④ 自分への NOTIFY（同じ async 接続で `send("NOTIFY pq_self")` → `fetch_all` → `notifications()` が 1 件。async2 E3）；⑤ `wait_notification` が 2 件来たとき 2 回目の呼び出しが `_pending` から即返る（経過 < 50 ms。決めた事項 11 の陽性）；
