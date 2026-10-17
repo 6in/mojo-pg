@@ -1,5 +1,6 @@
 # VERIFICATION — phase5-polish-bench-readme
 
+- round 2: 2026-10-18 / turn 12 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F2 の 1 タスク。文書のみ 6 行）→ impl に差し戻し**。F1 は合格（§5）
 - round 1: 2026-10-18 / turn 10 / Claude Code（claude-fable-5-1）。判定 **指摘あり（F1 の 1 タスク）→ impl に差し戻し**
 - 対象: `git diff main...HEAD`（コード 20 ファイル: `src/pq` 7 / `tests` 4 / `examples` 8 / `pixi.toml` / `pixi.lock` / `README.md` / `LICENSE`）。
   `CLAUDE.md` / `AGENTS.md` は無し。サブエージェント 0 本（親が全部。差分が 1 画面に収まる規模）
@@ -75,3 +76,47 @@ round 2 は上表の再確認と F1 の回帰（表の 6 行）だけを行い�
 - Mojo の `print` は stdout の書き込み失敗（`/dev/full`、閉じた fd）を無視して exit 0 で終わる — トレースバックは出ないので D4 は満たすが、「出力が失われた」ことは利用者に伝わらない（stdlib の挙動。pq の対象外）
 - `wait_notifications` の `_collect_notifications` は `notifications()` が raise した往復で届いた良い通知を `notifications()` 自身の `_pending` 経由で保全する（⑨ で確認）が、`wait_readable` の `CONNECTION` で抜ける経路では `out` を復元しない（`_pending` に戻さず raise）。切断後は `notifications()` が `_reject_lost` で拒否するので取り出す手段が無く、復元しても届かない — 実害なし
 - `check` の所要は 169〜215 s で揺れる（同時実行ノイズ）。閾値 247 s 以内
+
+## 5. round 2（turn 12）— F1 の回帰 + round 1 格子の再確認。新クラスの探索はしていない
+
+- 対象差分: round 1 以降の変更は `examples/bench_psycopg.py`（+44 / -14）と `README.md` §7（+5 / -2）だけ（`git diff --stat 77c997f...HEAD`。`src/` / `tests/` は不変）
+- 生ログ: `scratch/turn-012-{check,checklist,robust-regress,bench}.log`、スクリプト `turn-012-robust-regress.sh`
+
+### 5.1 F1 の回帰（PLAN F1 の表 6 行）— すべて期待どおり
+
+| 条件 | 実測（`turn-012-robust-regress.log`） |
+|---|---|
+| 非 UTF-8 conninfo | rc 1、stdout `failed: UnicodeEncodeError 'utf-8' codec can't encode characters in position 53-55 ...` 1 レコード、`Traceback` 0 |
+| `/dev/full`（正常 / badpw） | rc 1 / 1、stderr `failed: OSError [Errno 28] No space left on device` 1 行、`Exception ignored` 0 |
+| stdout のパイプ閉鎖（**本物の EPIPE**。§5.3） | 正常 / badpw とも rc 1、stderr `failed: BrokenPipeError [Errno 32] Broken pipe` 1 行、`Exception ignored` 0（表の「0 か 1」の範囲） |
+| badpw / badport | rc 1、`failed: OperationalError ...` 1 レコード（badport は libpq のヒント行で物理 2 行） |
+| 正常 | rc 0、1 行目 `psycopg 3.3.4 impl=c libpq=180006 server=170011 python=3.14.8` |
+
+- コードレビュー（`bench_psycopg.py:79-109`）: 例外は親クラス 2 段（`psycopg.Error` / `ValueError`）+ 外側 `OSError`。`status` を持ち回って `sys.exit` は末尾 1 回（内側で exit すると明示 flush を飛ばす — impl の説明どおり）。
+  `sys.stdout is None`（fd 1 閉鎖）を守っている。`_discard_stdout()` は Python 公式の SIGPIPE 手順そのもの。F1 (a) の規則（親クラス / `_run` の `sys.exit(1)` 不変）に合致
+- README §7 の言い換え: `tests/run_tests.sh:10-13` の注記（末尾に ` password=...` を付け足す）と一致。examples が URI で動くことは格子の `basic conninfo URI` / `py conninfo URI`（rc 0）で裏取り
+
+### 5.2 round 1 の格子の再確認（`turn-012-robust-regress.sh`、**42 レコード**。Mojo 3 本は HEAD `0ed5ae9` から再ビルド）
+
+- 全 42 レコードで `unhandled_markers=0 traceback=0 exception_ignored=0`。入力クラス（空 / URI / 非 UTF-8 / 制御文字 / 100 KB / 引用符不整合 / 存在しない DB / 空白のみ / `libc.so.6` / ディレクトリ / 空ファイル / `/dev/null` / 非 UTF-8 パス）は
+  すべて `failed: PgError(...)` + rc 1 か正常 rc 0。出力クラス（`/dev/full` / 閉じた fd / stdin 閉鎖）は round 1 と同じ rc
+- `pixi run check`（`db-reset` 直後のクリーンな木）→ **6/6 PASS**（`final_check: PASS`、`0 failed` のサマリ 47 件、`FAIL` / `Traceback` 0 行、6/6 段 `matched lines` 0）。所要は約 **165 s**（ログの mtime からの概算。閾値 247 s）
+- `docker exec … pg_database` は pg17 / pg14 とも **0 行**
+- チェックリスト（82 key）は `turn-011-checklist.log` と **完全一致**（`diff` 空）
+- `pixi run bench`（アイドル時、`check` の後に 1 回）: decode **binary 13 / 13 / 13 ms < text 42 / 42 / 42 ms**（README の 12/11/11 vs 42/42/44 と同じ桁。受け入れ基準の性質は再現）
+- README コード片 6 本 `blocks=6 missing_total=0`、型表 `src rows=20 readme rows=20` で差分 4 件は round 1 と同じ日本語化の散文のみ
+
+### 5.3 指摘（→ PLAN F2。文書のみ）と、round 1 の格子の欠陥 1 件
+
+1. **examples 6 本の docstring が「`key=value ...` form only, never a `postgres://` URI」のまま**で、F1 (c) で直した README §7「`examples/` は URI でも動く」と矛盾する
+   （REQ §4.3「docstring が README と矛盾しない」。`basic.mojo:7` / `params.mojo:13` / `binary.mojo:13` / `async_query.mojo:12` / `listen_notify.mojo:14` / `bench_formats.mojo:16`）。
+   **なぜ前ラウンドで拾えなかったか**: round 1 は格子で README の言い切りに気づいたあと README だけを F1 に入れ、同じ文をリポジトリ全体で `grep -rn` しなかった（REQ §9 verify の規則の不履行）
+2. 格子の欠陥（指摘ではなく verify 側の訂正）: round 1 / F1 (b) の `run_pipe`（`2>&1 1>&3 | head -c 1`）は **stderr をパイプに、stdout を捕捉側に**つないでいて、stdout の EPIPE を一度も試していなかった。
+   round 2 は `> >(exit 0)`（読み手が先に消えたパイプ）に置き換えて本物の EPIPE を試した: `bench_psycopg.py` は上表のとおり合格、Mojo の `basic` / `hello_libpq` は **rc 141（SIGPIPE で終了）**。
+   トレースバックは出ず、`head` に繋いだときの Unix の標準挙動なので D4 の違反とは見なさない（§5.4 に残す）
+
+### 5.4 残留リスク（round 2 で追加。合格側に残すもの）
+
+- Mojo の examples は stdout の読み手が先に消えると SIGPIPE で rc 141 になる（stdlib の `print` は SIGPIPE を無視しない）。トレースバックは出ない。パイプで `head` に繋ぐ用途の標準挙動
+- `bench_psycopg.py` の `_run` 内 `sys.exit(1)`（件数不一致）は `SystemExit` で明示 flush を飛ばすので、**「サーバーが件数を間違える」と「stdout が書けない」が同時に起きた場合だけ** `Exception ignored` + rc 120 に戻る。PLAN F1 (a) が「`_run` の `sys.exit(1)` は変えない」と定めた経路で、実害は無い
+- `_discard_stdout()` の `os.open(os.devnull)` が失敗する（fd 枯渇）と `OSError` が素通りして Traceback になる。stdout が書けない状況との二重故障のみ

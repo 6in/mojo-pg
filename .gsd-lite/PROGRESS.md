@@ -394,3 +394,18 @@
   `scratch/turn-011-bench-robust.sh`（15 レコード、約 50 s）/ `turn-009-examples-robust.sh`（17 本）/
   `turn-002-checklist.sh`（全行期待値）/ `turn-011-check.log`（189 s）。`pixi` は
   `/home/parallels/.pixi/bin/pixi` を絶対パスで。Monitor の通知は信用せずログで裏取り
+
+## turn 12 — verify — 指摘あり（F2 の 1 タスク、文書のみ 6 行）/ round 2 → impl に差し戻し / マージなし
+- やったこと: F1 の差分（`bench_psycopg.py` + README §7）をレビューし、`db-reset` → `pixi run check` **6/6 PASS**（約 165 s、`0 failed` 47 件、
+  `pg_database` 両サーバー 0 行）、チェックリスト（turn 11 と完全一致）、round 1 格子 + F1 の表 6 行を `scratch/turn-012-robust-regress.sh`
+  （**42 レコード**、Mojo 3 本は HEAD から再ビルド）で再確認 → 全行クリーン、`pixi run bench` で decode binary 13 < text 42 ms、
+  README コード片 / 型表のスクリプト再実行（一致）。サブエージェント 0 本。VERIFICATION §5 に記録
+- 指摘: examples 6 本の docstring「never a `postgres://` URI」が F1 (c) 後の README §7 と矛盾（REQ §4.3）→ PLAN 末尾に **F2**（文書のみ、6〜12 行、新しいテスト資源なし）
+- 想定外: (1) round 1 / F1 (b) の `run_pipe` は `2>&1 1>&3 | head` の順序で **stderr をパイプに**つないでいて stdout の EPIPE を試していなかった。
+  `> >(exit 0)` に直して本物の EPIPE を試すと `bench_psycopg.py` は `failed: BrokenPipeError` + rc 1（合格）、Mojo examples は rc 141（SIGPIPE。残留リスクに記載）。
+  (2) round 1 が README の言い切りを直すとき同文をリポジトリ全体で grep しなかった（REQ §9 verify の規則）。それが今回の F2 の原因。
+  (3) `check` の所要は開始時刻を記録し忘れ、ログの mtime からの概算（約 165 s）になった
+- やり直し: 0 回
+- 次への注意: impl は **F2 だけ**（examples 6 本の docstring 1 文ずつ。`src/` / `tests/` / README は触らない）。期待結果は PLAN F2 の**表 1 つ**が唯一の正。
+  `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` が 0 件になること（`run_tests.sh:10-11` の「NOT a postgres:// URI」は残す）。
+  `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで。`check` の基線は 165〜189 s（閾値 247 s）。verify round 3 は「F2 の grep + `check` + チェックリスト同値」だけで、格子の再実行は不要（コード不変）

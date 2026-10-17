@@ -341,6 +341,29 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
   - 依存: T7
   - 並列サブ作業: サブエージェント **0 本（親が全部）**
 
+- [ ] F2: examples 6 本の docstring「`key=value ...` form only, never a `postgres://` URI」を README §7 と一致させる（文書のみ。verify round 2 / turn 12。REQ §4.3「docstring が README と矛盾しない」）
+  - 背景: F1 (c) で README §7 を「URI を受けないのは**テスト**だけ。`examples/` は値をそのまま `PQconnectdb` に渡すので URI でも動く」に直したが、同じ言い切りが examples の docstring に残っている
+    （`grep -rn 'never a .postgres://. URI' examples/` = **6 件**: `basic.mojo:7` / `params.mojo:13` / `binary.mojo:13` / `async_query.mojo:12` / `listen_notify.mojo:14` / `bench_formats.mojo:16`）。
+    実態は `scratch/turn-012-robust-regress.log` の `basic conninfo URI` 行（rc=0）と `py conninfo URI` 行（rc=0）のとおり URI で動く。`src/pq/connection.mojo:169-172` も「conninfo string or URI, exactly as `PQconnectdb` does」。
+    round 1 が README だけ直して同文をリポジトリ全体で grep しなかったのが原因（REQ §9 verify「字句の指摘はクラスで名指しし `grep -rn` で全件を同梱」の不履行）
+  - **期待結果（この表が唯一の正）**:
+
+    | 検査 | 期待値 |
+    |---|---|
+    | `grep -rn 'never a .postgres://. URI' examples/ README.md src/pq tests/run_tests.sh` | **0 件**（`tests/run_tests.sh:10-11` の「NOT a postgres:// URI」はテスト側の真の制約なので**残す**。パターンは `never a` を含むので当たらない） |
+    | 上記 6 ファイルの該当 1 文 | 「`key=value ...` string or a `postgresql://` URI, passed to `PQconnectdb` as is」の趣旨（英語。80 桁以内で折り返し可。`Run it with \`pixi run <task>\`.` の行は変えない） |
+    | `examples/bench_psycopg.py:11`「(`key=value ...` form)」 | **変えない**（URI を否定していないので同クラスではない。変えても可だが完了基準には含めない） |
+    | `/home/parallels/.pixi/bin/pixi run check` | **6/6 PASS**（1/6 段 `mojo format` 無変更、4/6 段で examples 5 本が走る） |
+    | チェックリスト（`scratch/turn-002-checklist.sh`） | `examples_pixi_run` = **7** / `readme_*` / `hello_*` / `examples_raise_error` = 0 がすべて **turn-012-checklist.log と同値** |
+    | `scratch/turn-012-robust-regress.sh` の再実行 | 任意（コードは変わらないので省略してよい） |
+
+  - 完了基準:
+    - (a) 6 ファイルの docstring の該当 1 文を上表のとおり言い換える（`src/` / `tests/` / README は触らない。見込み **6〜12 行**、新しいテスト資源なし）
+    - (b) 上表の `grep` が 0 件、`check` 6/6 PASS、チェックリストが同値。所要（`check`）を PROGRESS に単位付きで
+  - 対象: `examples/basic.mojo`, `examples/params.mojo`, `examples/binary.mojo`, `examples/async_query.mojo`, `examples/listen_notify.mojo`, `examples/bench_formats.mojo`
+  - 依存: F1
+  - 並列サブ作業: サブエージェント **0 本（親が全部）**
+
 ## 決めた事項
 
 1. **タスク分割は RESEARCH §6 の T1〜T6 を 7 つに**（T2 を「`ENCODING` + 先行チェック + 格子」と「`wait_notifications` + 契約外テスト」に分けた）。T2 単体でも src 5 + tests 3 ファイルあり、
