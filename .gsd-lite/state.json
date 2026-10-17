@@ -34,7 +34,7 @@
       "~/workspaces"
     ]
   },
-  "turn": 5,
+  "turn": 6,
   "max_turns": 60,
   "retry_max": 2,
   "verify_round": 0,
@@ -46,5 +46,5 @@
     "verify": "claude-fable-5-1",
     "reflect": "claude-fable-5-1"
   },
-  "updated_at": "2026-10-17T16:55:13+09:00"
+  "updated_at": "2026-10-17T17:11:19+09:00"
 }

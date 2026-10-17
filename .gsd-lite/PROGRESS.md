@@ -134,3 +134,37 @@
     実測していない経路で、「状態機械が壊れる経路」ではなく「送信直後に接続が死ぬ稀なケース」。処分先は **T5 ④ の切断テスト**に 1 行足せれば足りるが、
     `send` 中の切断は競合で再現できないので、再現しなければ「契約外（libpq が -1 を返す条件を作れない）」と T8 (d) に書く
   - `check` は 221 s（T2 の 133 s + 88 s。増分の大半は `test_async` の `pg_sleep(2)` × 2 サーバーと connect タイムアウト 0.5 s × 2）。T4 で NOTIFY と cancel が乗ると 5 分に近づく
+
+## turn 6 — impl — T4 cancel / NOTIFY / single-row / examples
+- やったこと: (a)〜(g) を 1 人で実装（推奨 1 本 / 実 0 本。サブ作業 A は examples + pixi + final_check の 1 本だけなのでサブエージェントは使わず）。
+  `async_conn.mojo` に `cancel` / `notifications` / `wait_notification` / `set_single_row_mode`（+ 私用 `_single_row_error`）、
+  `__init__.mojo` の `## Asynchronous use` に cancel / single-row / LISTEN-NOTIFY の 3 項目と 5 行の例、
+  `tests/test_async.mojo` に T4 節 4 件（計 13 件）、`tests/test_notify.mojo` 新設 3 件、
+  `examples/async_query.mojo` / `examples/listen_notify.mojo` + `pixi.toml` 2 タスク + `final_check.sh` 4/6 段に 2 行
+- 期待値の取り直し（REQ §9 常設。プローブ `scratch/turn-006-probe-expect.mojo`、同期 `Connection` のみ）: `pg_backend_pid()` は Int32 で取れる /
+  自分を `pg_cancel_backend(pg_backend_pid())` した `pg_sleep` が `Server` `57014` `canceling statement due to user request`（PLAN の期待と一致）/
+  `NOTIFY ch, 'payload-1'` と `NOTIFY ch` はどちらも command_tag `NOTIFY`。NOTIFY の payload（`"payload-1"` / `""`）と `backend_pid` の一致は
+  `test_notify.mojo` ① が実測（送信側の `pg_backend_pid()` と同値、PG17 / PG14 両方 PASS）
+- 既存テストの期待値変更: **ゼロ**（既存 9 件は無変更。追加は `test_async` 4 件 + `test_notify` 3 件、`__init__.mojo` は docstring のみ）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（24 ファイル × 2 = **48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、17:02:19 → 17:07:12 = **293 s**）、`pixi run check` **6/6 PASS**（17:07:17 → 17:10:06 = **169 s**。
+  T3 の 221 s より短い。4/6 段に新 examples 2 本の出力あり）、`pixi run package` 警告ゼロ、`pixi run fmt` は 2 ファイル整形（コミット前に反映済み）。
+  `pixi run example-async`（`n = 1` / 空ポーリング 14〜15 回）と `example-notify`（`channel = pq_example` / `payload = hello from pq` / `backend_pid`）は単体でも成功。
+  `test_async` 単体は **2.9 s**（うち cancel 114〜132 ms）、`test_notify` 単体は **0.38 s**
+- チェックリスト（T4 行）: `async_cancel_insecure=2`（≥1） / `src_PQfreemem_calls=3` / `src_PQfreeCancel_calls=1` / `test_notify=exists` /
+  `test_notify_tests=3`（≥3） / `example_async=exists` / `example_notify=exists` / `pixi_example_tasks=2` / `final_check_examples=2` /
+  `final_check_run_logged_examples=5` / `async_called_while=7`（≥6。T3 の 5 + cancel / notifications の docstring）— **全部期待値**。
+  併せて `async_public_defs=27` / `test_async_tests=13`（T5 で ≥20）/ `tests_print_SKIP=5`（`test_notify.mojo` ができて `absent` が解消。手数えと一致）/
+  `tests_files_count=24`・`test_file_count=24`（T8 の期待値に到達）
+- 想定外: (1) `notifications()` で `self._pending^` とフィールドから move out はできない（部分的に未初期化になる）→ `copy()` + `clear()` にした。
+  `PQconsumeInput` が 0 のときに `_pending` を失わないよう、**consume の後に** `_pending` を引き取る順序にしてある。
+  (2) それ以外は PLAN どおり（cancel の errbuf・`PGnotify` の struct 読み・`PQfreemem` は research プローブの形がそのまま通った）
+- やり直し: 0 回（`package` / `test_async` / `test_notify` / examples はいずれも初回で通った）
+- 次への注意:
+  - 確認済み: `cancel()` は `self`（非 mut）で呼べる＝`IDLE` no-op も状態を触らない。`fetch_all` が `57014` を投げたあと `state()` は `IDLE`（drain 済み）なので
+    T5 ③ の tx 内 cancel は `fetch_all` の後に `transaction_status()` を読めばよい。`set_single_row_mode()` は `_single_row_allowed` が偽のとき
+    **`set_single_row_mode() must follow send() before any result is read (state <State>)`**（`called while` の形ではない）ので T5 ① の部分文字列は
+    `"must follow send"` を使う。`notifications()` は `CONNECTING` 以外どの状態でも呼べる（`BUSY` 中も可）。`wait_notification` の 2 件目は `_pending` から即返る（T5 ⑤ の陽性はこの経路）
+  - 未確認: `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）は未実測。切断済み接続で `PQgetCancel` が非 NULL を返すか 0 を返すかは
+    research プローブ L 行の挙動次第で、**処分先は T5 ②「切断後 cancel → CONNECTION」**（既に PLAN にある）。`PQsetSingleRowMode` が 0 を返す分岐も未到達（契約上起こらない想定）
+  - `check` は 169 s で 5 分に届かず。T5 で 16 MB クエリ + 切断テストが乗るので再計測する
