@@ -135,3 +135,48 @@
   `grep -n 'poll failed' tests/test_poll.mojo` で再確認してから message を変える。(d) の複製ビルドは通らなくてもよく、
   結果を TRACE に 1〜3 行書けば進める（REQ §3: Windows でのコンパイルは対象外）。`check` は 177 s が基線。
   陽性対照を取るために src を一時的に壊すときは、先に `cp` でバックアップし、戻した後 `diff` で同一を確認する（turn 5 で有効だった）
+
+## turn 6 — impl — T4 Windows コードパスのレビュー（`WSAGetLastError` / `libpq.dll` / 照合表）
+- やったこと: `_platform/poll.mojo` の `_poll_once` を `Tuple[Int, Int, Int]`（ret, flags, err）にし、err を
+  POSIX は `get_errno().value`、Windows は `external_call["WSAGetLastError", c_int]()` から読む形に。分類を
+  `_is_interrupted`（Windows 常に False）/ `_is_usage_error`（POSIX `EBADF` / `EINVAL`、Windows 10009 / 10022 / 10038）の
+  2 ヘルパに切り出し、message を `poll failed: errno <N>` に。docstring のシンボル数を two → three、Windows 注記に
+  #8（2004 より前は接続失敗が `WSAPoll` に通知されない）と #11（`WSAStartup`）+ 一次資料 URL 3 本。
+  `_ffi/loader.mojo` は `platform_map` を `def _default_candidates() -> StaticString` の `comptime if` 連鎖に置き換え
+  （Windows = `libpq.dll`）。`TRACE.md` に照合表 12 行 + URL 4 本 + 結び。コミット `814e68b`。
+  サブエージェント 推奨 0 本 / 実 0 本（PLAN どおり親が全部）
+- 既存テストの期待値変更: **ゼロ**（`tests/` は 1 行も触っていない。`git show --stat 814e68b` の 4 ファイルは
+  src 2 + TRACE.md + PLAN.md のみ。`poll failed:` の文言を変えたが `grep -n 'poll failed' tests/test_poll.mojo` は
+  0 件で、断定しているテストは無い）
+- 陽性対照 / (d) の複製ビルド: `scratch/turn-006-win-typecheck.mojo`（`_WsaPollFd` + `_WSA_POLL*` + `_poll_once` の
+  `else` 本体 + `_is_interrupted` / `_is_usage_error` の Windows 側を `comptime if True:` 側に複製）を
+  `pixi run mojo build -I src ... -o build/win-typecheck` → **出力ゼロ・exit 0 で 74,472 bytes の実行ファイルが生成**。
+  型検査だけでなくリンクも通った（`external_call` は実行時解決）。実行はしていない。
+  事前に `scratch/turn-006-errno-probe.mojo` で `ErrNo.{EINTR,EBADF,EINVAL}.value` = 4 / 9 / 22 と
+  `comptime if` 連鎖 + 3 要素 Tuple の形が通ることを確認（これが無いと本体を壊してから気づく）
+- 検証と所要（単位付き）: `pixi run test` 両サーバー PASS（48 サマリすべて `0 failed`、`FAIL` の行 0。
+  `test_poll` **11** 件不変、`test_notify` 24 件 / `test_async` 31 件）、`pixi run package` 警告ゼロ、
+  `pixi run check` **6/6 PASS を 2 回**（docstring 言い換えの前後。**182 s** と **215 s**。基線 177 s、閾値 247 s 以内）、
+  `pixi run hello-libpq` が `PQlibVersion = 180006 (PostgreSQL 18.6)`、`test_loader_fail` PASS（候補全滅の経路）。
+  `docker exec ... psql` は **pg17 / pg14 とも 0 行**。
+  チェックリストの T4 行は全行期待値（`loader_libpq_dll`=2（訂正後 ≥ 2）/ `loader_platform_map`=0 /
+  `loader_homebrew`=1 / `loader_default_candidates_def`=1 / `loader_CompilationTarget`=3 / `poll_WSAGetLastError`=5 /
+  `poll_external_call_symbols`=3 / `poll_get_errno`=2 / `poll_10022`=2 / `poll_only_two_symbols`=0 /
+  `poll_win10_2004`=2 / `poll_WSAStartup`=1 / `trace_wsapoll_table`=2 / `test_poll_tests`=11）。
+  生ログ: `scratch/turn-006-{test,check,check2,checklist,win-typecheck}.log`
+- 想定外: (1) **PLAN 訂正 1 件**（TRACE.md「PLAN 訂正」節）: チェックリストの `loader_libpq_dll` の T4 期待値
+  **1 → ≥ 2**（表は RESEARCH §2.4 の `grep -c` 0 → 1 を写していたが、PLAN T4 (c) 自身がモジュール docstring にも
+  `libpq.dll` を書くことを完了基準にしている。実測 2）。(2) `loader_platform_map` は最初 **1** だった
+  — `_default_candidates` の docstring に「`platform_map` には `windows=` が無い」と識別子で理由を書いたため。
+  期待値 0 は「もう `platform_map` を使っていない」という性質なので、理由を保ったまま
+  「the stdlib's compile-time platform map」と言い換えて 0 に戻した（PLAN 訂正ではなく実装側の修正）。
+  (3) `check` の 2 回目が 215 s（1 回目 182 s）。変更は docstring 1 文の言い換えだけなので同時実行していた
+  何かのノイズ。閾値内なので追わない
+- やり直し: 0 回
+- 次への注意: 次は T5（pixi feature `bench` + `examples/bench_psycopg.py` + `pixi.lock` + 実測ログ）。
+  雛形は `scratch/turn-001-pixi/`（`pixi.toml` の 3 ブロックと `examples/bench_psycopg.py` そのもの）。
+  **`pixi.toml` は T1 で `db-reset` を足したので差分が重なる**（`[feature.bench.*]` / `[environments]` は
+  既存ブロックの後に足す形で衝突しない）。(d) の実測は **`check` の直後に測らない**（REQ §9 / P14）ので、
+  `check` を回したあとは数分あけるか、実測 → `check` の順にする。初回の bench 環境作成は 1 分前後かかる
+  （`pixi run bench-psycopg` の 1 回目）。`pixi.lock` は**コミット対象**で `git diff --stat pixi.lock` を PROGRESS に。
+  受け入れは「Mojo の `decode` 列で binary < text が 2 回とも成立」。`check` の基線は 182 s に更新（閾値 247 s）
