@@ -7,9 +7,13 @@ send, written here as a hex string and turned into bytes by `_hex`.
 from std.math import isinf, isnan
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
-from pq.decode_binary import decode_binary
+from pq.decode_binary import (
+    _string_payload,
+    _utf8_first_invalid,
+    decode_binary,
+)
 from pq.decode_text import parse_bytea_hex
-from pq.errors import PgErrorKind
+from pq.errors import PgError, PgErrorKind
 from pq.types_datetime import (
     Date,
     Interval,
@@ -333,6 +337,207 @@ def test_jsonb_rejects_version_two() raises:
 
 def test_jsonb_rejects_empty() raises:
     assert_equal(_error_kind[String]("", 3802), PgErrorKind.TYPE_MISMATCH)
+
+
+# --- the shared string payload (decode_binary[String] / Row.get_text) --------
+
+
+def _payload(digits: String, oid: UInt32) raises -> String:
+    """Return the text `_string_payload` picks out of a binary cell.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: Column type OID reported by the server.
+
+    Returns:
+        The payload bytes, copied into a `String`.
+
+    Raises:
+        Error: If `_string_payload` raised a `PgError`.
+    """
+    var bytes = _hex(digits)
+    try:
+        return String(unsafe_from_utf8=_string_payload(Span[UInt8](bytes), oid))
+    except e:
+        raise Error(String(e))
+
+
+def _payload_error(digits: String, oid: UInt32) raises -> PgError:
+    """Return the `PgError` `_string_payload` raises for a cell.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: An OID `_string_payload` refuses.
+
+    Returns:
+        The raised error.
+
+    Raises:
+        Error: If `_string_payload` returned a payload instead of raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = _string_payload(Span[UInt8](bytes), oid)
+    except e:
+        return e^
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def test_string_payload_is_the_one_place_the_oid_is_judged() raises:
+    # The one function `decode_binary[String]` and `Row.get_text` both read
+    # the cell through, so they cannot drift apart: `jsonb` loses its version
+    # byte, the other five string-shaped OIDs are their own payload, and
+    # anything else is the same `TYPE_MISMATCH` naming the OID.
+    assert_equal(_payload("017b7d", 3802), "{}")
+    assert_equal(_payload("7b7d", 25), "{}")
+    var rejected = _payload_error("7b7d", 23)
+    assert_equal(rejected.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("oid 23" in rejected.message, rejected.message)
+
+
+# --- UTF-8 validation of the string payload ----------------------------------
+
+
+def _utf8_error(digits: String, oid: UInt32, column: Int) raises -> PgError:
+    """Return the `PgError` `decode_binary[String]` raises for a cell.
+
+    Unlike `_error_message`, this passes `column` through, so the tests can
+    check both the offset and the column the message names.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: A string-shaped column type OID.
+        column: The column index to hand `decode_binary`.
+
+    Returns:
+        The raised error.
+
+    Raises:
+        Error: If `decode_binary[String]` returned a value instead of
+            raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = decode_binary[String](Span[UInt8](bytes), oid, column)
+    except e:
+        return e^
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def _utf8_error_no_column(digits: String, oid: UInt32) raises -> PgError:
+    """Return the `PgError` for a cell decoded without a column index.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: A string-shaped column type OID.
+
+    Returns:
+        The raised error.
+
+    Raises:
+        Error: If `decode_binary[String]` returned a value instead of
+            raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = decode_binary[String](Span[UInt8](bytes), oid)
+    except e:
+        return e^
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def _first_invalid(digits: String) raises -> Int:
+    """Return `_utf8_first_invalid` of the bytes `digits` spells.
+
+    Args:
+        digits: The bytes to scan, as hex digits.
+
+    Returns:
+        -1 for well-formed UTF-8, otherwise the offset of the first
+        ill-formed sequence.
+
+    Raises:
+        Error: If `digits` is not valid hex.
+    """
+    var bytes = _hex(digits)
+    return _utf8_first_invalid(Span[UInt8](bytes))
+
+
+def test_text_rejects_invalid_utf8_naming_the_byte_offset() raises:
+    # `61 62 c3 28 63` is "ab" then a two-byte lead whose continuation byte
+    # is "(", so the first ill-formed sequence starts at offset 2.
+    var raised = _utf8_error("6162c32863", 25, 3)
+    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("invalid UTF-8" in raised.message, raised.message)
+    assert_true("at byte 2" in raised.message, raised.message)
+    assert_true("of column 3" in raised.message, raised.message)
+
+
+def test_text_rejects_truncated_utf8_sequence() raises:
+    # `61 e2 82` wants a three-byte sequence but the cell ends one byte
+    # early, so the lead byte at offset 1 is the failure. Decoded without a
+    # column, so the message has to say it does not know which one.
+    var raised = _utf8_error_no_column("61e282", 25)
+    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("at byte 1" in raised.message, raised.message)
+    assert_true("of column ?" in raised.message, raised.message)
+
+
+def test_text_rejects_overlong_utf8_encoding() raises:
+    # `c0 80` is NUL written in two bytes: decodable, but not well-formed.
+    var raised = _utf8_error("c080", 25, 0)
+    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("at byte 0" in raised.message, raised.message)
+    assert_true("of column 0" in raised.message, raised.message)
+
+
+def test_text_rejects_utf8_encoded_surrogate() raises:
+    # `ed a0 80` is U+D800, a UTF-16 surrogate half, which UTF-8 excludes.
+    var raised = _utf8_error("eda080", 25, 1)
+    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("at byte 0" in raised.message, raised.message)
+    assert_true("of column 1" in raised.message, raised.message)
+
+
+def test_text_accepts_valid_multibyte_utf8() raises:
+    # Validation must not cost a correct cell anything: "hé" still decodes,
+    # still three bytes wide.
+    var value = _ok[String]("68c3a9", 25)
+    assert_equal(value, "hé")
+    assert_equal(value.byte_length(), 3)
+
+
+def test_utf8_first_invalid_finds_each_malformed_input() raises:
+    # The positive control for the scanner: it must not answer "all fine"
+    # for anything the four rejection tests above feed it, and it must
+    # answer "all fine" for a correct cell and for no bytes at all.
+    assert_equal(_first_invalid("6162c32863"), 2)
+    assert_equal(_first_invalid("61e282"), 1)
+    assert_equal(_first_invalid("c080"), 0)
+    assert_equal(_first_invalid("eda080"), 0)
+    assert_true(_first_invalid("6162c32863") >= 0)
+    assert_true(_first_invalid("61e282") >= 0)
+    assert_true(_first_invalid("c080") >= 0)
+    assert_true(_first_invalid("eda080") >= 0)
+    assert_equal(_first_invalid("68c3a9"), -1)
+    assert_equal(_first_invalid(""), -1)
+
+
+def test_invalid_utf8_message_never_quotes_the_cell() raises:
+    # The message may name a position but not the bytes at it, so neither
+    # the readable prefix "ab" nor the offending byte 0x28 ("(") appears.
+    var message = _utf8_error("6162c32863", 25, 3).message
+    assert_false("ab" in message, message)
+    assert_false("(" in message, message)
+
+
+def test_jsonb_utf8_offset_skips_the_version_byte() raises:
+    # `01 61 c3 28` is version byte 1 then `61 c3 28`, and the offset
+    # counts from the JSON text, so the failure is at byte 1, not byte 2.
+    var raised = _utf8_error("0161c328", 3802, 2)
+    assert_equal(raised.kind, PgErrorKind.TYPE_MISMATCH)
+    assert_true("at byte 1" in raised.message, raised.message)
+    assert_true("of column 2" in raised.message, raised.message)
 
 
 # --- bytea (OID 17) ----------------------------------------------------------
@@ -761,6 +966,17 @@ def test_timetz_rejects_zones_of_sixteen_hours() raises:
     _assert_value_rejected[TimeTz](
         "0000000a0eebb000" + "ffff1f00", 1266, "zone -57600"
     )
+
+
+def test_timetz_range_checks_the_time_of_day() raises:
+    # `24:00:00` with a zone is a value the server stores and prints, so the
+    # upper bound is inclusive; one microsecond past it is not a `timetz`.
+    _assert_value_rejected[TimeTz](
+        "000000141dd76001" + "00000000", 1266, "is out of range"
+    )
+    var end_of_day = _ok[TimeTz]("000000141dd76000" + "ffff8170", 1266)
+    assert_equal(end_of_day.micros, Int64(86400000000))
+    assert_equal(end_of_day.offset_secs, Int32(-32400))
 
 
 def test_timetz_rejects_wrong_length_and_oid() raises:

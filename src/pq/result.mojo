@@ -32,25 +32,32 @@ view of the same storage, under the same origin rule.
 from std.ffi import c_int
 
 from pq.decode_binary import (
-    _JSONB_VERSION,
-    _binary_length_error,
-    _binary_oid_error,
-    _binary_value_error,
+    _string_payload,
+    _validated_utf8,
     decode_binary,
 )
-from pq.decode_text import (
-    OID_BPCHAR,
-    OID_JSON,
-    OID_JSONB,
-    OID_NAME,
-    OID_TEXT,
-    OID_VARCHAR,
-    decode_text,
-)
+from pq.decode_text import decode_text
 from pq.errors import PgError, PgErrorKind, _reject_nul
 
 from ._ffi.functions import LibpqFFI
-from ._ffi.types import CStr, PGresultPtr
+from ._ffi.types import (
+    CONNECTION_BAD,
+    CStr,
+    PG_DIAG_CONTEXT,
+    PG_DIAG_MESSAGE_DETAIL,
+    PG_DIAG_MESSAGE_HINT,
+    PG_DIAG_MESSAGE_PRIMARY,
+    PG_DIAG_SEVERITY,
+    PG_DIAG_SEVERITY_NONLOCALIZED,
+    PG_DIAG_SQLSTATE,
+    PG_DIAG_STATEMENT_POSITION,
+    PGRES_COMMAND_OK,
+    PGRES_EMPTY_QUERY,
+    PGRES_SINGLE_TUPLE,
+    PGRES_TUPLES_OK,
+    PGconnPtr,
+    PGresultPtr,
+)
 
 
 @fieldwise_init
@@ -119,6 +126,119 @@ def _column_range_error(col: Int, ncols: Int) -> PgError:
     return PgError(
         PgErrorKind.TYPE_MISMATCH,
         String("column index ", col, " out of range (0..", ncols - 1, ")"),
+    )
+
+
+def _error_field(
+    pq: Pointer[LibpqFFI, MutUntrackedOrigin],
+    res: PGresultPtr,
+    code: c_int,
+) -> String:
+    """Copy one `PQresultErrorField` into an owned `String`.
+
+    Args:
+        pq: The libpq function table to call through.
+        res: The result carrying the diagnostic.
+        code: A `PG_DIAG_*` field code.
+
+    Returns:
+        The field text, or an empty string when libpq reports NULL.
+    """
+    var p = pq[].PQresultErrorField(res, code)
+    if p:
+        return String(unsafe_from_utf8_ptr=p.value())
+    return String()
+
+
+def adopt_result(
+    pq: Pointer[LibpqFFI, MutUntrackedOrigin],
+    conn: PGconnPtr,
+    res: PGresultPtr,
+) raises PgError -> Result:
+    """Adopt a finished `PGresult` or raise the error it reports.
+
+    A successful result is handed to `Result`, which takes over the
+    `PQclear`. Every failing path clears `res` itself before raising, apart
+    from a NULL `res`, where libpq allocated nothing to clear.
+
+    Every result in the package passes through here: `Connection._take_result`
+    for the synchronous path, and `AsyncConnection.poll_result` /
+    `poll_connect` / `fetch_all` for the asynchronous one. That is why
+    `PGRES_SINGLE_TUPLE` counts as success -- the synchronous path never
+    produces one, but single-row mode does.
+
+    Args:
+        pq: The libpq function table to call through.
+        conn: The connection the result came from, consulted only to tell a
+            lost connection from a rejected statement.
+        res: The result libpq returned for the command that just ran, as-is
+            including NULL.
+
+    Returns:
+        The `Result` of the command, owning the `PGresult*`.
+
+    Raises:
+        PgError: `PgErrorKind.CONNECTION` when libpq returns no result at
+            all, or when the connection was lost while running the command
+            and libpq reported it without an SQLSTATE, or
+            `PgErrorKind.SERVER` when the server reports a diagnostic. (A
+            disconnect the server announced as a FATAL *with* an SQLSTATE
+            is therefore still `SERVER` for that statement, and the next
+            command is the one that raises `CONNECTION`.) Server errors
+            carry `sqlstate`, `severity`, `detail`, `hint`, `position` and
+            `context` when libpq supplies them.
+    """
+    if res.is_null():
+        # No PGresult was allocated, so there is nothing to PQclear.
+        raise PgError(
+            PgErrorKind.CONNECTION,
+            String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn)),
+        )
+    var status = pq[].PQresultStatus(res)
+    if (
+        status == PGRES_TUPLES_OK
+        or status == PGRES_COMMAND_OK
+        or status == PGRES_SINGLE_TUPLE
+    ):
+        return Result(res, pq)
+    if status == PGRES_EMPTY_QUERY:
+        pq[].PQclear(res)
+        raise PgError(PgErrorKind.SERVER, "empty query")
+    # Every diagnostic is copied into owned Strings before PQclear frees
+    # the PGresult the field pointers point into.
+    var severity = _error_field(pq, res, PG_DIAG_SEVERITY_NONLOCALIZED)
+    if severity == "":
+        severity = _error_field(pq, res, PG_DIAG_SEVERITY)
+    var sqlstate = _error_field(pq, res, PG_DIAG_SQLSTATE)
+    var message = _error_field(pq, res, PG_DIAG_MESSAGE_PRIMARY)
+    if message == "":
+        message = String(unsafe_from_utf8_ptr=pq[].PQresultErrorMessage(res))
+    if message == "":
+        message = String("unexpected result status ", Int(status))
+    var detail = _error_field(pq, res, PG_DIAG_MESSAGE_DETAIL)
+    var hint = _error_field(pq, res, PG_DIAG_MESSAGE_HINT)
+    var position = _error_field(pq, res, PG_DIAG_STATEMENT_POSITION)
+    var context = _error_field(pq, res, PG_DIAG_CONTEXT)
+    pq[].PQclear(res)
+    # A diagnostic that carries no SQLSTATE did not come from the server:
+    # libpq generated it client-side. When the connection is also gone,
+    # that is a lost connection rather than a rejected statement, so it is
+    # reported as CONNECTION -- `PgErrorKind.CONNECTION` is what tells the
+    # caller the connection is no longer usable. Both halves of the test
+    # matter: a syntax error has an SQLSTATE, and `COPY ... TO STDOUT`
+    # has none but leaves the connection perfectly usable.
+    var kind = PgErrorKind.SERVER
+    if sqlstate == "" and pq[].PQstatus(conn) == CONNECTION_BAD:
+        kind = PgErrorKind.CONNECTION
+    raise PgError(
+        kind,
+        message,
+        sqlstate=sqlstate,
+        severity=severity,
+        detail=detail,
+        hint=hint,
+        position=position,
+        context=context,
     )
 
 
@@ -417,6 +537,12 @@ struct Result(Iterable, Movable, Sized):
         A SQL NULL reads back as an empty string here; use `_is_null` to tell
         the two apart.
 
+        The length comes from `PQgetlength` rather than from a NUL scan, so a
+        `text` value holding an embedded NUL arrives whole instead of being
+        cut at the NUL, and the bytes are checked as UTF-8 before they become
+        a `String`: an invalid sequence is a `TYPE_MISMATCH` naming the byte
+        offset, not a silently mangled value.
+
         Args:
             row: Zero-based row index.
             col: Zero-based column index.
@@ -428,15 +554,24 @@ struct Result(Iterable, Movable, Sized):
         Raises:
             PgError: `TYPE_MISMATCH` when `PQgetvalue` returns NULL, which
                 only happens for an out-of-range coordinate that skipped
-                `_check_cell`.
+                `_check_cell`, or when the cell is not valid UTF-8.
         """
         var p = self._pq[].PQgetvalue(self._res, c_int(row), c_int(col))
-        if p:
-            return String(unsafe_from_utf8_ptr=p.value())
-        raise PgError(
-            PgErrorKind.TYPE_MISMATCH,
-            String("cell (", row, ", ", col, ") is out of range"),
+        if not p:
+            raise PgError(
+                PgErrorKind.TYPE_MISMATCH,
+                String("cell (", row, ", ", col, ") is out of range"),
+            )
+        var length = Int(
+            self._pq[].PQgetlength(self._res, c_int(row), c_int(col))
         )
+        var bytes = Span[UInt8, ImmUntrackedOrigin](
+            unsafe_ptr=Pointer[UInt8, ImmUntrackedOrigin](
+                unsafe_from_address=Int(p.value())
+            ),
+            length=length,
+        )
+        return String(_validated_utf8(bytes, col))
 
 
 struct Row[origin: ImmOrigin](Copyable):
@@ -594,7 +729,7 @@ struct Row[origin: ImmOrigin](Copyable):
             )
         var oid = self._res[].column_type_oid(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            return decode_binary[T](self._raw(col), oid)
+            return decode_binary[T](self._raw(col), oid, column=col)
         return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get[T: Copyable](self, col: String) raises PgError -> T:
@@ -659,7 +794,7 @@ struct Row[origin: ImmOrigin](Copyable):
             return None
         var oid = self._res[].column_type_oid(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            return decode_binary[T](self._raw(col), oid)
+            return decode_binary[T](self._raw(col), oid, column=col)
         return decode_text[T](self._res[]._text(self._index, col), oid)
 
     def get_optional[
@@ -709,13 +844,15 @@ struct Row[origin: ImmOrigin](Copyable):
            uninitialized value`), and there is no runtime guard for it.
            `_ = res^` is **not** a destroy: it is a keep-alive marker, so
            `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
-        3. The bytes are **not** validated as UTF-8, and `pq` never sets
+        3. The bytes are checked as UTF-8 before the slice is handed back, so
+           an invalid sequence raises `TYPE_MISMATCH` naming the byte offset
+           (the cell's own bytes are never put in the message) rather than
+           coming back as a malformed slice. What `pq` does **not** do is set
            `client_encoding`: libpq defaults it to the database's
-           `server_encoding` unless `PGCLIENTENCODING` says otherwise, so the
-           encoding is whatever the connection ended up with. The test suite
-           only checks that it is `UTF8` on the test containers; a connection
-           to a differently encoded database hands back whatever it hands
-           back.
+           `server_encoding` unless `PGCLIENTENCODING` says otherwise, so a
+           connection to a non-UTF-8 database turns every non-ASCII cell into
+           that `TYPE_MISMATCH`. The test suite checks the encoding is `UTF8`
+           on the test containers.
         4. No `ref` is returned, here or anywhere else in `pq`: the slice
            carries the origin, so there is no reference to outlive.
 
@@ -737,32 +874,15 @@ struct Row[origin: ImmOrigin](Copyable):
 
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL; `TYPE_MISMATCH`
-                when `col` is outside `0..Result.column_count() - 1`, or when
-                the column is binary and its OID is not one of the six, or
-                when a binary `jsonb` cell is empty or carries a version byte
-                other than 1.
+                when `col` is outside `0..Result.column_count() - 1`, when
+                the column is binary and its OID is not one of the six, when
+                a binary `jsonb` cell is empty or carries a version byte
+                other than 1, or when the cell is not valid UTF-8.
         """
         var bytes = self.get_bytes(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:
-            var oid = self._res[].column_type_oid(col)
-            if oid == OID_JSONB:
-                if len(bytes) < 1:
-                    raise _binary_length_error("jsonb", len(bytes), 1)
-                if bytes[0] != _JSONB_VERSION:
-                    raise _binary_value_error(
-                        "jsonb",
-                        String("version byte is ", bytes[0], ", expected 1"),
-                    )
-                bytes = bytes[1:]
-            elif (
-                oid != OID_TEXT
-                and oid != OID_VARCHAR
-                and oid != OID_BPCHAR
-                and oid != OID_NAME
-                and oid != OID_JSON
-            ):
-                raise _binary_oid_error(oid, "String")
-        return StringSlice[Self.origin](unsafe_from_utf8=bytes)
+            bytes = _string_payload(bytes, self._res[].column_type_oid(col))
+        return _validated_utf8(bytes, col)
 
     def get_bytes(self, col: Int) raises PgError -> Span[UInt8, Self.origin]:
         """Return column `col` of this row as a borrowed `Span` of bytes.

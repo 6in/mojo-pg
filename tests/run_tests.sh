@@ -46,6 +46,21 @@ fi
 status=0
 shopt -s nullglob
 
+# Run one test file (or the built leak binary) and fold its outcome into the
+# suite. The output goes through `tee` so the skips can be counted, which means
+# the exit code has to come from ${PIPESTATUS[0]}: `tee` succeeds even when the
+# test it is piping failed. Lines of the form `SKIP <name>: <reason>` are
+# counted per server, so a run that quietly skipped half its cases cannot look
+# like a clean one. A skip is never a failure here.
+test_log=build/last_test.log
+run_test_cmd() {
+    "$@" | tee "$test_log"
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        status=1
+    fi
+    skipped=$((skipped + $(grep -c '^SKIP ' "$test_log" || true)))
+}
+
 # Build the leak test once, up front (see the NOTE above for why it must not
 # run under `mojo run`). A build failure is a suite failure, but the remaining
 # test files are still worth running, so leak is skipped instead of aborting.
@@ -73,6 +88,7 @@ for conninfo in "${conninfos[@]}"; do
     label="${host:-?}:${port:-?}"
 
     export PQ_TEST_CONNINFO="$conninfo"
+    skipped=0
     for f in tests/test_*.mojo; do
         if [ "$f" = tests/test_leak.mojo ]; then
             if [ "$leak_built" -eq 0 ]; then
@@ -87,7 +103,7 @@ for conninfo in "${conninfos[@]}"; do
             fi
             echo "== $label $f"
             started=$SECONDS
-            "$leak_bin" || status=1
+            run_test_cmd "$leak_bin"
             echo "-- $label $f took $((SECONDS - started))s"
             continue
         fi
@@ -95,9 +111,10 @@ for conninfo in "${conninfos[@]}"; do
         # Per-file wall clock: tests/test_leak.mojo alone runs for ~57 s, so
         # the timings are what tells a slow suite apart from a hung one.
         started=$SECONDS
-        mojo run -I src "$f" || status=1
+        run_test_cmd mojo run -I src "$f"
         echo "-- $label $f took $((SECONDS - started))s"
     done
+    echo "-- $label skipped $skipped"
     server_index=$((server_index + 1))
 done
 exit $status

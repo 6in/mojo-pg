@@ -1,69 +1,122 @@
-# DECISIONS — phase3-binary-all-types
+# DECISIONS — phase4-async-cancel-notify
 
-## D1. マイルストーン範囲は HANDOFF Phase 3 の全部
-- 選択: バイナリ結果形式（既存 8 型）+ §6 の拡張型 7 種をテキスト・バイナリ両方で解釈
-- 却下: 「バイナリのみ」「拡張型テキストのみ」の分割 — Phase 3 の受け入れ条件（§6 全型の text/binary 一致）が未達のまま残るため
+## D1. マイルストーン範囲は HANDOFF Phase 4 の全部
+
+- 選択: `_platform/poll`、`AsyncConnection`、キャンセル、LISTEN/NOTIFY を 1 マイルストーンで
+- 却下: 「非同期接続・実行・cancel まで（NOTIFY は次）」「非同期接続・実行だけ」— 受け入れ条件 §10 Phase 4 の 4 件が
+  相互に依存（NOTIFY の受信は `PQconsumeInput` + poll の経路をそのまま使う）し、分けると次マイルストーンが同じ
+  テスト基盤を作り直す
 
 ## D2. 隣接項目を 4 つとも入れる（ユーザー全選択）
-- 拡張型のパラメータ送信（`Param` に自前型の ctor を足す。往復テストが自然に書ける）
-- time / timetz / interval（§6 に無い日時系 3 型。日時構造体を作るなら追加コストは小さい）
-- zero-copy Row（HANDOFF §11。Mojo 1.1.0 の origin 制約で成立しないリスクがあるため、成立条件を D-later で決める）
-- text vs binary の簡易ベンチ（HANDOFF §8。合否判定は Phase 5 まで入れない）
+
+- 持ち越し整理 4 件（REQ §6）、TestSuite の SKIP 集計（reflect 提案 (b)）、jsonb / 文字列系 OID 判定の一元化
+  （VERIFICATION §5 残留リスク）、UTF-8 検証の方針決定（VERIFICATION §5「Phase 4 以降の判断」）
+- 理由: いずれも VERIFICATION §5 / reflect が「次マイルストーンで」と名指しした項目で、先送りすると残留リスクが累積する
 
 ## D3. 堅牢性の受け入れ基準を入れる（差し戻し対象）
-- Phase 1 / 2 と同じ。decode_binary の長さ不足・不正値を `PgError` で返すことを verify の格子プローブ対象にする
 
-## D4. リークの +83〜85 ページの一段は `TOLERANCE_PAGES = 256` を恒久仕様にする
-- 選択: docstring に未特定の注記を書くだけ。2 マイルストーン・20 系列以上で偽陽性ゼロ、検出力は陽性対照 5 経路で実証済み
-- 却下: 1 ターンの調査タスク（`mallinfo2()` / `MALLOC_ARENA_MAX=1`）— 約 USD 10 を消費して結論が出ない可能性があり、現行の判定で運用上の問題が無い
+- Phase 1〜3 と同じ方針。非同期は状態遷移（接続ポーリング中 / 送信中 / 結果待ち / cancel 後 / タイムアウト後）が増えるので
+  むしろ重要。plan が初回タスクに含め、verify は差し戻す
 
-## D5. 持ち越しの小物は最初の 1 コミットで全部片付ける（Phase 2 D3 と同じ）
-- Phase 2 VERIFICATION §6 の 1〜6・8・9 と、D4 の docstring 注記（REQ §6）
+## D4. slug は `phase4-async-cancel-notify`
 
-## D6. 前 REQ の陳腐化した記述は新 REQ §7「既知のサーバー挙動」として訂正して引き継ぐ
-- Phase 2 REQ §5.1a の「rollback 後の prepared は失敗」「int8 → int4 は 42804」は実測と食い違っていた（reflect Minus 5）。
-  archive の REQ は触らず、次に読まれる新 REQ に正を書く
+- Phase 1〜3 の命名（`phase3-binary-all-types`）に揃える。却下: `phase4-async`（内容がブランチ名から読めない）
 
-## D7. research は REQ 本文を直す権限を持つ（reflect 提案 3）
-- §5.1 のサーバー挙動断定は「要実測」。矛盾を見つけたら RESEARCH §5 に読み替えを書くのではなく REQ を直す
+## D5. `AsyncConnection` は別 struct。結果変換は共有関数に抜き出す
 
-## D8. 結果形式は `result_format` キーワード引数（既定 TEXT）、`Row.get` は `PQfformat` で自動切替
-- 選択: `execute(sql, params, result_format=)` / `PreparedStatement.execute(params, result_format=)`。後方互換で既定テキスト
-- 却下: 別メソッド `execute_binary`（オーバーロード増）/ バイナリ既定（未対応 OID の列を含む SELECT が `get[String]` で読めなくなる破壊的変更）
+- 選択: `async_conn.mojo` に `AsyncConnection(Movable)` を新設し、`Connection._take_result` をモジュール関数 `adopt_result` に抜き出して両者が呼ぶ。
+  同期側の公開 API は不変
+- 却下: 「`Connection` に非同期メソッドを足す」— 途中状態で `execute` を呼ぶと libpq が前の結果を捨てる等の落とし穴を実行時検査で防ぐことになる。
+  型で分ければブロッキング関数を非ブロッキング接続で誤って呼ぶ余地が消える／「別 struct + `into_sync()`」— タスクが 1 つ増え、用途が限定的。
+  必要になれば次フェーズ
 
-## D9. バイナリ列の未対応 OID / 型不一致は `TYPE_MISMATCH` で厳密に弾く
-- 選択: `get[String]` は文字列系 OID のみ、`get[List[UInt8]]` は bytea のみ。kind は 6 つのまま
-- 却下: `get[List[UInt8]]` を生バイトの逃げ道にする（bytea と区別がつかず「OID が T に一致」規則の例外が増える）/
-  `UNSUPPORTED_TYPE` kind の追加（Phase 1 の「kind は 6 つ」の約束を広げる）
+## D6. キャンセルは `PQgetCancel` / `PQcancel`（全版共通）
 
-## D10. `Decimal` は PG 内部表現（sign / weight / dscale / base-10000 digits）をそのまま持つ
-- 選択: バイナリと無損失往復、テキストは自前 parse / format。`==` は PG `numeric_eq` と同じ値比較、`dscale()` は別途公開
-- 却下: 正規化文字列の薄いラッパー（「バイナリで送る」を満たさない）/ `Int128` + scale（38 桁の範囲制限が仕様に残る）
+- 選択: HANDOFF §7.2 どおり。バインディングは既存。ブロッキングで別ソケットを張る（数 ms）。シグナルセーフ。実行時 dlsym なのでヘッダの
+  deprecation 警告は出ない
+- 却下: 「17+ は `PQcancelCreate` 系、それ以前は fallback」— 経路が 2 つになりテスト・リーク確認が倍。テスト環境の libpq は 18.6 で旧経路が CI で走らない／
+  「`PQcancelCreate` 系のみ」— HANDOFF §2「libpq 14 以降」を破る
+- 事実: pixi の libpq は 18.6（`libpq.so.5.18`）。`PQcancelCreate` / `PQsocketPoll` / `PQsetChunkedRowsMode` はヘッダにあるが使わない
 
-## D11. 日時型は PG 内部表現（days / micros）+ 分解アクセサ
-- 選択: `Date(days)` / `Timestamp`・`TimestampTz(micros)` / `Time(micros)` / `TimeTz(micros, offset_secs)` / `Interval(micros, days, months)`。
-  `±infinity` は PG と同じ番兵 + `is_infinite()`。比較は整数比較
-- 却下: 分解フィールド構造体（受信・送信の両方で変換、infinity に別フラグ）/ 生の整数だけ（テキスト parse に civil 変換が結局要る）
+## D7. poll は libc `poll` + Windows 分岐を「書くが未検証」
 
-## D12. DateStyle / IntervalStyle は接続直後の `SET` 1 往復で固定、TimeZone は触らない
-- 選択: `PQexec("SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'")`。conninfo を解析しないので堅牢。約 1 ms
-- 却下: conninfo `options` へのマージ（`PQconninfoParse` の構造体レイアウト定義とユーザー options との結合が要る）/
-  固定しない（利用者の環境で壊れる）
-- TimeZone を UTC に固定しない理由: 利用者が `String` で読む他の時刻テキストの見え方を変えないため。timestamptz のオフセットは自前で解釈する
+- 選択: `external_call["poll"]` と Mojo で定義した `struct pollfd`。Windows は `WSAPoll` / `SOCKET` 幅の分岐をコンパイル時 OS 判定で書き、
+  docstring に未検証と明記（HANDOFF §2 OS 方針。Phase 5 がレビュー）
+- 却下: 「libc poll のみ、Windows は Phase 5」— Phase 5 が「レビュー」でなく「新規作成」になる／「`PQsocketPoll` 優先 + fallback」— 14〜16 で fallback が要り
+  経路が 2 つ。テスト環境では fallback が走らない
 
-## D13. zero-copy Row は best-effort（不成立なら外す。unsafe 代替は公開しない）
-- 選択: research のプローブで成立判定。不成立なら RESEARCH に根拠を書いてスコープから外し、verify は差し戻さない
-- 却下: 必須（不成立で BLOCKED。人間の判断待ちでループが止まる）/ `MutUntrackedOrigin` の unsafe 代替（§5.2 の安全性要件を満たさない API を公開する）
+## D8. ブロッキング補助は `wait_*` + 完成形ヘルパー 3 つ
 
-## D14. discuss が判断した付随事項（ユーザーに聞かずに決めた小物）
-- `ResultFormat` は `PgErrorKind` と同じ定数 struct 形式（`TEXT` / `BINARY`）。`Result.column_format(i)` を公開
-- json / jsonb のパラメータは `String` のまま（専用型は作らない。YAGNI）
-- 拡張型の `Optional[...]` ctor も足す（Phase 2 D14 との一貫性）
-- `Decimal` のテキストは `1e5` 形式を受けない（PG の `numeric_out` は指数形式を出さない）
-- ベンチは `examples/bench_formats.mojo` + `pixi run bench`。合否判定なし、数値の記録のみ
-- `_ffi` の追加バインドは無し見込み（`PQfformat` / `PQgetlength` は Phase 1 で済み）
-- 持ち越し整理（D5）に Phase 2 VERIFICATION §6-8（Transaction docstring の混用注記）も含める
+- 選択: `wait_readable` / `wait_writable`（タイムアウト付き）に加え `connect_blocking` / `fetch_all` / `wait_notification`。§10 Phase 4
+  「タイムアウト付きの `wait_*` が規定時間で戻る」をこの経路でテストする
+- 却下: 「`wait_*` のみ」— examples とテストが同じループを何度も書く／「補助なし」— §10 の受け入れ条件が満たせない
+- `wait_notification` のタイムアウトは `None` を返す（例外にしない）: 待っても来ないのは正常な結果。他の 3 つは `TIMEOUT` を投げる
 
-## D15. 実行パターン: 現在の設定を維持（すべて Claude、impl = claude-opus-5、他 = claude-fable-5-1、subagents=auto、reflect=true）
-- Phase 2 で差し戻し 0・10 ターン・USD 110 の実績。`GSD_LITE_ENGINE` は未設定（state の `engine` がそのまま効く）
-- research.targets は `similar_oss` / `official_docs`（`local_projects` は今回得るものが少ない見込みのため外した）
+## D9. 送信 API は 4 種すべて（ユーザー全選択）
+
+- `send(sql)` / `send(sql, params, result_format)` / `send_prepare` + `send_prepared` / `set_single_row_mode()`。
+  バインディングは `PQsetSingleRowMode` だけ追加。`PGRES_SINGLE_TUPLE` を `adopt_result` の成功扱いに足す
+- `send_prepared` は同期側 `PreparedStatement` を使わず名前文字列で指定する（`PreparedStatement` は `Connection` の origin を持つ）
+
+## D10. タイムアウトテストの相手はローカルの「accept するが応答しない」リスナー
+
+- 選択: docker-compose にサービスを 1 つ足す（`socat` 等。方法は research）。TCP は繋がり、startup packet 後の読み待ちで `wait_readable(timeout)` が
+  満了する。外部ネットワーク非依存で決定論的
+- 却下: 「外部ブラックホール（RFC 5737）」— 環境によって ICMP reject で即失敗しタイムアウトのテストにならない／「両方（外部は opt-in）」—
+  走らないテストを増やすだけ
+
+## D11. `PgErrorKind.TIMEOUT` を新設、途中状態の誤呼び出しは既存 `USAGE`
+
+- 選択: `TIMEOUT = Self(6)`（利用者がリトライ判定に使える）。誤呼び出し（送信中の再 send、未接続 send、送信前の `set_single_row_mode`）は
+  Phase 2 からある `USAGE` でメッセージに現在の状態名を入れる
+- 却下: 「既存 kind だけで表す」— 利用者がメッセージ文字列で判別することになる
+- アイドル時の `cancel()` は何もしない（`USAGE` にしない）: 結果が届く直前に呼ぶ競合が正常に起こり、無害なため
+
+## D12. UTF-8 は検証付きに切り替える
+
+- 選択: text 列の `String` 化と zero-copy の `StringSlice` の両方を検証付きにし、失敗は `TYPE_MISMATCH`。`pixi run bench` で差を測って記録
+  （受け入れ条件にしない）
+- 却下: 「現状維持を恒久仕様に」— `SQL_ASCII` DB や偽造セルで利用者側が 1〜3 byte 読み越す余地が残る（VERIFICATION §5）／
+  「既定は検証、接続単位で opt-out」— 分岐が全 text 経路に入りテストが 2 倍
+
+## D13. 非同期接続の GUC 固定は Ready 後に非同期で SET を 1 往復（状態機械に組み込む）
+
+- 選択: `poll_connect` が `PGRES_POLLING_OK` を得たら内部で同期側と同じ `_SESSION_SETUP_SQL` を `PQsendQuery` し、取り切るまで `NeedRead` / `NeedWrite`。
+  `connection.mojo:164` の docstring が既にこの形を予告している。同期・非同期で同じ SQL・同じ失敗 kind
+- 却下: 「conninfo `options` に合成」— 利用者の `options` との結合に `PQconninfoParse` の構造体定義か `expand_dbname` の上書き規則への依存が要る
+  （Phase 3 D12 と同じ理由）／「固定しない」— 日時の text デコードが環境で壊れる
+
+## D14. `poll_result()` は `Optional[Result]`、待つか完了かは `state()` / `is_busy()` で区別
+
+- 選択: HANDOFF §7.2 の形。`None` は「今は無い」。NULL を受けた時点で内部状態を `Idle` にし、呼ぶ側は `state() == Busy` なら待つ。API が小さい
+- 却下: 「3 状態 struct `PollOutcome`」— 型が 1 つ増える。Mojo に payload 付き enum が無く `Optional[Result] + Bool` の struct になり、
+  結局アクセサで同じ区別をする
+
+## D15. `AsyncConnection.state()` は 4 状態（Connecting / Idle / Sending / Busy）を公開
+
+- 選択: `AsyncState` newtype。テストと examples が状態を断定でき、`USAGE` メッセージもこの名前で書ける
+- 却下: 「公開しない」— 誤呼び出しのテストがメッセージ照合になる
+
+## D16. discuss が判断した付随事項（ユーザーに聞かずに決めた小物）
+
+- `AsyncConnection.__del__` は `PQfinish` だけ（結果が残っていても drain しない。libpq が片付ける）
+- アイドル時の `cancel()` は no-op（D11）。`cancel()` は毎回 `PQgetCancel` → `PQcancel` → `PQfreeCancel`（`PGcancel` をキャッシュしない。所有権が単純）
+- `socket()` は未接続 / 切断で `-1` を返し例外にしない（イベントループ組み込み用の素の値）
+- `timeout_ms` の意味は libc `poll` と同じ（`0` 即時、`-1` 無期限、正のミリ秒。他は `USAGE`）。`EINTR` は残り時間で再試行
+- `wait_notification` のタイムアウトは `None`、他の補助は `TIMEOUT`（D8）
+- `fetch_all` は途中のエラー結果を見ても残りを取り切ってから投げる（接続を `Idle` に戻してから利用者に渡す）
+- `Notification` のフィールド名は `channel` / `payload` / `backend_pid`（libpq の `relname` / `extra` / `be_pid` は使わない。意味で命名）
+- SKIP 集計は `print("SKIP <test関数名>: <理由>")` + `run_tests.sh` の行数カウント。FAIL にはしない（§4.8）
+- UTF-8 不正のメッセージは「invalid UTF-8 at byte N of column M」の形でセル全文を入れない（§4.10）
+- examples は HANDOFF §4 の名前（`async_query.mojo` / `listen_notify.mojo`）
+- `AsyncConnection` に `transaction()` / `prepare()` / `execute()` は作らない（BEGIN 等は `send`）
+- タイムアウトリスナーのポートは `54399`（PG の 54317 / 54314 と同じ並び）
+- REQ §9 の申し送りは Phase 3 reflect「次回への提案」の plan / impl / verify / research 項目をそのまま採用（スキル本文は変えない。Phase 2 D18 と同じ）
+- Phase 3 reflect の「ツール側」提案（`gsd-lite-loop.sh` の `usage` 取得をサブエージェント込みに、`subagents` の記録）はマイルストーン外で
+  ユーザーが行う。本マイルストーンでは扱わない
+
+## D17. 実行パターン: 現在の設定を維持（すべて Claude、impl = claude-opus-5、他 = claude-fable-5-1、subagents = auto、reflect = true）
+
+- Phase 1〜3 と同じ。research の対象は similar_oss + official_docs（local_projects は Phase 3 と同じく外す。`~/workspaces` に非同期 FFI の
+  Mojo コードは無い見込みで貢献が小さい）
+- 却下: 全フェーズ fable（impl のコストが上がる見込み）／impl だけ Codex（sandbox の準備が要り、Phase 1〜3 の impl 契約が Claude 前提で書かれている）

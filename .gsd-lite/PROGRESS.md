@@ -1,377 +1,387 @@
-# PROGRESS — phase3-binary-all-types
+# PROGRESS — phase4-async-cancel-notify
 
-## turn 1 — research — 全型の text / binary 形式を PG17 / PG14 で実測、zero-copy は「消費する移動」の形で成立、RESEARCH.md 産出
-- やったこと: libpq プローブ 1 本（約 330 行、出力 130 行、PG17 / PG14 の差 3 行）で REQ §4.2 / §4.3 の全型 + パラメータ送信 + 不正バイナリの sqlstate + GUC を実測。
-  Mojo プローブ 10 本（zero-copy ×7、型事実、暦算法、ベンチ baseline）。サブエージェント 1 本で psycopg（ローカル）/ asyncpg / rust-postgres / PG ソース / Mojo OSS を調査。
-  RESEARCH.md（§0 結論 8 件、§0.5 落とし穴、§1 OSS、§2 実測、§3 盗める設計 11 件、§4 落とし穴 30 件 + 検証法、§5 REQ 反映、§6 plan 申し送り）。
-  D7 により REQ 本文を 5 箇所訂正（interval の PG17 ±infinity、timestamptz の ` BC` 位置、numeric Inf の dscale 32、zero-copy 成立条件の形、持ち越し整理 10 番）
-- 想定外:
-  (1) **zero-copy の成立条件「`Result` 破棄後の使用がコンパイルエラー」は `_ = res^` の形では起きない**。`_ = res^` の後に slice を使うコードはコンパイルが通り、`Result` の deinit が slice の最後の使用の後まで延びる（安全）。
-      コンパイルエラーになるのは `var r2 = res^` / 関数へ `res^` を渡した後の使用（`error: use of uninitialized value 'res'`）。既存の `Row` も同じで、Phase 1 の docstring「コンパイルエラー」は不正確（REQ §6-10 に追加）。
-      さらに `ref r = res; _ = res^; r._len()` は通って deinit が先に走る（use-after-free）
-  (2) PG17 には interval の ±infinity がある（PG14 には無い）。REQ §4.3 の表に無かった
-  (3) numeric の ±Infinity をサーバーが dscale=32 で送ってくる（ヘッダビットの癖）。往復テストをバイト比較で書くと落ちる
-  (4) timestamptz のテキストは ` BC` がオフセットの後（`0001-01-01 00:00:00+00 BC`）
-  (5) Mojo 1.1.0 に `InlineArray` は無く `Array[UInt8, 16]`。`Span` の生ポインタ ctor は `unsafe_ptr=`。`String(bytes=)` は無く `String(from_utf8=)`（検証あり）
-  (6) 自分のプローブで ASAP 破棄を踏んだ: `pp.values()` のアドレスを取った後に `pp` の最後の使用が来て、libpq が解放済みバッファを読み `22P03 invalid sign` になった（`_ = pp^` を後ろに置いて解決）
-  (7) 実測値の hex を手で読み違えた（`002c95d4` を 2922196 と誤読。正 2921940）。サブエージェントの報告と突き合わせて気づいた
-- やり直し: 4 回（probe-binary 1 回: (6) + date 番兵の off-by-one + `p[i]` の deprecated 警告 / probe-zerocopy 1 回: `Span(ptr=)` → `unsafe_ptr=` / probe-types 1 回: (5) + `s[0:4]` + `rjust` /
-  probe-civil 1 回: (7)）。プローブは最初の 1 本（probe-binary）をコンパイルしてから残りを書いた
-- 次への注意:
-  - 確認済み: RESEARCH §2.2 の hex / 文字列は PG17 / PG14 の実測。そのままテストの期待値に写してよい。PG17 限定は interval infinity のみ
-  - 確認済み: zero-copy の陽性対照は `scratch/turn-001-probe-zerocopy-neg6.mojo`（`var r2 = res^` の後に slice 使用）の形。`_ = res^` の形では落ちない
-  - 確認済み: `_ = x^` は生存マーカー。plan / impl のテストで「ここで PQclear」を確かめたいときは slice / Row を `_ = x^` より前で使い切る
-  - 未確認: `types.mojo` を 3 分割する案（RESEARCH §6）の行数見積もり（1,500 行規模は推測）
-  - 未確認: `Interval` の無限値で分解アクセサを呼んだときの kind（`USAGE` 推奨、plan が決める）
-  - 所要（単位 ms）: probe-bench の libpq 素の所要は text 41〜45 ms / binary 36〜39 ms（10 万行 × 5 列）。ベンチ task は 1 s 未満で終わる見込み
+## turn 1 — research — libpq 非同期 API・poll・NOTIFY・タイムアウトリスナーを実測し RESEARCH.md を産出
+- やったこと: プローブ 5 本（poll / lang / async / async2 / 名前確認 ×14）を PG17・PG14 で実行し、REQ §4・§5.1 の「要実測」8 件を全部確認（矛盾なし）。
+  サブエージェント 1 本（OSS / 公式 docs / macOS・Windows 定数、推奨 1 本 / 実 1 本）。`alpine/socat` の黒穴リスナーを compose で起動して 501 ms タイムアウトを実測。
+  RESEARCH.md（§0 結論 9 件、§0.5 落とし穴 ★☆、§1 OSS、§2 実測表、§3 盗める設計 15 件、§4 落とし穴 34 件、§5 REQ 訂正 3 + 提案 10、§6 plan 申し送り）。REQ 本文 3 箇所訂正
+- 想定外: (1) **NOTIFY 2 件が 1 回の `PQconsumeInput` で揃わない**ことが PG14 で出た（タイミング差。REQ §4.7 を訂正）。(2) **Mojo 1.1.0 に Windows の OS 判定が無い**（`is_windows` /
+  `platform_map(windows=)` とも不在。REQ §4.1 を `else` 分岐に訂正）。(3) **`external_call` は同名シンボルを 1 つのシグネチャでしか呼べず、stdlib が使う `write` と衝突**した
+  （§0.5 ☆）。(4) `PQsetSingleRowMode` が最初の `PQgetResult` 後も 1 を返す（docs より緩い。クライアント側ガード必須）。(5) `PQflush` = 1 は 16 MB でも PG14 では出ず非決定的。
+  (6) サブエージェント報告の `std.ffi.get_errno` / `std.time.monotonic` は実測で確認して採用（`Int(ErrNo)` は不可、`.value`）
+- やり直し: 5 回（poll プローブ: `external_call` 未 import + `List[T](a, b)` ctor → 1 回 / `sizeof` → `size_of` → 1 回 / `poll` の 2 シグネチャ衝突 → 1 回 / `write` の stdlib 衝突 →
+  `FileDescriptor` に → 1 回。async プローブ: `.strip()` が `StringSpan`・`mut` 引数に一時値 → 1 回。lang プローブは `os_is_*` / `@parameter if` で 2 回落ちたが名前探索の一部として数えない）
+- 次への注意: plan は RESEARCH §3-5（`state()` の遷移）と §4 P9 / P13 / P18 / P21 を完了基準に写す。`tests/docker-compose.yml` に `blackhole`（§2.5 の 5 行）を足すのは最初の 1 コミット
+  （REQ §6 持ち越し整理）と同時でよい。Phase 3 reflect の「期待値表は `...` で省略しない」は守った（sqlstate / メッセージ / 戻り値列は全桁）。
+  `check` は 260〜300 s になる見込み（§6 所要）。Mojo の名前違いは §0.5 ☆ に 8 件追記したので impl はプローブ前に読む
 
-## turn 2 — plan — 9 タスク（T1 持ち越し + GUC / T2 ResultFormat + decode_binary 8 型 / T3 Decimal + UUID + jsonb / T4 Date 系 3 型 / T5 Time 系 + Interval / T6 サーバー格子 / T7 zero-copy / T8 leak + examples + bench / T9 文書 + 最終判定）
-- やったこと: REQ / DECISIONS / RESEARCH / 直近 2 件の reflect / Phase 2 PLAN / `src/pq/*.mojo` / `tests/*` / research のプローブ 5 本を読み、PLAN.md を作成。
-  決めた事項 14 件（`ResultFormat` の形、`decode_binary[T](bytes: Span[UInt8], oid)` のシグネチャと長さ・値検査、`TYPE_MISMATCH` の 4 系統のメッセージ、`Decimal` の private フィールド + ctor は `USAGE` / `parse` は `TYPE_MISMATCH`、
-  日時 6 型の API（生 ctor 無検査・`from_*` は `USAGE`・無限値のアクセサは `USAGE`）、zero-copy の 2 メソッド（`get_bytes` は形式・OID 不問、`get_text` は文字列系のみ）、GUC の `SET` は `_adopt` 内で `execute` 経由、
-  型モジュール 3 分割、`Transaction.execute` への `result_format` passthrough）。RESEARCH §3 の採否表（11 件中 10 採用・1 却下）、§4 の落とし穴 30 件の対応表、reflect 提案の反映表、各タスクのサブエージェント推奨本数（T7 / T9 は 0）を PLAN に載せた
-- 想定外:
-  (1) REQ §4.5 の `get_bytes` は OID 制限が無く、D9 の「生バイトの逃げ道にしない」と読み方が衝突し得る。REQ の文言どおり「`PQgetvalue` 領域を見る別 API」として形式・OID 不問にし、根拠を決めた事項 9 に書いた（verify が D9 違反と読むなら T7 で bytea 限定に狭める 1 行の変更で済む）
-  (2) `Time(86400000001)` の拒否を REQ P11 は ctor `USAGE` と decode `TYPE_MISMATCH` のどちらでもよいとしていた。生 ctor は全型で無検査（PG 内部表現の器）に統一し、`from_hms` で `USAGE`、decode で `TYPE_MISMATCH` に決めた
-  (3) `tests/test_leak.mojo:115-134` の `TOLERANCE_PAGES` docstring は既に 83 ページの一段を書いているが、原因の主語が「libpq の lazy first-use allocation」で REQ §6-8 / D4 の「glibc arena の拡張と推測、未特定」と違う。T1 (h) で書き換える
-- やり直し: 0 回（PLAN の T2 (e) ⑦ と T6 (a) ⑥ の文面を書いた直後に 1 回ずつ直したが、ファイルの作り直しではない）
-- 次への注意:
-  - 確認済み: `c_int(0)` の置き換え位置は `connection.mojo:362` / `prepared.mojo:188`。`PQfformat` / `PQgetlength` / `PQserverVersion` は `_ffi/functions.mojo:101-103` / `:108-110` / `:50` にバインド済み。`Connection.server_version()` は `connection.mojo:712-719`
-  - 確認済み: docker の PG17 / PG14 は healthy（Up 24 hours）。`mojo` / `pixi` は `/home/parallels/.pixi/bin/pixi run ...`。lean-ctx MCP は未接続
-  - 確認済み: research のプローブ（`scratch/turn-001-*`）は雛形として使ってよい（`probe-civil.mojo` の暦算法はそのまま写せる、`probe-zerocopy-neg6.mojo` が陽性対照の形）
-  - 未確認: `check` の所要見込み 2〜3 分 / `pixi run test` 7〜8 分（Phase 2 末の 80〜115 s / 5〜6 分 + SET 1 往復 × 10,000 + leak 2 本 + 新テスト 7 本の積み上げ）。T1 で `check` を回したら実測を PLAN「検証コマンド」節に訂正として書く
-  - 未確認: `types_datetime.mojo` が T4 + T5 で 1,000 行を超える見込み。超えても分割しない（T5 は追記）
-  - 未確認: `String(unsafe_from_utf8=span)` の正確な ctor 名（RESEARCH §0.5 は `String(from_utf8=span)` が検証あり、`String(unsafe_from_utf8=span)` が検証なしと記す。T2 の最初のコンパイルで確定し、違えば決めた事項 3 の末尾を訂正する）
+## turn 2 — plan — 8 タスク（T1 持ち越し整理 + blackhole + SKIP + §4.9 / T2 土台 adopt_result・TIMEOUT・_ffi・_platform/poll / T3 AsyncConnection 前半 + test_async / T4 cancel・NOTIFY・single-row + examples / T5 テスト格子（実験: 1 本）/ T6 leak / T7 UTF-8 / T8 最終整備）
+- やったこと: REQ / DECISIONS / RESEARCH / 直近 2 件の reflect と `src/` `tests/` `examples/` を読み、PLAN.md（検証コマンド・追従先チェックリスト 24 行・Tasks 8・決めた事項 17・採否表 18 行・落とし穴 34 件の対応）を作成。
+  追従先チェックリストは REQ §9 どおり**実行可能スクリプト** `.gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh` にして現在の木で 1 回実行し、現在値を表に転記（`absent` はファイル未作成）。
+  REQ §4.5「他は既存」から 1 件逸れて `PQconnectStart` のバインドを足す判断（決めた事項 5。`test_ffi` の件数 53 → 55）、D13 の SET 失敗 kind は「同期側と同じ分類」= `adopt_result` の分類に揃える判断（決めた事項 7）を記録
+- 想定外: (1) `_ffi` に `PQconnectStart`（文字列版）が無く、`start(var conninfo: String)` を `PQconnectStartParams` だけで書くには `expand_dbname=1` の変換が要る → バインド追加を決めた。
+  (2) REQ §4.2 の「SET が失敗したら `CONNECTION`（同期側と同じ kind）」は同期側 `_adopt` の実際の kind（`SERVER` with sqlstate。`connection.mojo:182-184`）と食い違う → 「同期側と同じ」を優先し決めた事項 7 に明記（REQ 本文は触っていない。verify はこちらを正とする）。
+  (3) `wait_notification` が 1 件しか返さないのに `notifications()` は複数件返し得る → 内部キュー `_pending` が必要（決めた事項 11。REQ に無い内部状態。T5 (b) ⑤ で陽性確認）。
+  (4) `grep -c 'from_utf8='` が `unsafe_from_utf8=` も数える → スクリプトのパターンを `(from_utf8=` に直して再実行（現在値 0）
+- やり直し: 1 回（チェックリストスクリプトの UTF-8 パターン。上記 (4)）
+- 次への注意: impl は T1 から。`pixi run db-up` で `blackhole` が上がるのは T1 (e) を書いた後。T1 (f) の陽性対照（port=1 で `run_tests.sh` の exit code ≠ 0）は数十秒で終わる。
+  T3 の `async_conn.mojo` は決めた事項 6〜9 を契約にして `start` / `poll_connect` / `connect_blocking` から書き始める（最初の 1 本をコンパイルしてから）。
+  未確認: `"x" * 16000000` の形の文字列反復が Mojo 1.1.0 にあるか（T5 ⑤。無ければ `List[UInt8]` から作る）／`PGcancel` の確保サイズが leak の陽性対照に出るか（T6 (b)。見えなければ「契約外」と書く）／`check` の所要 260〜300 s（見込み）
 
-## turn 3 — impl — T1 持ち越し整理 10 件 + 接続時の GUC 固定 + test_connection 3 件
-- やったこと: REQ §6 の 10 件（docstring 6 件 + コード 4 件: 6/6 段の grep パターン、`param_type_oid` の 0 パラメータ文言、savepoint 名の `_reject_nul(name, "name")`、
-  `_ParamBuffers` の 1 GiB 超 USAGE）と REQ §4.7 の `_SESSION_SETUP_SQL`（`_adopt` が 1 つの `PQexec` で `SET DateStyle` + `SET IntervalStyle`）を実装。
-  テストは test_connection 3 件（28 → 31）、test_prepared 1 件（0 パラメータ文の `takes no parameters`）、test_savepoint 1 件（NUL 名の 3 メソッド）を追加。サブエージェントは使わず順に実装（並列サブ作業は A の 1 本だけで、A と親の対象ファイル（connection / transaction）が重なるため）
-- 想定外:
-  (1) T1 (f) の「NUL テストの期待を直す」は**直す対象が無かった**（`grep -rn 'nul\|NUL' tests/test_savepoint.mojo` が 0 件）。メッセージが `in name` であることを担保するテストが存在しないので新規に 1 件書いた（`test_savepoint_name_with_a_nul_byte_is_rejected`。3 メソッド全部 + `PQTRANS_INTRANS` 不変 + マーカー非エコー）
-  (2) T2 の追従先チェックリストの検査コマンド `grep -rn 'is Phase 3' src/pq` は**変更前から 0 件**だった（該当文が `is` と `Phase 3.` の間で行送りされている）。検査にならないので PLAN を訂正した
-  (3) `check` / `pixi run test` の所要は見込み（2〜3 分 / 7〜8 分）より短く、Phase 2 末とほぼ同じだった。GUC の SET 1 往復 × connect ループ 10,000 回の +10 s は体感できる差にならなかった
-- やり直し: 0 回（新規テスト 5 件とも初回のコンパイル・実行で通った）
-- PLAN 訂正: 2 件
-  - 検証コマンド節に T1 実測（`check` 113 s / `pixi run test` 約 200 s / test_leak 74 s・サーバー）を追記（根拠: turn 3 の実測。見込み欄は残した）
-  - 追従先チェックリスト「`execute` に `result_format` 引数を足す（T2）」の検査を `grep -rn 'is Phase 3' src/pq` → `grep -rn 'Phase 3' src/pq --include='*.mojo'` が `encode_binary.mojo:16` の 1 行だけ、に（根拠: 元の grep は変更前でも 0 件で検査にならない）
-- 既存テストの期待値を変えた箇所: 1 件のみ
-  - `tests/test_prepared.mojo:543-544` の `find("3")` / `find("1")` → `find("takes 3 parameters, got 1") >= 0`（REQ §6-3。`"1"` はメッセージ中の `pq_stmt_1` にも当たるため検査が緩かった。意味は同じで厳しくなった）
-  - それ以外は無変更で PASS（test_result / test_params / test_transaction / test_decode_text / test_encode_binary / test_errors / test_ffi / test_leak / test_smoke / test_loader_fail）
-- 陽性対照（T1 (b)。実測）: `printf 'pq: implicit ROLLBACK failed: x\n' >> build/final_check.log` の後
-  `grep -cE 'warning:|WARNING:|implicit ROLLBACK failed' build/final_check.log` → **1**、
-  `grep -cE 'warning:|WARNING:' build/final_check.log` → **0**（旧パターンは取り逃がす）。確認後 `rm -f build/final_check.log`
-- 次への注意:
-  - 確認済み: `pixi run check` 6/6 PASS = **113 s**（1/6 fmt 1 s・2〜4/6 計 7 s・5/6 tests 105 s・6/6 grep 0 s、`matched lines: 0`）。`pixi run test` 両サーバー 13 ファイル全 PASS = **約 200 s**（test_leak は 12 件 74 s / サーバー）。`pixi run fmt` は差分ゼロ
-  - 確認済み: `_adopt` の `SET` は `Connection` を組み立てた後に `_ = connection.execute(String(_SESSION_SETUP_SQL))` → `return connection^` の形で通る（失敗時の `PQfinish` は `__deinit__` 任せ、別に書かない）。`SHOW DateStyle` は `open(String)` / `open(Dict)` の両方で `ISO, YMD`、`SHOW IntervalStyle` は `postgres`、`SHOW client_encoding` は `UTF8`（PG17 / PG14 とも）
-  - 確認済み: 追従先チェックリストの T1 関連行 — `grep -c '^def test_' tests/test_connection.mojo` = **31**、`grep -rn 'PQexec(' src/pq --include='*.mojo' | wc -l` = **4**、`grep -rn 'PQfreemem(' src/pq --include='*.mojo' | wc -l` = **2**（GUC の SET は `execute` 経由なので増えていない）
-  - 確認済み: `_reject_nul(name, "name")` は `self._check_open()` の**後**・`escape_identifier` の前に置いた（「先頭」を厳密に取ると閉じたブロックでの NUL が USAGE → TYPE_MISMATCH に変わるため、既存の優先順位を保った。REQ §6-6 の目的「メッセージが `in s` でなく `in name`」は満たす）
-  - 未確認: T2 で `String(unsafe_from_utf8=span)` の ctor 名（turn 2 の申し送りのまま。最初のコンパイルで確定する）
-  - 未確認: `_SESSION_SETUP_SQL` の失敗経路（`SET` が拒否される状況）は再現手段が無く未実測。コードレビューのみ（PLAN「観点の担当」の異常系どおり）
+## turn 3 — impl — T1 持ち越し整理 + blackhole + SKIP 集計 + 文字列 OID 判定の一元化
+- やったこと: (a)〜(i) を 1 人で実装（並列サブ作業は 1 本なのでサブエージェントは使わず）。REQ §6 の 4 件（params の上限文言 / client_encoding の docstring /
+  `decode_timetz` の時刻範囲検査 + テスト 2 ケース / 非 UTC `else` を `options='-c TimeZone=Asia/Tokyo'` の専用接続ケースに）、`tests/docker-compose.yml` に `blackhole`（socat・54399、`db-up` で `Up`）、
+  `run_tests.sh` の `tee` + `${PIPESTATUS[0]}` + SKIP 集計（`run_test_cmd` 関数 1 本に集約。leak バイナリも同じ経路）、`print("SKIP <name>: <reason>")` 3 箇所、
+  `decode_binary._string_payload` に文字列系 OID 判定 + jsonb バージョンバイトを一元化して `decode_binary[String]` と `Row.get_text` の両方を通した（`result.mojo` の import 6 名が不要になり削除）
+- 期待値の取り直し（REQ §9 常設）: 同期 `Connection` + `options='-c TimeZone=Asia/Tokyo'` で `SELECT '2024-02-29 12:34:56.789+00'::timestamptz` = `2024-02-29 21:34:56.789+09`（`SHOW TimeZone` = `Asia/Tokyo`）。
+  (d) の期待文字列と一致（プローブ `scratch/turn-003-probe-tokyo.mojo`）
+- 既存テストの期待値変更: **ゼロ**（変えたのは (b) の docstring と (d) の分岐、追加した 2 ファイル 3 テスト分だけ。`test_extended_datetime` は 19 件のまま、`test_decode_binary` は 78 → 80 件）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（21 ファイル × 2 = 42 サマリ全部 0 failed、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、per-file 合計 **243 s**）、
+  `pixi run check` **6/6 PASS**（15:52:13 → 15:54:45 = **152 s**。PLAN の見込み 260〜300 s より速い。Phase 4 のテストがまだ 0 本なので当然で、T3 以降で増える）、`pixi run package` 警告ゼロ。
+  (f) の陽性対照: `PQ_TEST_CONNINFO='... port=1 ...' bash tests/run_tests.sh` の **exit code = 1**（`tee` が終了コードを飲んでいない）、集計行も出た（`-- 127.0.0.1:1 skipped 0`）
+- チェックリスト（T1 行）: `params_libpq_takes_at_most=0` / `params_MaxAllocSize=3`（期待 ≥2） / `testconn_from_the_environment=0` / `testconn_PGCLIENTENCODING=1` / `timetz_time_of_day_is_not=0` /
+  `timetz_out_of_range_sites=1` / `datetime_is_utc_calls=2` / `datetime_asia_tokyo=2` / `compose_blackhole=1` / `compose_54399=1` / `run_tests_SKIP=2` / `run_tests_pipefail=2` /
+  `leak_old_SKIP_colon=0` / `string_payload_def=1` / `string_payload_calls=2` / `jsonb_version_checks=2` / `oid_varchar_checks=1` / `test_decode_binary_tests=80` / `test_extended_datetime_tests=19` — **全部期待値**。
+  `tests_print_SKIP` だけはスクリプトが `absent(tests/test_async.mojo)` を返す（T3 まで対象ファイルが無い）ので手で数えた: **4**（期待 ≥3）
+- PLAN 訂正 3 件:
+  - `(g)` の `_skip_on_macos()` 呼び出し **11 → 10**（実測 `grep -c` = 10。PLAN の数え違い）
+  - `(d)(g)` の SKIP 文言を短縮: `main connection TimeZone is not UTC` → `TimeZone is not UTC`、`server is older than 17` → `server < 17`、`server is 17 or later` → `server 17+`
+    （根拠: 元の文言は 80 桁を超え `mojo format` が `print(` と文字列を別行に割る。割れるとチェックリストのパターン `print("SKIP ` が当たらない。形式 `SKIP <name>: <reason>` と `run_tests.sh` の `^SKIP ` は不変）
+  - 追従先チェックリストの `tests_print_SKIP` 行に「T3 まではスクリプトが `absent` を返すので手で数える」注記（スクリプト自体は変更していない）
+- 想定外: (1) `except e: return e` が `PgError` は `ImplicitlyCopyable` でないとして弾かれた → `return e^`（テストのヘルパ `_payload_error`）。
+  (2) `print("SKIP ...")` の 1 行制約（上の PLAN 訂正）。`mojo format` は文字列を割れないので `print(` ごと改行する。
+  (3) `check` が 152 s で見込みより速かった（Phase 4 のテストがまだ無いだけ）
+- やり直し: 1 回（上記 (1) の `return e^`。コンパイルエラー 1 回で直った）
+- 次への注意: T2 から。`print("SKIP ` と、同じく grep で数える行は **1 行に収まる文言**にする（80 桁。`mojo format` が割ると機械チェックが当たらない）。
+  `_string_payload` は `decode_binary.mojo` の private だが `result.mojo` / `tests/test_decode_binary.mojo` から名前で import している（T7 の UTF-8 検証もこの 1 箇所に足せる）。
+  `run_test_cmd` は `build/last_test.log` を毎ファイル上書きするので、T3 以降で新しいテストを足しても集計はそのまま効く。`blackhole` は compose に入ったので `db-up` 済みの環境では 54399 が常に `Up`（T3 (c) ⑦ の SKIP 分岐は実際には通らない見込み）。
+  `PgError` を値として返す場面では `^` が必要（想定外 (1)）
 
-## turn 4 — impl — T2 `ResultFormat` / `result_format` 引数 / `decode_binary`（既存 8 型）/ `Row.get` の形式自動切替
-- やったこと: `ResultFormat`（`PgErrorKind` と同形の Int newtype）と `Result.column_format` / `Row._raw` を `result.mojo` に新設、3 つの `execute`（Connection / PreparedStatement / Transaction）に `result_format: ResultFormat = ResultFormat.TEXT` を追加、
-  `src/pq/decode_binary.mojo` を新設（既存 8 型、長さ厳密 + bool は 0/1 のみ + jsonb version 1 のみ）、`Row.get` / `get_optional` を `PQfformat` で分岐するだけにした。
-  テストは `tests/test_decode_binary.mojo` 44 件（サーバー不要）+ `tests/test_binary.mojo` 14 件（サーバー）。**サブエージェント 3 本を並行**（A: decode_binary + 単体テスト / B: ResultFormat と結線 / C: test_binary.mojo を契約から独立に）。対象ファイルは重ならせず、統合・`fmt` 1 回・全検証は親が実施
-- 想定外:
-  (1) **`bytes: Span[UInt8]`（origin 無し）はコンパイルできない**（`error: 'Span' failed to infer parameter 'origin'`）。決めた事項 3 のシグネチャは `[origin: ImmOrigin, //, T: Copyable]` + `Span[UInt8, origin]` が**必須**で、`Span` を取る全関数（個別 decoder 6 本 + `_be_bits` / `_check_length`）に同じ前置が要る。呼び出し側は `decode_binary[T](span, oid)` のままなので B / C の書き方には影響しなかった
-  (2) **`(-0.0)::float8` では負のゼロにならない**。`-0.0` が numeric リテラルとして解釈され、numeric に符号付きゼロが無いため PG14 / PG17 とも `0` を返す。`'-0'::float8` / `'-0'::float4` と書く必要がある（C が実測して気づき、PLAN を訂正）
-  (3) 追従先チェックリストの `grep -c '^def decode_' src/pq/decode_binary.mojo` の期待値 14 は、`decode_binary` 自身の行を数え落としていた（正しくは 15）
-  (4) `Row.get` が 1 セルにつき `PQftype` + `PQfformat` の 2 回 FFI を呼ぶ形になった。形式は結果全体で一定なので `Result.__init__` で 1 回キャッシュできるが、契約外なので実装せず T8 の bench への申し送りに回した
-- やり直し: 0 回（3 本とも担当範囲は初回で green。親の統合でも修正は不要で、`pixi run fmt` が `result.mojo` / `test_binary.mojo` を整形しただけ）
-- PLAN 訂正: 4 件
-  - 決めた事項 3 のシグネチャを `[origin: ImmOrigin, //, T: Copyable]` + `Span[UInt8, origin]` に（根拠: 想定外 (1) のコンパイルエラー実測）
-  - 追従先チェックリストの `^def decode_` 期待値 14 → **15**（根拠: 想定外 (3)。turn 4 実測は 7 = 6 本 + 自身）
-  - T2 (e) ① に「負のゼロは `'-0'::float8` / `'-0'::float4` と書く」を追記（根拠: 想定外 (2) の実測）
-  - T2 (d) の長さ不一致ケースは bool だけ 3 → **2**（1 byte 型なので「-1 byte」と「0 byte」が同一入力。根拠: A の報告）
-- 既存テストの期待値を変えた箇所: **なし**（T2 (f) のとおり後方互換。`test_result` 15 / `test_params` 31 / `test_prepared` 14 / `test_transaction` 13 / `test_connection` 31 / `test_decode_text` 49 / `test_encode_binary` 14 / `test_errors` 7 / `test_ffi` 7 / `test_leak` 12 / `test_smoke` 4 / `test_loader_fail` 1 が無変更で PASS）
+## turn 4 — impl — T2 Phase 4 の土台（adopt_result / TIMEOUT / _ffi 2 本 / _platform/poll + test_poll）
+- やったこと: (a)〜(f) を 1 人で実装（並列サブ作業は推奨 1 本なのでサブエージェントは使わず。推奨 1 本 / 実 0 本）。
+  `_take_result` 本文 + `_error_field` を `result.mojo` の `adopt_result` へ移して `_take_result` は 1 行委譲（成功判定に `PGRES_SINGLE_TUPLE` 追加）、
+  `PgErrorKind.TIMEOUT`（値 6 / `Timeout`）、`_ffi` に `PQconnectStart` と `PQsetSingleRowMode`（名前表 53 → 55）、
+  `src/pq/_platform/{__init__,poll}.mojo`（`poll_socket` + `PollEvents`、POSIX と WSAPoll を `comptime if` で分岐）、`tests/test_poll.mojo` 9 件
+- 既存テストの期待値変更: **ゼロ**（`test_ffi.mojo:103` の `len(names)` 53 → 55 は追加した 2 バインドの件数そのもの。
+  他は `test_errors` に 1 件、`test_poll` に 9 件の追加だけ。同期側 `_take_result` の分類・文言は 1 字も変えていない）
+- P4（`EINTR` はコードレビュー）: `src/pq/_platform/poll.mojo:236` が `err == ErrNo.EINTR`、`:238` が `deadline - monotonic()` の残り再計算、
+  `:243` が `remaining = (left + 999_999) // 1_000_000`（切り上げ。0 に落として probe 化させない）、`:228` が `deadline`。`timeout_ms == -1` は再計算せず `continue`
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（22 ファイル × 2、全サマリ `0 failed`、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、16:04:58 → 16:09:45 = **287 s**）、
+  `pixi run check` **6/6 PASS**（16:15:57 → 16:18:10 = **133 s**。T1 の 152 s より短いのは leak が 1 サーバーのみの分の揺らぎ）、`pixi run package` 警告ゼロ。
+  `test_poll` 単体は 9 件 PASS / **0.13 s**（サーバー不要）
+- チェックリスト（T2 行）: `conn_def_take_result=1` / `conn_def_error_field=0` / `result_def_adopt_result=1` / `result_def_error_field=1` / `result_SINGLE_TUPLE=3`（期待 ≥1） /
+  `conn_adopt_result_calls=1` / `errors_TIMEOUT=3`（≥2） / `errors_six=0` / `init_exactly_six=0` / `init_TIMEOUT=1`（≥1） / `ffi_PQsetSingleRowMode=3`（PLAN 訂正、下記） /
+  `ffi_PQconnectStart_plain=1` / `testffi_PQsetSingleRowMode=1` / `testffi_PQconnectStart_plain=1` / `testffi_symbol_count_53=0` / `_55=1` /
+  `platform_init=exists` / `platform_poll=exists` / `poll_def_poll_socket=1` / `poll_comptime_if=1` / `poll_WSAPoll=10`（≥1） / `poll_EINTR=3`（≥1） / `poll_monotonic=4`（≥1） /
+  `poll_external_call_symbols=2`（≤3） / `test_poll=exists` / `test_poll_tests=9`（≥7） — **全部期待値**。全体行は `tests_files_count=22` / `test_file_count=22`（T8 で 24）
+- PLAN 訂正 3 件:
+  - `ffi_PQsetSingleRowMode` の期待 **2 → 3**（`mojo format` が `_dl_sym[...](self._lib, "PQsetSingleRowMode")` を 3 行に割るので、宣言 1 + 代入 1 + 名前文字列 1 で 3 行当たる）
+  - T7 行の `result_unsafe_ptr` 現在値 **4 → 7**、期待 **3 → 6**（`_error_field` / `adopt_result` が `result.mojo` に移り、libpq のエラー文字列を読む `unsafe_from_utf8_ptr` が 3 行増えた。
+    いずれも列値ではないので UTF-8 検証の対象外）。同じ行の `utf8_unsafe_span` は 3 → 2（T1 の `_string_payload` 一元化による。T7 の期待 0 は変えない）
+  - T2 の対象ファイルに `src/pq/transaction.mojo`（`_error_field` の import 元）と `src/pq/_ffi/__init__.mojo`（「50 libpq entry points」→ 55）を追記
+- 想定外: (1) `transaction.mojo:75` が `from pq.connection import Connection, _error_field` で移動先を参照していた（PLAN の対象一覧漏れ。`pq.result` から取るよう 1 行修正）。
+  (2) `FileDescriptor(fd).write("A")` は一時値への mutating 呼び出しで弾かれる → `var out = FileDescriptor(fd); out.write("A")`（probe と同じ形に戻した）。
+  (3) `comptime if` の非選択側に置いた `external_call["WSAPoll"]` は Linux でリンクエラーにならない（分岐ごと codegen されない。`package` も `test` も通った）
+- やり直し: 2 回（上記 (1)(2)。どちらもコンパイルエラー 1 回ずつで直った）
 - 次への注意:
-  - 確認済み: `pixi run test` 両サーバー 15 ファイル全 PASS（新規 2 本が 54317 / 54314 で各 1 回、計 4 回ログに出る）。`pixi run check` **6/6 PASS = 117 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。所要は T1 の 113 s からほぼ変わらず、PLAN の「3 分を超えたら書く」には達していない
-  - 確認済み（所要・単位 ms。TestSuite の `Summary [ N ]` は ms）: `tests/test_binary.mojo` 14 件 = **60.7 ms**（54314）/ **66 ms** 程度（54317）、`tests/test_decode_binary.mojo` 44 件 = **0.025 ms**（サーバー不要なので実質ゼロ）。`test_leak` は 12 件 73.5 s / サーバーで T1 から変化なし
-  - 確認済み: **`String(unsafe_from_utf8=span)` が正しい ctor 名**（UTF-8 検証なし）。turn 2 / turn 3 から持ち越していた未確認事項はこれで解消。検証ありの方は `String(from_utf8=span)`
-  - 確認済み: 追従先チェックリストの T2 行 — `grep -rn 'Phase 3' src/pq --include='*.mojo'` = **`encode_binary.mojo:16` の 1 行だけ**、`grep -c 'result_format'` = connection **6** / prepared **4** / transaction **4**（各 ≥ 2）。中間値は `^def decode_` **7**、`elif T ==` が decode_binary **8** / decode_text **8**（最終目標は各 16）。`grep -rn -- '-> ref' src/pq/*.mojo` = **0**（P19。T7 で再確認する）
-  - 確認済み: `tests/run_tests.sh:76` は `for f in tests/test_*.mojo` の glob なので、新しいテストファイルは runner への追従が不要（T6 / T7 でも同じ）
-  - 未確認: T3 が `decode_text.mojo` に `OID_JSON` / `OID_JSONB` を足したら、`decode_binary.mojo:52-55` の private な `_OID_JSON` / `_OID_JSONB` を import に置き換える（そのためのコメントを 2 行入れてある）。OID の唯一の置き場は `decode_text.mojo` という決めた事項 11 を守るため
-  - 未確認: `decode_binary.mojo` の `_be_bits` は `UInt64` を返すので **8 byte までしか読めない**。T3 の numeric（可変長）・uuid（16 byte）、T5 の interval（16 byte）は自前の読み出しが必要（date / time / timestamp / timestamptz は再利用可）。三つのエラービルダー（`_binary_oid_error` / `_binary_length_error` / `_binary_value_error`）と `_check_length` は再利用すること（テストが文面の部分文字列を見ている）
-  - 未確認: `String` 分岐は「jsonb を先に early return → 残り 5 OID を `and` 連鎖で判定」の二段構造。T3 で文字列系 OID を足すときは**その連鎖を伸ばす**（`elif T == String` を増やすと新 OID が OID 不一致に落ちる）。`else: comptime assert False` は常に最後に置く
-  - 未確認: 0 byte の jsonb のメッセージが `binary jsonb value has 0 bytes, expected 1` で、1 が下限なのに固定幅のような読みになる（kind と拒否は正しい）。T3 で jsonb を触るなら文面を見直す候補
-  - 未確認（T6 / T7 の材料。C が契約外として報告）: `column_format(-1)` の負値、0 列結果（binary DDL / INSERT）の `column_format`、明示 `result_format=ResultFormat.TEXT`、複数行の binary 結果（行オフセットのずれを突く）、未対応 OID を `get_optional` で引いたとき。いずれも T2 の完了基準に無いので足していない
-  - 未確認: 切断後の binary 実行（T2 (e) ⑦）は、C の実測では **PG14 / PG17 とも 2 回目も `CONNECTION`**（SQLSTATE 空）だった。テストは PLAN の文言どおり `CONNECTION` / `SERVER` のどちらでも通る形にしてある。既存 `tests/test_connection.mojo` は無条件 `CONNECTION` を期待しているので、verify が厳しくしたければ締められる
-## turn 5 — impl — T3 `Decimal` / `UUID` / json・jsonb の OID + codec と `Param` ctor
-- やったこと: `src/pq/types_numeric.mojo`（`Decimal`）と `src/pq/types_uuid.mojo`（`UUID`）を新設し、OID 4 個（114 / 1700 / 2950 / 3802）を `decode_text.mojo` に集約、
-  `decode_numeric` / `decode_uuid` / `encode_numeric` / `encode_uuid` と `decode_text` / `decode_binary` の 2 型分岐、`Param` の `@implicit` 4 本（値 + `Optional`）を結線。
-  **サブエージェント 2 本を並行**（A: `Decimal` + 単体テスト / B: `UUID` + 単体テスト。対象ファイルは重ならせず、codec・`params.mojo`・docstring 追従・統合検証は親）
-- 想定外:
-  (1) `@fieldwise_init` が `Decimal` に 4 引数の**公開**位置引数 ctor（`Decimal(_sign, _weight, _dscale, _digits)`）を生む。正規化を飛ばせるので `__eq__` の前提（正規化後の比較）を壊せる。
-      Mojo に可視性制御は無く、明示 `__init__` に書き換えても公開面は同じなので**そのままにした**（`_from_parts` / `nan()` / `infinity()` / `negative_infinity()` が内部でこれを通す。パッケージ外から呼ぶ理由は無い）。verify が「契約に無い公開 ctor」として締めたければ候補
-  (2) numeric の長さ誤りのメッセージは**値エラー側の文面**にせざるを得なかった（決めた事項 4 は長さ不一致の分類に置いていたが、T3 (f) が不正 5 ケース全部に `"cannot decode binary numeric"` を要求している）。PLAN を訂正
-  (3) 追従先チェックリストの `grep -c '@implicit' src/pq/params.mojo` はモジュール docstring の「`@implicit` constructors」行も数える（実 ctor 数 + 1）。元の最終期待値 35 は実 ctor 数で、grep 値ではなかった。PLAN を訂正
-  (4) RESEARCH §2.2.2 の表は 30 byte 行（`123456789012345678901234567890.123456789`）の digit 部を `...` で省略していたので、`encode(numeric_send(v), 'hex')` で 23 値の wire を PG17 から取り直して期待値にした。
-      §3-2 の式から手計算した `000b000700000009 000c 0d80 1ed2 04d2 162e 2334 0d80 1ed2 04d2 162e 2328` と**実測が完全一致**したので、parse の式の写し取りはこれで裏が取れた
-- やり直し: 0 回（親の統合・検証は初回で green。サブエージェント A は自分の担当範囲内で小数点の `write_to` 漏れを 1 回直して報告）
-- PLAN 訂正: 4 件
-  - 決めた事項 4 に「numeric だけは長さ誤りも `cannot decode binary numeric: ...` の文面」を追記（根拠: 想定外 (2)。T3 (f) の要求と可変長型の性質）
-  - 追従先チェックリストの `@implicit` 最終期待値 35 → **36**（grep は docstring 行も数える。ctor だけなら `grep -c '^    @implicit'`。根拠: 想定外 (3) の実測）
-  - 同チェックリスト T2 行の `grep -rn 'Phase 3'` 期待値 1 → **2**（`__init__.mojo` の Layout 行に Phase 3 の追加モジュールを書いた。既存の「Phase 1 adds ... Phase 2 adds ...」の続きで placeholder ではない）
-  - 同チェックリスト `^def decode_` の turn 5 実測 **9**（6 本 + `decode_numeric` + `decode_uuid` + 自身）を追記
-- 既存テストの期待値を変えた箇所: **なし**（既存 13 ファイルは無変更で PASS。追記したのは `test_decode_binary` +14 件 / `test_encode_binary` +4 件 / `test_params` +2 件で、既存ケースの期待値は触っていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 17 ファイル全 PASS**（0 failed）。`pixi run check` **6/6 PASS = 112 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s から変化なし（PLAN の「3 分を超えたら書く」には未達）
-  - 確認済み（所要・単位 ms）: `test_types_numeric` 45 件 = **133〜143 ms**、`test_types_uuid` 14 件 = **15 ms**、`test_decode_binary` 58 件 = **52 ms**、`test_encode_binary` 18 件 = **33 ms**（いずれもサーバー不要）。`test_params` 33 件 = **127 s**（サーバー往復込み）
-  - 確認済み（追従先チェックリストの中間値、素のシェルで再現可）: `^comptime OID_` = **15**、`^    @implicit` = **23**（grep `'@implicit'` は 24）、`^def encode_` = **8**、`^def decode_` = **9**、`elif T ==` は decode_text **10** / decode_binary **10**（最終目標は各 16）、`UInt32(1700)|UInt32(2950)|UInt32(114)|UInt32(3802)` の decode_text 以外での出現 = **0**、`Nineteen` = 0 / `Twenty-three` = 1、`exactly six` = 0、`anything else` = 1、`-> ref` = **0**（P19）
-  - 確認済み: PG の wire を取る一番速い手は **`docker exec -i tests-pg17-1 psql -U pq -d pq_test`** + `encode(<type>_send(v), 'hex')`。T4 / T5 の date / timestamp / time / timetz / interval の期待値もこれで原本を作れる（`date_send` / `timestamp_send` / `timestamptz_send` / `time_send` / `timetz_send` / `interval_send`）。RESEARCH の表で `...` 省略されている行はこれで埋める
-  - 未確認: `Decimal._from_parts` は weight が `Int16.MIN` で**かつ**先頭ゼログループがあるとき stripped weight が wrap する（A の報告）。サーバーは先頭ゼログループを送らないので到達しないが、`decode_numeric` のヘッダ検査に足すかは T6（サーバー格子）か verify の判断
-  - 未確認: 0 byte の jsonb のメッセージ（`binary jsonb value has 0 bytes, expected 1`）は turn 4 からの持ち越しのまま。T3 は jsonb の OID を `decode_text` に移しただけで分岐の文面は触っていない（既存テストが文面の部分文字列を見ているので、直すなら T9 でテストと同時に）
-  - 未確認: `types_numeric.mojo` / `types_uuid.mojo` の `_usage_error` / `_decode_error` は**モジュールごとに同名で重複定義**している（決めた事項 4 の「`decode_text` を import すると循環するため型モジュール側に private ビルダーを置く」どおり）。T4 / T5 の `types_datetime.mojo` も 3 本目の同じ対を持つことになる。共通化したいなら置き場は `errors.mojo`（verify / T9 の判断）
-  - 未確認: `Decimal` / `UUID` を**サーバー往復**で見るのは T6（拡張型 8 種の格子）。T3 は単体 + `Param` の OID / 形式までで、`SELECT $1::numeric` の往復はまだ 1 件も通していない
-## turn 6 — impl — T4 `Date` / `Timestamp` / `TimestampTz` + codec / `Param` + 単体テスト
-- やったこと: `src/pq/types_datetime.mojo` を新設（Hinnant 暦算法の Mojo 床除算版 + `Date` / `Timestamp` / `TimestampTz`、共用ヘルパ `_format_date` / `_format_time_of_day` / `_parse_fraction` / `_parse_hms` は T5 が使う）、
-  OID 3 個（1082 / 1114 / 1184）を `decode_text.mojo` に集約し、`decode_date` / `decode_timestamp` / `decode_timestamptz` と `encode_date` / `encode_timestamp` / `encode_timestamptz`、`decode_text` / `decode_binary` の 3 型分岐、`Param` の `@implicit` 6 本を結線。
-  テストは `tests/test_types_datetime.mojo` 75 件（サーバー不要）+ `test_decode_binary` +10 件 / `test_encode_binary` +4 件 / `test_params` の OID・NULL 追記。
-  **サブエージェント 2 本を並行**（A: `types_datetime.mojo` / B: `tests/test_types_datetime.mojo` を契約から独立に）。codec・`params.mojo`・docstring 追従・統合検証は親
-- 想定外:
-  (1) 期待値の転記ミスは**ゼロ**だった。親が PG17 の `date_send` / `timestamp_send` で 7 + 10 件を取り直し、B も独自の JDN 計算で 9 + 7 + 6 件を照合し、どちらも PLAN / RESEARCH と完全一致
-  (2) A が overflow 対策の門を 2 つ足した（`from_ymd` 系の入口で `|y| > 6000000` を `USAGE`、`Timestamp` は micros を作る前に日数を `-2451545..106751982` で検査）。`_days_from_civil` の `era * 146097` と `days * 86400000000` が値域検査より先に overflow するため。**通る値の集合は契約どおり**（完了基準の 9 + 7 件と拒否 12 件が全部期待どおり）
-  (3) A が `Date.parse("0000-01-01")` を拒否にした（PG の `date_in` と同じ。`_format_date` は天文年 0 を `0001-01-01 BC` と書くので往復の一貫性もこちら）。契約に明記が無かった判断なので verify の確認材料に残す
-  (4) `_parse_hms` は契約どおり `HH` を 0..24 で通すので `"24:30:00"` も -1 にならない（`Timestamp` 側は 86400000000 以上を弾くので影響なし）。T5 の `Time` が 24 時台をどう扱うかは T5 の判断
-- やり直し: 0 回（A / B とも担当範囲は初回で green。親の統合も修正なしで、`pixi run fmt` が 2 ファイルを整形しただけ）
-- PLAN 訂正: なし（T4 の完了基準・期待値はすべて実物と一致した）
-- 既存テストの期待値を変えた箇所: **なし**（既存 15 ファイルは無変更で PASS。追記したのは `test_decode_binary` +10 件 / `test_encode_binary` +4 件 / `test_params` の既存 2 関数への追加 assert のみで、既存ケースの期待値は触っていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 18 ファイル全 PASS**（36/36 が `0 failed`。per-file 合計 215 s）。`pixi run check` **6/6 PASS = 118 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s から変化なし（「3 分を超えたら書く」には未達）
-  - 確認済み（所要・単位 ms）: `test_types_datetime` 75 件 = **25〜37 ms**、`test_decode_binary` 68 件 = **66〜77 ms**、`test_encode_binary` 22 件 = **41 ms**（いずれもサーバー不要）。`test_params` 33 件 = **116〜124 s**（サーバー往復込み）。`test_leak` 12 件 = **66〜68 s / サーバー**（T3 の 73.5 s から微減）
-  - 確認済み（追従先チェックリストの中間値、素のシェルで再現可）: `^comptime OID_` = **18**、`^    @implicit` = **29**（grep `'@implicit'` は 30）、`^def encode_` = **11**、`^def decode_` = **12**、`elif T ==` は decode_text **13** / decode_binary **13**（最終目標は各 16）、`Twenty-nine` = 1、`UInt32(1082)|UInt32(1114)|UInt32(1184)` の decode_text 以外での出現 = **0**、`-> ref` = **0**（P19）
-  - 確認済み: PG17 から取り直した原本（`docker exec -i tests-pg17-1 psql -U pq -d pq_test -At -c "... encode(date_send(v), 'hex') ..."`）— date: `2000-01-01`=00000000 / `1970-01-01`=ffffd533 / `2024-02-29`=00002279 / `0001-01-01 BC`=fff4da8b / `4714-11-24 BC`=ffda97a7 / `5874897-12-31`=7fda970c / `10000-01-01`=002c95d4 / `0001-01-01`=fff4dbf9 / `infinity`=7fffffff / `-infinity`=80000000。timestamp 7 件も RESEARCH と一致。T5 の time / timetz / interval も同じ手で原本を作れる
-  - 未確認（T5 への申し送り）: `types_datetime.mojo` は 1079 行 → fmt 後も 1 ファイル。T5 は**同じファイルに追記**し、`_format_time_of_day` / `_parse_hms` / `_parse_fraction` / `_pad2` / `_usage_error` / `_decode_error` を**再利用**する（同名の対を作らない）。`_infinite_error(pg_type, accessor)` も既にある
-  - 未確認（B が契約外として報告。T6 / verify の材料）: `TimestampTz` の分解アクセサ 7 本と `from_utc` の拒否（`"invalid timestamptz"` の文面）はどのテストも通っていない（契約には在る）。`Timestamp` / `TimestampTz` の `is_infinite()` でのアクセサ raise も Date だけで確かめている。T6 (b) ③ の往復で `from_utc` は通るが、拒否側は空白のまま
-  - 未確認: `Date` / `Timestamp` の**テキスト**経路は DateStyle `ISO, YMD` 前提（T1 の GUC 固定が効いている）。非 ISO で `TYPE_MISMATCH` になることの確認は T6 (b) ⑤ が担う。この前提は `result.mojo` の `Row.get` 表には書いていない（T9 の文書整備で 1 行足す候補）
-  - 未確認: A の契約外提案 3 件 — `Date` / `Timestamp` の順序比較（`__lt__` 等。内部整数の比較でそのまま正しい）、`Date` ↔ `Timestamp` 変換、`TimestampTz.parse` のコロン無しオフセット `[+-]HHMM`。いずれも実装していない（現契約では `+HHMM` は拒否が正）
-## turn 7 — impl — T5 `Time` / `TimeTz` / `Interval` + codec / `Param` + 単体テスト
-- やったこと: `src/pq/types_datetime.mojo` に `Time` / `TimeTz` / `Interval` を追記（private ヘルパ `_write_fraction` / `_format_interval_time` / `_write_interval_part` を新設、T4 の `_format_time_of_day` / `_parse_hms` / `_parse_fraction` / `_pad2` / `_usage_error` / `_decode_error` は再利用）、
-  OID 3 個（1083 / 1186 / 1266）を `decode_text.mojo` に集約し、`decode_time` / `decode_timetz` / `decode_interval` と `encode_time` / `encode_timetz` / `encode_interval`、`decode_text` / `decode_binary` の 3 型分岐、`Param` の `@implicit` 6 本を結線。
-  テストは `tests/test_types_datetime.mojo` +57 件（75 → 132）/ `test_decode_binary` +9 件（68 → 77）/ `test_encode_binary` +4 件（22 → 26）/ `test_params` の既存 2 関数に 6 型分の assert 追記。
-  **サブエージェント 2 本を並行**（A: `types_datetime.mojo` / B: `tests/test_types_datetime.mojo` を契約から独立に）。codec・`params.mojo`・docstring 追従・統合検証は親
-- 想定外:
-  (1) **PLAN の期待値に 1 件誤りがあった**（T5 (d) の time `24:00:00` の hex）。`0000001406f40000` は 86015737856 で 86400000000 ではない（正: `000000141dd76000` = `0x141DD76000`）。
-      親が PG17 の `time_send` / `timetz_send` / `interval_send` で 33 値の原本を取り直して発見。PLAN を訂正。**他の 32 値（timetz 6 ゾーン・interval 18 件・time 4 件）は PLAN / RESEARCH と完全一致**
-  (2) interval テキストの `+` 規則は「それまでに負が 1 つでもあったか」ではなく **「直前に出した成分の符号」**（PG `AddPostgresIntPart` が毎回 `is_before = (value < 0)` を上書きする）。
-      `-1 years -2 mons +3 days` が成立するのはこのため。契約文に明記して A に渡したので実装は初回から正しかった
-  (3) `Interval` は `Copyable` だが `ImplicitlyCopyable` ではないので、`List[Interval]` の要素を `var x = list[i]` で受けるとコンパイルエラー（`.copy()` が必要）。親のテストで 1 回踏んだ
-  (4) A が `Interval.parse` に overflow の門を 4 つ足した（桁数 > 10、hour > 2562047788、時刻部の大きさが `Int64` 超、`months` / `days` が `Int32` 超）。
-      いずれも入力検査なので契約外の"保険"ではないと判断してそのまま採用。`Interval(Int64.MIN, 0, 0)` は番兵でない有限値なので、時刻部の絶対値は `UInt64` で求めて wrap を避けている（`-2562047788:00:54.775808` と往復する）
-- やり直し: 1 回（想定外 (3) の `.copy()`。A / B は担当範囲とも初回で green）
-- PLAN 訂正: 1 件
-  - T5 (d) の time `24:00:00` の hex `0000001406f40000` → **`000000141dd76000`**、86400000001 は `000000141dd76001`（根拠: 想定外 (1) の PG17 `time_send` 実測）
-- 既存テストの期待値を変えた箇所: **なし**（既存 18 ファイルは無変更で PASS。追記したのは上記 4 ファイルで、`test_params` は既存 2 関数への assert 追加のみ。既存ケースの期待値は触っていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 18 ファイル全 PASS**（36/36 が `0 failed`）。`pixi run check` **6/6 PASS = 125 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s / T4 118 s から微増だが「3 分を超えたら書く」には未達
-  - 確認済み（所要・単位 ms）: `test_types_datetime` 132 件 = **40〜46 ms**、`test_decode_binary` 77 件 = **82〜85 ms**、`test_encode_binary` 26 件 = **51〜58 ms**（いずれもサーバー不要）。`test_params` 33 件 = **115 s**、`test_binary` 14 件 = **59 s**、`test_leak` 12 件 = **66.9 s / サーバー**（T4 と同じ）
-  - 確認済み（追従先チェックリストの**最終件数**。全部目標値に一致、素のシェルで再現可）: `^comptime OID_` = **21**、`^    @implicit` = **35**（grep `'@implicit'` は 36）、`^def encode_` = **14**、`^def decode_` = **15**（14 本 + `decode_binary` 自身）、`elif T ==` は decode_text **16** / decode_binary **16**、`Thirty-five` = 1 / `Twenty-nine` = 0、`fourteen encoders` = 1、`-> ref` = **0**（P19）、`UInt32(1083)|UInt32(1186)|UInt32(1266)` の decode_text 以外での出現 = **0**
-  - 確認済み: interval テキスト 18 件は B の転記だけでなく **PG17 の `::text` 出力そのもの**とも一致する（親が `docker exec -i tests-pg17-1 psql -At -c "... v::text, encode(interval_send(v),'hex') ..."` で 20 件の原本を取得。`-1 days +02:00:00` / `-1 years -2 mons -3 days -04:05:06.789` / `1 mon -1 days` / `-00:00:00.5` / `100:00:00` / `2 years 1 mon` / `-11 mons` / `-1 years +1 day` が一致）。原本 SQL は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-007-wire.sql`
-  - 未確認（T6 への申し送り）: **`Time` / `TimeTz` / `Interval` のサーバー往復はまだ 1 件も通していない**。T5 は単体 + `Param` の OID / 形式までで、`SELECT $1::interval` の往復と text / binary の一致は T6 (b) が担う。特に PG14 の interval ±infinity（22008 / 22007）は未着手
-  - 未確認（A が契約外として報告）: `Interval.parse("+02:00:00")`（時刻部だけで先頭 `+`）は**拒否**になっている。`EncodeInterval` は単独の時刻部に `+` を付けないので「出力文法の逆」としては正しいが、契約文の `[+-]?H+:MM:SS` の literal な読みより狭い。T6 / verify の判断材料
-  - 未確認（A が契約外として報告）: `TimeTz.write_to` に生 ctor で範囲外の `offset_secs` を入れると時の桁が 3 桁以上で出る（`_pad2` は切り詰めない）。`decode_timetz` と `from_hms` が両方弾くので到達経路は無い
-  - 未確認: `_write_fraction` は `_format_time_of_day` 内のインライン実装と約 10 行重複している（A が append-only 指示を守った結果）。共通化は T9 の文書・整理フェーズの候補
-  - 未確認: `types_datetime.mojo` は **1892 行**になった（T4 末 1151 行）。T6 以降はこのファイルに足すものが無いので分割の必要は無い見込み
-## turn 8 — impl — T6 サーバー格子（拡張型 8 種 + json / jsonb の text / binary 一致）
-- やったこと: `tests/test_extended_numeric.mojo`（10 件 / 929 行。numeric / uuid / json / jsonb）と `tests/test_extended_datetime.mojo`（19 件 / 1016 行。date / timestamp / timestamptz / time / timetz / interval）を新設し、
-  Phase 3 で足した 8 型を**実サーバー往復**で検査する格子を通した。text / binary の値一致、`String(T)` と text の `get[String]` の一致、`SELECT $1::<type>` のパラメータ往復（両結果形式）、PG17 分岐、非 ISO DateStyle / IntervalStyle、境界値。
-  **サブエージェント 2 本を並行**（A: numeric 側 / B: datetime 側。対象ファイルは 1 本ずつで重ならせず、`fmt`・両サーバー検証・コミットは親）
-- 想定外:
-  (1) **`gen_random_uuid()` を 2 回呼ぶ完了基準は原理的に満たせない**（毎回別値）。`CREATE TEMP TABLE pq_t6_uuid AS SELECT gen_random_uuid() AS u` で 1 値を固定してから text / binary で 2 回読む形にした。PLAN を訂正
-  (2) `1e130::numeric` のテキストは**指数表記にならない**（`1` + ゼロ 130 個 = 131 文字）。`Decimal` は指数リテラルを受けないので、パラメータ往復はサーバーが返した位置表記を `Decimal(text)` に食わせる形にした（RESEARCH §2.2.2 の記述どおりで、PLAN の誤りではない）
-  (3) `'4714-11-24 00:00:00 BC'::timestamp` の値は RESEARCH に無かった（あるのは `4713-01-01 00:00:00 BC` = `fd0f7fbdaf17e000`）。PG17 の `timestamp_send` で実測して `fd0f7cc1411fa000` = **-211813488000000000**（= timestamp の下限）を期待値にした
-  (4) `'36 hours'::interval` / `'1.5 days'::interval` はサーバーが正規化するのでテキストが入力リテラルと違う（`36:00:00` / `1 day 12:00:00`）。テストは text の `get[String]` と突き合わせる作りなのでそのまま通る
-  (5) `TestSuite` に skip API が無いので、PG17 / PG14 分岐の 2 件は非該当バージョンでは早期 return して **PASS と表示される**（「走っていないのに緑」）。テスト名で `_on_pg17_and_later` / `_before_pg17` と区別できるようにしてある
-- やり直し: 0 回（A / B とも担当範囲は初回で green。親の統合も修正なしで、`pixi run fmt` が 2 ファイルを整形しただけ）
-- PLAN 訂正: 1 件
-  - T6 (a) ⑥ の `gen_random_uuid()` を「TEMP TABLE で 1 値を固定してから両形式で読む」に（根拠: 想定外 (1)。2 クエリでは比較不能）
-- 既存テストの期待値を変えた箇所: **なし**（既存 18 ファイルは無変更。新規 2 ファイルを足しただけで、`src/` は 1 行も触っていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 20 ファイル全 PASS**（40/40 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-008-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 118 s**（`final_check: PASS`、6/6 段 `matched lines: 0`）。T1 113 s / T2 117 s / T3 112 s / T4 118 s / T5 125 s と同水準
-  - 確認済み（所要・単位 s / ms）: `test_extended_numeric` 10 件 = **1〜2 s**（単体 49 ms + 接続）、`test_extended_datetime` 19 件 = **1〜2 s**（単体 94 ms + 接続）、`test_leak` 12 件 = **61 s（PG17）/ 63 s（PG14）**
-  - 確認済み: 期待メッセージはすべて 2 語以上の部分文字列（`"oid 1700"` / `"oid 3802"` / `"ResultFormat.TEXT"` / `"02.01.2024" as date` / `"P1D" as interval`）。PG14 の interval ±infinity は `SERVER` + sqlstate `22007`（SQL）/ `22008`（パラメータ）を**実測で確認**
-  - 確認済み: binary が GUC 非依存であること（`SET DateStyle TO 'German'` 下で text の `get[Date]` が `TYPE_MISMATCH`、同じ列の binary が `Date(8767)`）。GUC を触る 2 テストは専用接続で行い、最後に GUC を戻して同じ SQL が通ることまで見ている
-  - 未確認（B が契約外として報告）: timetz の最大西 / 最大東（`-15:59` → 57540、`+15:59:59` → -57599）はサーバー往復に入れていない（PLAN ① のリストに無い）。`Int32` の符号反転を一番きわどく突くケースなので verify が足したければ候補
-  - 未確認（B が契約外として報告）: `test_timestamp_params_round_trip` の**非 UTC 分岐は CI で一度も走らない**（コンテナが `Etc/UTC` 固定で `_is_utc()` が常に真）。`options='-c TimeZone=Asia/Tokyo'` 付きの接続で 1 ケース回せば分岐自体を検証できる
-  - 未確認（A が契約外として報告）: NULL の binary（`SELECT NULL::numeric / ::uuid / ::jsonb` の `NULL_VALUE` / `get_optional` / `is_null`）と、`PreparedStatement` / `Transaction` 経由の binary を**拡張型で**は見ていない（既存 8 型は `test_binary.mojo` が押さえている）
-  - 未確認: T7（zero-copy）の `get_text` / `get_bytes` はまだ無い。T7 (c) の陽性対照は `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-NNN-zerocopy-neg.mojo` に置き、`grep -rn -- '-> ref' src/pq/*.mojo` = 0 を PROGRESS に書くところまでが T7 の仕事
-## turn 9 — impl — T7 zero-copy `Row.get_text` / `get_bytes` + `tests/test_zero_copy.mojo` + 陽性対照
-- やったこと: `src/pq/result.mojo` に `Row.get_text(col) -> StringSlice[Self.origin]` と `Row.get_bytes(col) -> Span[UInt8, Self.origin]` を追加（T2 の `_raw` をそのまま使い、`get_text` は binary のとき 6 OID 検査 + jsonb version byte 剥がしを `decode_binary` の `_binary_oid_error` / `_binary_length_error` / `_binary_value_error` を import して共用。メッセージが `get[String]` と同一になる）、
-  `src/pq/__init__.mojo` に `## Zero-copy access` 節、`tests/test_zero_copy.mojo` 11 件（サーバー）を新設。陽性対照 3 本を scratch で実測。サブエージェントは使わず（PLAN の推奨本数 0）
-- 想定外:
-  (1) `_ = result^` の生存延長は**実測で確認できた**（`.gsd-lite/logs/phase3-binary-all-types/scratch/turn-009-probe-keepalive.mojo` → `slice after keep-alive: héllo 6 6`）。`_ = row^; _ = result^` を slice 取得の後に置き、assert をその後に書く順序で問題なく動く
-  (2) テスト内の `List[Int](-1, a, b)` / `List[UInt8](0, 255, 0)` は Mojo 1.1.0 ではコンパイルできない（可変長 ctor が `__list_literal__` を要求する）。角括弧リテラル（`var expected: List[UInt8] = [0, 255, 0]`、`for col in [-1, ncols, ncols + 7]`）に直した。`List` 同士の `assert_equal` も避け、`_assert_same_bytes(Span, Span)` ヘルパで比較（`test_decode_binary.mojo:124` の `_assert_bytes` と同じ流儀）
-  (3) `String("...").as_bytes()` を関数呼び出しの実引数に直接書くと一時オブジェクト由来の span になるので、期待値は `var hex_text = String(...)` に束ねてから渡した（コンパイルは通るが寿命が読みにくいため）
-- やり直し: 1 回（想定外 (2) のリスト構築。`src/` 側は初回で precompile まで警告ゼロ）
-- PLAN 訂正: なし
-- 既存テストの期待値を変えた箇所: **なし**（既存 20 ファイルは無変更で PASS。新規 1 ファイルと `src/pq/result.mojo` / `__init__.mojo` への追加のみで、既存の関数・docstring の主張は書き換えていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-009-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 126 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-009-check.log`）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 s と同水準
-  - 確認済み（所要）: `test_zero_copy` 11 件 = **42〜44 s**（1 テスト 1 接続で 3.4〜7.0 s / 件。接続あたりのコストが支配的で、`test_binary` 14 件 = 59 s と同じ比率）。PG14 側も同じ
-  - 確認済み（T7 (c) 陽性対照。3 本すべて `error: use of uninitialized value 'result'` で停止。`pixi run mojo run -I src <file>` で再現可）:
-    - `turn-009-zerocopy-neg.mojo`（`get_text` の slice を `var moved = result^` の後で使用）→ `turn-009-zerocopy-neg.mojo:21:14: error: use of uninitialized value 'result'` + `note: 'result' declared here`
-    - `turn-009-zerocopy-neg2.mojo`（`get_bytes` の span 版）→ `:21:42: error: use of uninitialized value 'result'`
-    - `turn-009-zerocopy-neg3.mojo`（既存 `Row` の `get[Int32]` 版）→ `:21:52: error: use of uninitialized value 'result'`
-    - いずれも最後に `mojo: error: failed to run the pass manager`。**コンパイルエラーなのでテストスイートには置けない**ため、生存規則の静的な半分は scratch の 3 本が唯一の証跡（verify はここを見る）
-  - 確認済み（P19）: `grep -rn -- '-> ref' src/pq/*.mojo` = **0 件**
-  - 未確認: T7 (b) の「NUL を含むなら長さどおり」は**サーバーで作れない**（`chr(0)` が 54000）ため `test_zero_copy` には入れていない。`_raw` が `PQgetlength` を使う（NUL 走査しない）ことは `test_decode_binary` の NUL 入り text ケースが単体で担保している
-  - 未確認: `get_bytes` は OID も形式も問わない仕様（決めた事項 9）なので、text 形式の `bytea` は `\x00ff00` の 8 byte を返す。これは `get[List[UInt8]]` の hex デコードと**意図的に違う**。T9 の `__init__.mojo` 型マッピング表に 1 行欲しい（`## Zero-copy access` 節には書いた）
-  - 未確認: T8 の `test_zero_copy_does_not_leak` は `get_text(0).byte_length()` を足すだけのループで、`src/pq` 側に新しい解放経路は無い（`_raw` は読み出しのみ）。陽性対照（`PQclear` を `pass` に）は T8 (b) の手順どおり
-## turn 10 — impl — T8 leak ループ 2 本 + 陽性対照 + `examples/binary.mojo` / `bench_formats.mojo`
-- やったこと: `tests/test_leak.mojo` に `test_binary_execute_does_not_leak`（`PHASE3_SQL` を binary で取り 10 列全部を `get[T]`。`[Decimal("1.50"), Date(8825)]` を `WHERE $1 = 1.5 AND $2 = '2024-02-29'` に束ねて binary encode 経路も通す）と
-  `test_zero_copy_does_not_leak`（同じ文を text で `get_text(0).byte_length()` だけ）を追加（12 → 14 件）。`examples/binary.mojo`（17 型を 1 行で binary 取得 + `column_format(0)` 検査）と `examples/bench_formats.mojo`（100,000 行 × 5 列、exec / decode 分離計時、合否なし）を新設し、
-  `pixi.toml` に `example-binary` / `bench`、`final_check.sh` 4/6 段に `examples/binary.mojo` を結線。サブエージェントは使わず（PLAN の推奨本数 1 = 並列サブ作業が 1 つなので自分で順に実装）
-- 想定外:
-  (1) **なし**（例・ベンチ・leak ループとも初回でコンパイルと実行が通った）。`fmt` が `test_leak.mojo` を 1 回整形しただけ
-- やり直し: 0 回
-- PLAN 訂正: なし
-- 既存テストの期待値を変えた箇所: **なし**（`test_leak.mojo` はモジュール docstring の件数「Twelve tests」→「Fourteen tests」と所要見積もりの行を実測に更新し、テストを 2 本足しただけ。既存 12 件の判定・`TOLERANCE_PAGES` 256・サンプリング定数はいずれも無変更。`final_check.sh` は 4/6 段に 1 行追加 + コメントの「Both examples」→「All examples」のみで、判定条件は変えていない）
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-010-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）。`pixi run check` **6/6 PASS = 130 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-010-check.log`。4/6 段に `examples/binary.mojo` の 17 行、5/6 段の 54314 側は `skipped (PQ_TEST_LEAK_SERVERS=1)`）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 / T7 126 s と同水準で、**3 分には達していない**
-  - 確認済み（所要）: `test_leak` 14 件 = **65 s（PG17）/ 66 s（PG14）**（12 件のときは 61〜67 s）。新しい 2 本の内訳は `binary-execute` **2.97 s** / `zero-copy` **2.74 s**（10,000 回ずつ、1 接続使い回し）。docstring の見積もりを「2 本で ~6 s、合計 ~65 s」に実測で書き換えた
-  - 確認済み（T8 (a) の RSS。両サーバーとも 9 サンプル全部が同値 = 完全にフラット）: PG17 `binary-execute [4722 × 9]` / `zero-copy [4722 × 9]`、PG14 は `[4670 × 9]`
-  - 確認済み（T8 (b) 陽性対照。`.gsd-lite/logs/phase3-binary-all-types/scratch/turn-010-leaksrc/pq/result.mojo:176-177` の `PQclear` を `pass` にしたコピーを `-I .../turn-010-leaksrc` でビルド → `turn-010-test_leak_noclear`。**新しい 2 本とも FAIL**）:
-    - `FAIL test_binary_execute_does_not_leak` — `binary-execute RSS pages: [642306, 659126, 675947, 692767, 709587] — grew 67281 pages past the first sample, over the 65536 allowed; aborting the loop (leaking)`
-    - `FAIL test_zero_copy_does_not_leak` — `zero-copy RSS pages: [743228, 760048, 776869, 793689, 810509] — grew 67281 pages past the first sample, over the 65536 allowed; aborting the loop (leaking)`
-    - 同じ実行で既存の 5 本（connect / execute(params) / prepared / transaction×2）も FAIL、`is_leaking` 単体 4 件と `PGresult` を持たない 3 本（failed-open / escape_literal / failed-execute）は PASS = 計 7 passed / 7 failed。**サンプル 1 区間あたり約 16,800 ページ（≒ 65 MiB = `PAYLOAD_BYTES` × 1,000 回）** の増加で、ループは `ABORT_PAGES` 超過により途中で打ち切られている
-  - 確認済み（T8 (d) ベンチ。`pixi run bench` を PG17 で 1 回、ウォームアップ 1 + 計測 3 回。単位 ms）:
-    - `text   : exec 42 ms, decode 33 ms, total 76 ms` / `binary : exec 38 ms, decode 8 ms, total 47 ms`
-    - `text   : exec 42 ms, decode 35 ms, total 77 ms` / `binary : exec 38 ms, decode 9 ms, total 47 ms`
-    - `text   : exec 43 ms, decode 34 ms, total 77 ms` / `binary : exec 39 ms, decode 8 ms, total 47 ms`
-    - 読み: **decode が 4 倍速い**（33〜35 → 8〜9 ms）のが binary の効き所で、exec はほぼ同じ（38〜43 ms）。合計で 1.6 倍。turn 1 の生 libpq プローブ（`turn-001-probe-bench-pg17.log`）と同傾向
-  - 確認済み（追従先チェックリストのうち T8 の行）: `grep -c '^def test_' tests/test_leak.mojo` = **14**、`grep -c 'Twelve' tests/test_leak.mojo` = **0**、`grep -rn 'examples/' pixi.toml tests/final_check.sh` で `examples/binary.mojo` が**両方**に・`bench_formats` が **pixi.toml にだけ**（P29）
-  - 確認済み: `pixi run example-binary` / `pixi run bench` はどちらも単体で動く（T9 (d) の前倒し確認）
-  - 未確認（T9 への申し送り）: T9 (a) の `__init__.mojo:13-34` 型マッピング表はまだ Phase 1 の 8 型のまま。turn 9 で挙げた「`get_bytes` は text 形式の bytea で `\x00ff00` の 8 byte を返す（`get[List[UInt8]]` の hex デコードとは意図的に違う）」の 1 行もこの表に欲しい
-  - 未確認（T9 への申し送り）: T9 (b) の追従先チェックリスト**全行**の再実行はまだ。turn 5（`@implicit` の grep が実 ctor 数 + 1）・turn 4（`decode_` が `decode_binary` 自身を数える）・turn 3（`is Phase 3` は行送りで 0 件）の 3 件は**期待値そのものを PLAN で訂正済み**なので、訂正後の値で照合すること
-  - 未確認: `examples/bench_formats.mojo` の出力は `print` の区切り空白のため `text   : exec ...`（PLAN の `text  : exec ...` より空白 1 個多い）。合否判定が無いので直していない
-## turn 11 — impl — T9 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
-- やったこと: `src/pq/__init__.mojo` の型マッピング表に **binary form 列**を足して 19 行に拡張（json / jsonb を別行に分け、`anything else` を「text では `String`、binary では `TYPE_MISMATCH` + `ResultFormat.TEXT` の案内」に）、Layout 行に Phase 3 の追加モジュール名 4 つを明記、表の下に `Row.get_bytes` が OID を見ない例外であることを 1 文（turn 9 / 10 の申し送り）。
-  追従先チェックリスト全行を**実行可能なスクリプト**に落として 32 件すべて green（T9 (b)）、REQ §5.1 / §5.2 / §5.4 の全項目にテスト名を対応づけ（T9 (c)）、`check` / `test` / `package` / `example-binary` / `bench` を実測（T9 (d)）。サブエージェントは使わず（PLAN の推奨本数 0）
-- 想定外:
-  (1) **REQ §5.2 の「範囲外 weight」だけテストが無かった**（T9 (c) の「対応先の無い項目はこのタスクで足す」に該当）。`types_numeric.mojo:209` の `weight > 32767 or weight < -32768` は**整数部 131,073 桁**でしか踏めず、既存の拒否テストは dscale 側（16,384 桁の小数）だけだった。`tests/test_types_numeric.mojo` に `test_rejects_weight_over_limit` を 1 件追加（ctor `USAGE` / `parse` `TYPE_MISMATCH` の両方。1.336 s。文字列構築が所要の大半）
-  (2) `bench_formats` の追従先チェックリスト行（「`bench_formats` は pixi.toml にだけ」）が**素の grep では FAIL する**。`final_check.sh:118` に「`examples/bench_formats.mojo` is deliberately absent: ...」という**意図を述べたコメントが 1 行ある**ためで、実行行（`run_logged`）は無く P29 は満たしている。コメントは残す価値があるので、検査側を `grep -c '^[^#]*bench_formats'` = 0 + `grep -c '^#.*bench_formats'` = 1 の 2 行に分けた。PLAN を訂正
-  (3) 型マッピング表は Phase 1 の 8 型のままだと思っていたが、T2〜T5 の各ターンが**行自体は 17 型まで足していた**（足りなかったのは binary 列と json / jsonb の分離、`get_bytes` の例外、Layout 行のモジュール名）。turn 10 の「まだ Phase 1 の 8 型のまま」という申し送りは実物と違っていた
-- やり直し: 0 回（`fmt` は 44 ファイル無変更、`package` は初回で警告ゼロ）
-- PLAN 訂正: 1 件
-  - 追従先チェックリスト「`examples/` を足す（T8）」行の確かめ方を、`grep -rn 'examples/' pixi.toml tests/final_check.sh` から **`bench_formats` は実行行が無いこと（`^[^#]*bench_formats` = 0）+ 不在を述べたコメントが 1 行あること（`^#.*bench_formats` = 1）** に（根拠: 想定外 (2)。素の grep はコメント行を拾って FAIL する）
-- 既存テストの期待値を変えた箇所: **なし**（`tests/test_types_numeric.mojo` はテストを 1 件足しただけで既存 45 件は無変更。`src/pq/__init__.mojo` はモジュール docstring のみで、コードは 1 行も触っていない）
-- 追従先チェックリスト ✓（T9 (b)。**再現は `bash .gsd-lite/logs/phase3-binary-all-types/scratch/turn-011-checklist.sh`**、ログ `turn-011-checklist.log`。32 件すべて OK = 「不一致: 0 件」で exit 0）:
-  | # | 行 | 期待 = 実測 |
-  |---|---|---|
-  | 1 | `Row.get[T]` の対応型 | `grep -c 'elif T ==' src/pq/decode_text.mojo` = **16**、`decode_binary.mojo` = **16**、`__init__.mojo` の拡張型 8 行 = **8**、`grep -c 'anything else' src/pq/__init__.mojo` = **1** |
-  | 2 | OID 定数 | `grep -c '^comptime OID_' src/pq/decode_text.mojo` = **21**、`UInt32(1700)\|UInt32(1082)\|UInt32(2950)` の decode_text 以外の重複 = **0** |
-  | 3 | `Param` の `@implicit` | `grep -c '@implicit' src/pq/params.mojo` = **36**（turn 5 訂正どおり実 ctor 数 + 1）、`grep -c '^    @implicit'` = **35**、`Nineteen` = **0**、`Thirty-five` = **1** |
-  | 4 | encoder | `grep -c '^def encode_' src/pq/encode_binary.mojo` = **14**、`exactly six` = **0** |
-  | 5 | decoder | `grep -c '^def decode_' src/pq/decode_binary.mojo` = **15**（14 本 + `decode_binary` 自身。turn 4 訂正どおり） |
-  | 6 | `result_format` | `grep -rc 'Phase 3' src/pq --include='*.mojo'` の合計 = **2**（turn 5 訂正どおり `encode_binary.mojo` の名前の対 + `__init__.mojo` の Layout 行。placeholder は残っていない）、`result_format` が connection / prepared / transaction の各 ≥ 2 = **yes / yes / yes** |
-  | 7 | 公開 struct | 再エクスポート 9 型 = **9**、docstring 診断（`_ffi` と dunder を除く）の `doc string` 行 = **0** |
-  | 8 | `examples/` | `examples/binary.mojo` が pixi.toml = **1** / final_check.sh = **1**、`bench_formats` が pixi.toml = **1** / final_check.sh の**実行行** = **0** / 同コメント = **1**（PLAN 訂正後の形） |
-  | 9 | テストファイル | `pixi run test` のログに新ファイル名が 2 回（**21 ファイル × 2 サーバー = 42 の summary**。下の「確認済み」参照） |
-  | 10 | リークループ | `grep -c '^def test_' tests/test_leak.mojo` = **14**、`Twelve` = **0** |
-  | 11 | `test_connection` | `grep -c '^def test_' tests/test_connection.mojo` = **31** |
-  | 12 | libpq の経路 | `grep -rc 'PQexec(' src/pq/*.mojo` の合計 = **4**（connection ×2 / transaction / prepared）、`PQfreemem(` = **2** |
-  | 13 | 生存期間の docstring | `grep -rn 'compile error' src/pq/*.mojo` = **8 行**。うち `connection.mojo:6` は `var b = a`（別物・残す）で、残り 7 行（`result.mojo:18` / `:449` / `:708`、`prepared.mojo:12`、`transaction.mojo:14`、`connection.mojo:491`、`__init__.mojo:106`）はすべて**消費する移動の後の使用**の文脈。T7 (c) の陽性対照 3 本（turn 9）がこの文言を実測で裏づけている |
-  | 14 | `-> ref` | `grep -rc -- '-> ref' src/pq/*.mojo` の合計 = **0**（P19） |
-- 受け入れ基準 → テスト対応（T9 (c)。verify はこの格子を使う。`ファイル:関数` 形式）:
-  - §5.1「§6 の全型（+ time / timetz / interval）の text / binary 一致」: `test_binary.mojo:test_binary_scalars_match_text`（既存 8 型 + varchar / bpchar / name / 空 bytea）、`test_extended_numeric.mojo:test_numeric_binary_matches_text` / `:test_uuid_binary_matches_text` / `:test_json_and_jsonb_binary_match_text`、`test_extended_datetime.mojo:test_date_values_match_in_both_formats` / `:test_timestamp_values_match_in_both_formats` / `:test_timestamptz_same_instant_from_two_offsets` / `:test_time_values_match_in_both_formats` / `:test_timetz_zone_sign_follows_postgres` / `:test_interval_p8_values_match_in_both_formats` / `:test_interval_literals_match_in_both_formats`
-  - §5.1 境界値「整数の最小 / 最大 / 0 / 負」: `test_binary.mojo:test_binary_integer_boundaries_match_text` + 単体 `test_decode_binary.mojo:test_int16_min`〜`:test_int_max`（8 件）
-  - §5.1 境界値「float の NaN / ±Infinity / -0.0」: `test_binary.mojo:test_binary_float_special_values_match_text` + `test_decode_binary.mojo:test_float32_nan` / `:test_float32_positive_infinity` / `:test_float32_negative_infinity` / `:test_float32_negative_zero` / `:test_float64_nan` / `:test_float64_negative_zero`
-  - §5.1 境界値「`infinity` / `-infinity` の日時」: `test_extended_datetime.mojo:test_infinite_dates_match_in_both_formats` / `:test_infinite_timestamps_match_in_both_formats` / `:test_infinite_timestamptz_match_in_both_formats` / `:test_interval_infinity_on_pg17_and_later` + 単体 `test_decode_binary.mojo:test_date_sentinels_decode_as_infinite` / `:test_timestamp_sentinels_decode_as_infinite` / `:test_interval_sentinels_decode_as_infinite`
-  - §5.1 境界値「numeric の大きな桁 / 小数 / 負 / 0 / NaN」: `test_extended_numeric.mojo:test_numeric_binary_matches_text`（`1e130` 含む 23 値）/ `:test_numeric_special_values_in_both_formats` + 単体 `test_types_numeric.mojo`（46 件）/ `test_decode_binary.mojo:test_numeric_table_decodes_to_printed_text`（表 20 行）
-  - §5.1 境界値「uuid の全ゼロ / 全 F」: `test_extended_numeric.mojo:test_uuid_binary_matches_text` + `test_types_uuid.mojo:test_all_zero_round_trip` / `:test_all_f_round_trip`
-  - §5.1 境界値「空文字列」: `test_binary.mojo:test_binary_scalars_match_text`（列 8 で `""` かつ `is_null` が偽）+ `test_decode_binary.mojo:test_text_empty`
-  - §5.1 境界値「NUL を含む bytea」: `test_binary.mojo:test_binary_scalars_match_text`（列 12 = `[0, 255, 0]` を両形式で）+ `test_decode_binary.mojo:test_bytea_three_bytes` / `:test_text_keeps_embedded_nul`
-  - §5.1 境界値「jsonb のネスト」: `test_extended_numeric.mojo:test_json_and_jsonb_binary_match_text`（`{"a":{"b":[1,{"c":null}]}}` 含む）
-  - §5.1「未対応 OID をバイナリで要求 → `TypeMismatch`、トレースバックを出さない」: `test_binary.mojo:test_binary_unsupported_oids_are_type_mismatch`（7 列 × 3 型 = 21 セル）+ 対照 `:test_text_reads_every_unsupported_oid_as_string`
-  - §5.1「バイナリ列の `get[String]`（非文字列 OID）/ `get[List[UInt8]]`（非 bytea）」: `test_decode_binary.mojo:test_string_rejects_int4_column` / `:test_string_rejects_point_column` / `:test_string_rejects_int4_array_column` / `:test_bytea_rejects_text_column` / `:test_bytea_rejects_point_column` + サーバー側 `test_extended_numeric.mojo:test_binary_refuses_mismatched_numeric_and_jsonb`
-  - §5.1「`column_format(i)` が BINARY / `execute(sql)` は TEXT」: `test_binary.mojo:test_column_format_is_binary_for_every_column` / `:test_column_format_defaults_to_text` / `:test_result_format_constants_and_equality`
-  - §5.1「拡張型 8 種を `$1` で送り同じ値が返る（両形式）」: `test_extended_numeric.mojo:test_numeric_param_roundtrip_in_both_formats` / `:test_uuid_param_roundtrip_in_both_formats` / `:test_json_and_jsonb_param_roundtrip_in_both_formats`、`test_extended_datetime.mojo:test_date_and_time_params_round_trip` / `:test_timestamp_params_round_trip` / `:test_interval_param_round_trips` / `:test_infinite_params_round_trip`
-  - §5.1「`SHOW DateStyle` が `ISO, YMD`」: `test_connection.mojo:test_open_fixes_datestyle`（+ `:test_open_fixes_intervalstyle` / `:test_client_encoding_is_utf8`）
-  - §5.1「`bench_formats.mojo` が実行でき所要を表示」: テストではなく `pixi run bench`（下の実測。`final_check.sh` には入れない = P29）
-  - §5.1「zero-copy の値一致 + 消費する移動の後はコンパイルエラー」: `test_zero_copy.mojo` 11 件（値一致は `:test_get_text_matches_get_string_in_text_format` / `:..._in_binary_format` / `:test_get_bytes_matches_get_list_in_binary_format`、生存延長の正例は `:test_slice_survives_a_keep_alive_marker`）+ **コンパイルエラー側は turn 9 の scratch 3 本**（`turn-009-zerocopy-neg{,2,3}.mojo`。テストスイートに置けないため唯一の証跡）
-  - §5.2「長さ不足のバイナリ列」: `test_decode_binary.mojo:test_bool_rejects_wrong_length` / `:test_int16_...` / `:test_int32_...` / `:test_int64_...` / `:test_float32_...` / `:test_float64_rejects_wrong_length`、`:test_date_rejects_wrong_length` / `:test_timestamp_rejects_wrong_length` / `:test_timestamptz_rejects_wrong_length_and_oid` / `:test_time_rejects_wrong_length_and_oid` / `:test_timetz_rejects_wrong_length_and_oid` / `:test_interval_rejects_wrong_length_and_oid`
-  - §5.2「不正な uuid 長」: `test_decode_binary.mojo:test_uuid_rejects_wrong_length`（15 / 17 byte）
-  - §5.2「numeric の不正 ndigits」: `test_decode_binary.mojo:test_numeric_rejects_length_disagreeing_with_ndigits` / `:test_numeric_rejects_short_header` / `:test_numeric_rejects_invalid_sign` / `:test_numeric_rejects_digit_out_of_range` / `:test_numeric_rejects_dscale_out_of_range`
-  - §5.2「範囲外 weight」: **`test_types_numeric.mojo:test_rejects_weight_over_limit`（このターンで追加）**。decode 側は weight が Int16 の生フィールドなので範囲外が作れず（決めた事項 3 で範囲検査なしと決定）、正の対照が `test_decode_binary.mojo:test_numeric_large_weight_stays_in_position_notation` / `:test_numeric_minimum_weight_decodes`（`0x8000` でも raise しない）
-  - §5.2「jsonb の未知バージョンバイト」: `test_decode_binary.mojo:test_jsonb_rejects_version_two` / `:test_jsonb_rejects_empty`
-  - §5.2「テキスト形式の非 ISO 日時文字列」: `test_extended_datetime.mojo:test_binary_date_is_independent_of_datestyle`（`DateStyle=German` 下で text が `TYPE_MISMATCH`・binary が成功）/ `:test_binary_interval_is_independent_of_intervalstyle`（`iso_8601`）+ 単体 `test_types_datetime.mojo` の `parse` 拒否群
-  - §5.2「NULL」: `test_binary.mojo:test_binary_null_column`（`NULL_VALUE` / `get_optional` → None / `is_null`）、`test_zero_copy.mojo:test_null_cell_raises_null_value`
-  - §5.2「空結果」: `test_binary.mojo:test_binary_zero_row_result`（+ `:test_binary_format_is_accepted_by_ddl_and_insert` が DDL / INSERT の `command_tag`）
-  - §5.2「未接続・切断後」: `test_binary.mojo:test_terminated_backend_then_binary_connection_error`
-  - §5.2「`PQclear` / `PQfinish` / `PQfreemem` が正常系・異常系で呼ばれ二重解放しない」: `test_leak.mojo` 14 件（陽性対照は turn 10 の `PQclear` 除去コピーで新 2 本とも FAIL）+ checklist #12（`PQexec(` 4 行 / `PQfreemem(` 2 行から増えていない）
-  - §5.2「解放済みポインタへのアクセスが型・所有権の上で起こらない」: turn 9 の scratch 3 本（コンパイルエラー）+ checklist #14（`-> ref` = 0）
-  - §5.2「10,000 回のバイナリ execute でメモリが単調増加しない」: `test_leak.mojo:test_binary_execute_does_not_leak` / `:test_zero_copy_does_not_leak`（turn 10 実測で RSS 9 サンプル全部同値）
-  - §5.4「公開 struct / メソッドに docstring」: `final_check.sh` 3/6 段 = checklist #7（`doc string` 行 0）
-  - §5.4「`pixi run fmt` で差分なし」: `final_check.sh` 1/6 段（下の実測で PASS。`fmt` 単体でも 44 ファイル無変更）
-  - §5.4「`examples/binary.mojo` が単体で実行できる」: `pixi run example-binary`（下の実測）+ `final_check.sh` 4/6 段
-  - §5.4「`pixi run package` が通る」: `final_check.sh` 2/6 段 + 単体実行（下の実測）
-  - §5.4「`pixi run check` が 6/6 PASS」: 下の実測
-- 次への注意:
-  - 確認済み: `pixi run test` **両サーバー 21 ファイル全 PASS**（42/42 の summary が `0 failed`。ログ `.gsd-lite/logs/phase3-binary-all-types/scratch/turn-011-test.log`、再現は `grep 'tests run' <log> | grep -vc ' 0 failed'` が 0）
-  - 確認済み: `pixi run check` **6/6 PASS = 134 s**（`final_check: PASS`、6/6 段 `matched lines: 0`。ログ `turn-011-check.log`。段別の時刻は 1/6 fmt 1 s・2/6 precompile 1 s・3/6 docstring 1 s・4/6 examples 8 s・5/6 tests 123 s・6/6 grep 0 s）。T1 113 / T2 117 / T3 112 / T4 118 / T5 125 / T6 118 / T7 126 / T8 130 s からの増分は新テスト 1 件（+1.3 s）相当で、**3 分には達していない**
-  - 確認済み（T9 (d) の単体実行）: `pixi run package` **警告ゼロ**（出力はタスク行のみ）、`pixi run example-binary` が 17 型 + `column_format(0) = Binary` の 18 行を出して exit 0、`pixi run bench` が 6 行を出して exit 0
-  - 確認済み（T9 (d) ベンチ再測。PG17、ウォームアップ 1 + 計測 3 回。単位 ms）: `text : exec 41 / 45 / 43、decode 33 / 34 / 33、total 75 / 80 / 76` / `binary : exec 39 / 40 / 39、decode 8 / 8 / 8、total 47 / 48 / 47`。turn 10 の実測（text total 76〜77 / binary 47）と**ばらつきの範囲で一致**し、decode が約 4 倍速い点も同じ
-  - 確認済み: 追従先チェックリスト 32 件すべて green（上の表。スクリプトは exit 0 = 不一致 0 件）。turn 3 / 4 / 5 で PLAN を訂正した 3 件（`is Phase 3` の行送り / `decode_` が自身を数える / `@implicit` が実 ctor 数 + 1）は**訂正後の期待値で照合して一致**
-  - 未確認（verify への申し送り。いずれも「テストが無い」のではなく「この格子に載っていない」もの）: turn 8 で挙げた 3 件がそのまま残っている — timetz の最大西 / 最大東（`-15:59` / `+15:59:59`）のサーバー往復、`test_timestamp_params_round_trip` の非 UTC 分岐（コンテナが `Etc/UTC` 固定で一度も走らない）、拡張型の NULL binary と `PreparedStatement` / `Transaction` 経由の binary。**REQ §5.1 / §5.2 の項目としては上の格子で全部に対応先がある**ので T9 (c) の「足す」対象には含めなかった
-  - 未確認: `test_leak` は今回 `check`（5/6 段、PG17 のみ）と `pixi run test`（両サーバー）で通っているが、turn 10 以降 `test_leak.mojo` は無変更なので RSS のサンプル列は turn 10 の記録が最新
-  - 未確認: PLAN の全 9 タスクが `- [x]` になった。次は `/gsd-lite-verify`（`phase: "verify"`）
-## turn 12 — verify — round 1: 指摘 1 件（F1、numeric の正規化後 weight が wrap）+ 字句 3 件 → impl へ差し戻し。マージ無し
-- やったこと: サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用）を並行させ、親はクリーンな `pixi run check`（6/6 PASS）、堅牢性の格子プローブ
-  （`scratch/turn-012-fuzz.mojo`: テキスト parser 8 種 × 22,788 入力 + バイナリ decoder 22 組 × 2,050 パターン + crafted numeric 3,027 + 生 ctor 極値 ≒ 230,000 呼び出し、クラッシュ 0）、
-  追従先チェックリスト 32 件の再実行（不一致 0）、T7 陽性対照の再実行（現 HEAD でもコンパイルエラー）、文書照合、timetz 極値の wire 実測を実施。VERIFICATION.md を round 1 の結果で作成し、F1 を PLAN に追記
-- 想定外:
-  (1) ファズの「`parse(String(v)) == v`」は **dscale が実桁より小さい非正規化 numeric** で偽になる（71 件）。実装の誤りではなくプローブ側の性質の立て方の問題（`String()` は一致）。
-      本物の指摘（weight wrap）は crafted ケースの `0002 8000 0000 0000 0000 0001` で別に出た
-  (2) Mojo 1.1.0 はモジュールレベル `var` を許さない（`error: global variables are not supported`）。集計と LCG 状態を `struct State` に入れて `mut` で渡した
-  (3) 指摘 1 は impl が turn 5「未確認」で挙げていたものと同一。impl 側の申し送りを verify が最初に読んで格子に入れたので、独立 3 経路（ファズ / レビュー / セキュリティ）で一致した
-- やり直し: 1 回（ファズ probe のコンパイル: 想定外 (2) のグローバル変数）
-- 次への注意:
-  - 確認済み: `pixi run check` 6/6 PASS = 約 140 s（ログ `turn-012-check.log`）。両サーバー 21 ファイル全 PASS
-  - 確認済み: F1 の期待結果は PLAN の表が唯一の正。`0002 8001 ...`（stripped -32768）は**成功**しなければならない（境界を含めて弾くと `test_numeric_minimum_weight_decodes` と矛盾する）
-  - 確認済み: F1 の検査位置は `decode_numeric` 側（`_from_parts` は raise しないシグネチャ。`_parse_opt` は先頭ゼロ群を作らないので対象外）
-  - 確認済み: round 2 は「round 1 の格子の再確認 + F1 差分の回帰」だけ。ファズは `scratch/turn-012-fuzz` を再ビルドして回せば `BAD bin decimal text roundtrip` の 71 件（dscale クラス）が残り、weight クラスの行が消えるのが期待
-  - 未確認: F1 (c) の文言は趣旨だけ PLAN に書いた。impl が英文にするときは「`pq` は `client_encoding` を設定しない」「UTF-8 を検証しない」の 2 点を落とさない
+  - 確認済み: `adopt_result(pq, conn, res)` はモジュール関数で、`async_conn` からは `from pq.result import Result, ResultFormat, adopt_result` で取れる（`connection.mojo` と同じ形）。
+    `poll_socket(fd, want_read, want_write, timeout_ms)` は `timeout` を例外にせず `PollEvents.timeout` で返すので、`TIMEOUT` の文言を作るのは T3 の `wait_readable` / `wait_writable` 側。
+    `want_read = want_write = False` は純粋な sleep として使える（`test_poll.mojo:176-188` が陽性）。`_platform` は `pq` 直下に再エクスポートしていない。
+    `PGRES_SINGLE_TUPLE` は既に `adopt_result` の成功判定に入っているので T4 の single-row は `set_single_row_mode` のガードだけ足せばよい
+  - 未確認: `poll.mojo` の Windows 分岐（`WSAPoll` / `_WsaPollFd` 16 byte / 別の定数値）は**コンパイルすらされていない**（`comptime if` の非選択側）。
+    誤った値が黙って返る経路ではなく「Windows では動かない可能性」なので、処分先は T8 (d) の「未確認の処分」= モジュール docstring の **unverified** 表記を残すことで足りる（P8）。
+    `EINTR` の実挙動（シグナル下での再試行）は未確認のまま（RESEARCH §2.3 どおりテストしない。コードレビューで代替、上の P4 行）
+  - `check` は 133 s。T3 で `test_async`（pg_sleep 2 s ×2 サーバー）が乗ると PLAN の見込み 260〜300 s に近づく見込み
 
-## turn 13 — impl — F1 `decode_numeric` の正規化後 weight 範囲検査 + 字句 3 件
-- やったこと: `decode_numeric` が digits を読み終えた後に先頭ゼログループ数 `lead` を数え、`Int(weight) - lead < Int(Int16.MIN)` なら
-  `cannot decode binary numeric: weight <stripped> out of range after stripping <lead> leading zero groups` を raise するようにした（`_from_parts` はコードを触らず docstring に呼び出し側の責務を追記）。
-  `tests/test_decode_binary.mojo` に `test_numeric_rejects_weight_underflow_after_strip` を 1 件、字句 3 件（`params.mojo` の 1 GB 上限の根拠、`result.mojo` / `__init__.mojo` の `client_encoding`）
-- 想定外: なし（PLAN の 4 行の表がそのまま通った。`pixi` が PATH に無く `/home/parallels/.pixi/bin/pixi` を直接呼んだ。`/usr/bin/time` が無いので所要は `date +%s` の差）
+## turn 5 — impl — T3 AsyncConnection 前半（接続 / 送信 / 受信 / 状態機械 / ブロッキング補助）
+- やったこと: (a)〜(e) を 1 人で実装（推奨 1 本 / 実 0 本。サブ作業は `tests/test_async.mojo` の 1 本だけなのでサブエージェントは使わず）。
+  `src/pq/async_conn.mojo`（新設 1,233 行）に `AsyncState` / `PollState` / `Notification` と `AsyncConnection` の 21 メソッド
+  （`start` 2 形 / `poll_connect` / `connect_blocking` 2 形 / `socket` / `state` / `status` / `transaction_status` / `send` 2 形 /
+  `send_prepare` / `send_prepared` / `flush` / `consume_input` / `is_busy` / `poll_result` / `fetch_all` / `wait_readable` / `wait_writable` / `__deinit__`）、
+  `__init__.mojo` に 4 型の再エクスポート + Layout 行 + `## Asynchronous use` 節（43 行）、`connection.mojo:164` を現在形に、`tests/test_async.mojo` 9 件
+- 期待値の取り直し（REQ §9 常設。プローブ `scratch/turn-005-probe-expect.mojo`、同期 `Connection` のみ）: `SHOW DateStyle` = `ISO, YMD` /
+  `SHOW IntervalStyle` = `postgres` / `SELECT 1/0` は `Server` `22012` `division by zero` / 空クエリは `Server` `empty query` / 未知の prepared は `26000` —
+  すべて (c) の期待値と一致。`send_prepare` + `fetch_all` の `command_tag() == ""`（async2 B）もテストで実測一致（SQL の `PREPARE` は `PREPARE` タグを返すが別経路）
+- 既存テストの期待値変更: **ゼロ**（`connection.mojo` と `__init__.mojo` は docstring のみ。追加は `test_async.mojo` 9 件だけ）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（23 ファイル × 2 = **46 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、16:42:35 → 16:46:11 = **216 s**）、`pixi run check` **6/6 PASS**（16:49:34 → 16:53:15 = **221 s**。PLAN の見込み 260〜300 s 内）、
+  `pixi run package` 警告ゼロ、`pixi run fmt` 差分なし。`test_async` 単体は **2.6〜2.9 s**（PG17 を 3 回 + PG14 を 1 回、すべて 9/9 PASS。
+  内訳は `pg_sleep(2)` 2,023〜2,075 ms + connect タイムアウト 575〜596 ms + 残り 7 件で 60 ms 前後。PLAN の見込み 40〜60 s/サーバーより大幅に短い）
+- チェックリスト（T3 行）: `async_conn=exists` / `async_struct=1` / `async_state_struct=1` / `pollstate_struct=1` / `notification_struct=1` /
+  `async_public_defs=23`（≥20） / `init_async_import=1` / `conn_phase4_future=0` / `init_phase4=1` / `test_async=exists` / `test_async_tests=9`（≥8） /
+  `src_PQexec_calls=4`（`async_conn.mojo` に `PQexec(` は無し） / `src_PQfinish_calls=5`（≥3） / `src_def_ref_return=0` / `tests_files_count=23`・`test_file_count=23`（T8 で 24）— **期待値**。
+  例外 2 件: `async_called_while=5`（期待 ≥6 は T3+T4 の合算。下記 PLAN 訂正）、`tests_print_SKIP` はスクリプトが `absent(tests/test_notify.mojo)` を返すので手で数えて **5**（datetime 3 + leak 1 + async 1。T3 で +1 の予定どおり）
+- PLAN 訂正 4 件:
+  - (c) ⑥（と ④）の終端判定: 「エラー raise のあと**もう 1 回** `poll_result()` が `None` で `state() == IDLE`」は**不成立**。終端 NULL は別ラウンドトリップで届くので
+    1 回目は `None` + `BUSY` になり得る（`pixi run test` 中に 1 回失敗、単体 4 回は通る頻度）。`None` の意味は契約どおり「`BUSY` ならまだ / `IDLE` なら終了」なので
+    テスト側のループが正。ヘルパ `_poll_to_idle` に集約して ④⑥ の両方で使う（`src/` は無変更。契約どおりの挙動）
+  - (c) のヘルパ `_error_of(...)` → 入口ごとに分割（Mojo にクロージャ引数の形が無い）: `_connect_blocking_error` / `_send_error` / `_fetch_all_error` /
+    `_poll_result_error` / `_wait_readable_error`。成功側と読み出し側のヘルパ名も PLAN に列挙済み（T5 はこの名前に追記する）
+  - チェックリスト `async_called_while` の T3 時点の実測は **5**（期待 ≥6 は T4 まで）。理由: 状態文言を `_require_state` / `_reject_connecting` の 2 本に集約したので
+    メソッド数ぶんは増えない。T4 の `cancel` / `notifications` の docstring で 6 を超える
+  - T5 ⑪ の NUL 文言: `name` 引数は `"embedded NUL byte in name"`（`transaction.mojo` の savepoint 名と同じ `what`）。`send_prepare` は `name` → `sql` の順に検査
+- 想定外: (1) 上記の終端 NULL の 1 ラウンドトリップ遅れ（P11 の実地。PLAN の期待が楽観的だった）。
+  (2) `try` 本体の例外型が `except` 側に引っぱられる: `except e: return e^`（`PgError` を返す）形の `try` の中では `Error` を投げる関数（`assert_*` / 他のヘルパ）を呼べない
+  → PgError を出す呼び出しだけを `try` に入れ、判定は外に出す（`_poll_result_error` / `_column_format`）。
+  (3) `var got: Optional[Result] = None` は「代入が使われない」警告になる（`except` が必ず脱出するので初期化子が死ぬ）→ `var got: Optional[Result]` と宣言だけにする（`package` の警告ゼロ条件）
+- やり直し: 3 回（上記 (1) テスト修正 1 回、(2) コンパイルエラー 1 回、(3) 警告 1 回。いずれも 1 回で直った）
+- 次への注意:
+  - 確認済み: `fetch_all` は「書き切る → 取り切る」の順で、途中のエラーは `first_error` に保持して NULL まで取り切ってから投げる。
+    切断時は無限ループ回避のため `PQstatus == CONNECTION_BAD` を見たら drain を打ち切る（T5 ④ の 2 値期待はこれで満たせる見込み）。
+    `wait_*` の `TIMEOUT` は `fetch_all` / `connect_blocking` が自分の文言に包み直す（`_wait_for` / `_poll_to_ready`）ので、
+    テストの部分文字列は `"timed out after"` で 3 経路に当たる。`_single_row_allowed` は `send*` 成功で True、`poll_result` / `consume_input` / `is_busy` で False（T4 はガードを足すだけ）。
+    `_pending` フィールドは宣言済みで空のまま（T4 が使う）。`PQsetnonblocking(1)` は `start` 直後（RESEARCH §2.1 A どおり問題なし）
+  - 未確認: `_after_send` で `PQflush` が **-1** を返したときの状態を `IDLE` のままにしている（結果が無いので drain 不要という判断）。
+    実測していない経路で、「状態機械が壊れる経路」ではなく「送信直後に接続が死ぬ稀なケース」。処分先は **T5 ④ の切断テスト**に 1 行足せれば足りるが、
+    `send` 中の切断は競合で再現できないので、再現しなければ「契約外（libpq が -1 を返す条件を作れない）」と T8 (d) に書く
+  - `check` は 221 s（T2 の 133 s + 88 s。増分の大半は `test_async` の `pg_sleep(2)` × 2 サーバーと connect タイムアウト 0.5 s × 2）。T4 で NOTIFY と cancel が乗ると 5 分に近づく
+
+## turn 6 — impl — T4 cancel / NOTIFY / single-row / examples
+- やったこと: (a)〜(g) を 1 人で実装（推奨 1 本 / 実 0 本。サブ作業 A は examples + pixi + final_check の 1 本だけなのでサブエージェントは使わず）。
+  `async_conn.mojo` に `cancel` / `notifications` / `wait_notification` / `set_single_row_mode`（+ 私用 `_single_row_error`）、
+  `__init__.mojo` の `## Asynchronous use` に cancel / single-row / LISTEN-NOTIFY の 3 項目と 5 行の例、
+  `tests/test_async.mojo` に T4 節 4 件（計 13 件）、`tests/test_notify.mojo` 新設 3 件、
+  `examples/async_query.mojo` / `examples/listen_notify.mojo` + `pixi.toml` 2 タスク + `final_check.sh` 4/6 段に 2 行
+- 期待値の取り直し（REQ §9 常設。プローブ `scratch/turn-006-probe-expect.mojo`、同期 `Connection` のみ）: `pg_backend_pid()` は Int32 で取れる /
+  自分を `pg_cancel_backend(pg_backend_pid())` した `pg_sleep` が `Server` `57014` `canceling statement due to user request`（PLAN の期待と一致）/
+  `NOTIFY ch, 'payload-1'` と `NOTIFY ch` はどちらも command_tag `NOTIFY`。NOTIFY の payload（`"payload-1"` / `""`）と `backend_pid` の一致は
+  `test_notify.mojo` ① が実測（送信側の `pg_backend_pid()` と同値、PG17 / PG14 両方 PASS）
+- 既存テストの期待値変更: **ゼロ**（既存 9 件は無変更。追加は `test_async` 4 件 + `test_notify` 3 件、`__init__.mojo` は docstring のみ）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（24 ファイル × 2 = **48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、17:02:19 → 17:07:12 = **293 s**）、`pixi run check` **6/6 PASS**（17:07:17 → 17:10:06 = **169 s**。
+  T3 の 221 s より短い。4/6 段に新 examples 2 本の出力あり）、`pixi run package` 警告ゼロ、`pixi run fmt` は 2 ファイル整形（コミット前に反映済み）。
+  `pixi run example-async`（`n = 1` / 空ポーリング 14〜15 回）と `example-notify`（`channel = pq_example` / `payload = hello from pq` / `backend_pid`）は単体でも成功。
+  `test_async` 単体は **2.9 s**（うち cancel 114〜132 ms）、`test_notify` 単体は **0.38 s**
+- チェックリスト（T4 行）: `async_cancel_insecure=2`（≥1） / `src_PQfreemem_calls=3` / `src_PQfreeCancel_calls=1` / `test_notify=exists` /
+  `test_notify_tests=3`（≥3） / `example_async=exists` / `example_notify=exists` / `pixi_example_tasks=2` / `final_check_examples=2` /
+  `final_check_run_logged_examples=5` / `async_called_while=7`（≥6。T3 の 5 + cancel / notifications の docstring）— **全部期待値**。
+  併せて `async_public_defs=27` / `test_async_tests=13`（T5 で ≥20）/ `tests_print_SKIP=5`（`test_notify.mojo` ができて `absent` が解消。手数えと一致）/
+  `tests_files_count=24`・`test_file_count=24`（T8 の期待値に到達）
+- 想定外: (1) `notifications()` で `self._pending^` とフィールドから move out はできない（部分的に未初期化になる）→ `copy()` + `clear()` にした。
+  `PQconsumeInput` が 0 のときに `_pending` を失わないよう、**consume の後に** `_pending` を引き取る順序にしてある。
+  (2) それ以外は PLAN どおり（cancel の errbuf・`PGnotify` の struct 読み・`PQfreemem` は research プローブの形がそのまま通った）
+- やり直し: 0 回（`package` / `test_async` / `test_notify` / examples はいずれも初回で通った）
+- 次への注意:
+  - 確認済み: `cancel()` は `self`（非 mut）で呼べる＝`IDLE` no-op も状態を触らない。`fetch_all` が `57014` を投げたあと `state()` は `IDLE`（drain 済み）なので
+    T5 ③ の tx 内 cancel は `fetch_all` の後に `transaction_status()` を読めばよい。`set_single_row_mode()` は `_single_row_allowed` が偽のとき
+    **`set_single_row_mode() must follow send() before any result is read (state <State>)`**（`called while` の形ではない）ので T5 ① の部分文字列は
+    `"must follow send"` を使う。`notifications()` は `CONNECTING` 以外どの状態でも呼べる（`BUSY` 中も可）。`wait_notification` の 2 件目は `_pending` から即返る（T5 ⑤ の陽性はこの経路）
+  - 未確認: `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）は未実測。切断済み接続で `PQgetCancel` が非 NULL を返すか 0 を返すかは
+    research プローブ L 行の挙動次第で、**処分先は T5 ②「切断後 cancel → CONNECTION」**（既に PLAN にある）。`PQsetSingleRowMode` が 0 を返す分岐も未到達（契約上起こらない想定）
+  - `check` は 169 s で 5 分に届かず。T5 で 16 MB クエリ + 切断テストが乗るので再計測する
+
+## turn 7 — impl — T5 テスト格子（test_async 第 2 弾 / test_notify 完成）
+- やったこと: 推奨 1 本 / 実 **1 本**（サブエージェントに `tests/test_notify.mojo` の 6 件、親が `tests/test_async.mojo` の 16 件 + 陽性対照 + 期待値取り直し + 検証）。
+  `test_async.mojo` は 13 → **29 件**（USAGE 格子 6 件 / cancel 切断後 / tx 内 cancel / 切断 / 16 MB flush / single-row 多文・prepared / multi-host / 接続失敗 3 種 /
+  未読結果ありの drop / パラメータのコピー / NUL 4 経路）、`test_notify.mojo` は 3 → **9 件**（実行中受信 / payload 7999 byte と UTF-8 / commit 配送 / 自己通知 / `_pending` 即返し / 切断）
+- **`src/` の差分: バグ修正 1 件**（T5 の「テストが露わにしたバグ」枠。`src/pq/async_conn.mojo`、+20 / -3 行）:
+  `poll_result` が `PQconsumeInput` の失敗時に常に `BUSY` を保っていたため、**接続を失うと終端 NULL が永遠に来ず `poll_result` ループが無限に回り**、
+  以降の `send` がすべて `USAGE "called while Busy"` になっていた（プローブ `scratch/turn-007-probe-disconnect.mojo` で 5 回連続 `Connection` + `Busy` を実測）。
+  修正は `poll_result` 専用の私用 `_consume_or_end_command`: `PQconsumeInput` が 0 かつ `PQstatus == CONNECTION_BAD` なら `_state = IDLE` にしてから `CONNECTION` を投げる。
+  公開 `consume_input()` は P21 / P32 のとおり `BUSY` を保つまま（T5 ② の切断後 cancel がこの入口を使う）。`poll_result` の docstring に 1 文追記
+- 陽性対照（P9。`scratch/turn-007-usage-positive.mojo` を 2 回）: `send(var sql)` の `_require_state("send", AsyncState.IDLE)` を外すと
+  結果待ち中の 2 回目の `send` が **`Connection` / `"another command is already in progress"`**（libpq の文言）になる。検査を戻すと **`Usage` / `"send() called while Busy"`**。
+  どちらの実行でも `state()` は `Busy` のまま。`src/` は `git checkout src/pq/async_conn.mojo` で戻し `git status` が clean を確認（コミット済みの修正は保持）
+- 期待値の取り直し（REQ §9 常設。`scratch/turn-007-probe-expect.mojo`、同期 `Connection` のみ）: `25P02` = `current transaction is aborted, commands ignored until end of transaction block` /
+  `26000` = `prepared statement "nope" does not exist` / `could not translate host name "nonexistent.invalid" to address: Name or service not known` /
+  `Connection refused` / `password authentication failed for user "pq"` — すべてテストの期待と一致。
+  **`57P01` は取り直しで値が違った**: 自分の backend を `pg_terminate_backend(pg_backend_pid())` で落とすと `Connection` / `server closed the connection unexpectedly` になり、
+  `Server 57P01 terminating connection due to administrator command` は**別接続から落としたとき**だけ出る（`scratch/turn-007-probe-disconnect.mojo` で確認）。テストは別接続から落とす形なので期待どおり
+- 既存テストの期待値変更: **ゼロ**（既存 13 + 3 件は無変更。`src/` の変更は上記バグ修正のみで、既存テストの期待値には触れていない）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（24 ファイル × 2 = **48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` /
+  `-- 127.0.0.1:54314 skipped 1`、17:22:28 → 17:26:16 = **228 s**）、`pixi run check` **6/6 PASS**（17:27:04 → 17:29:42 = **158 s**）、
+  `pixi run package` 警告ゼロ、`pixi run fmt` は `test_async.mojo` を 1 回整形（コミット前に反映）。
+  `test_async` 単体は **3.5〜3.6 s**（PG17。内訳は `pg_sleep(2)` 2,030 ms + connect タイムアウト 561 ms + busy send 269〜306 ms + 16 MB 88〜95 ms + tx cancel 109〜222 ms）、
+  `test_notify` 単体は **1.0〜1.2 s**。`run_tests.sh` の計測では `test_async` が 15 s（PG17）/ 7 s（PG14）、`test_notify` が 6 s / 3 s（コンパイル込み）
+- チェックリスト（T5 行）: `test_async_tests=29`（≥20） / `test_notify_tests=9`（≥8） / `src_PQexec_calls=4` — **期待値**。
+  併せて `src_def_ref_return=0` / `tests_files_count=24`・`test_file_count=24` / `tests_print_SKIP=5` / `async_public_defs=27` / `async_called_while=7` /
+  `src_PQfinish_calls=5` / `src_PQfreemem_calls=3` / `src_PQfreeCancel_calls=1`（T8 の期待値に到達済み）
+- PLAN 訂正 2 件（どちらも上記バグ修正の帰結。PLAN.md の T5 (a) ②④ に追記済み）:
+  - ④: 修正後は `fetch_all` の drain がそのまま `IDLE` まで進む。`fetch_all` 直後の状態は `PQstatus` が BAD になるタイミング次第の競合なので断定せず、
+    `while state != IDLE: poll_result`（各回 `CONNECTION` sqlstate 空）で片付けてから `poll_result() == None` / `socket() == -1` / `status() == CONNECTION_BAD` /
+    `send` が `CONNECTION "no connection to the server"` を見る形にした
+  - ②: `fetch_all` 後は `IDLE` なので `cancel()` は契約どおりの no-op になり `CONNECTION` が出ない。切断を **`consume_input()` で観測する**（`BUSY` を保つ唯一の入口）と
+    「`BUSY` かつ接続が死んでいる」状態が作れる。`consume_input()` は 1 回目では失敗しない（実測 2〜3 回必要。サブエージェント側の `notifications()` も同じ 2〜3 回）のでリトライループにした
+- 想定外: (1) 上記のバグ（切断時に状態機械が `BUSY` で固まる）。T3 の「次への注意」で `fetch_all` の drain 打ち切りは確認済みと書いたが、**手書きの `poll_result` ループ側が無限に回る**のは見落としていた。
+  (2) `prefix^ + chr(0)` が `prefix ^ (+chr(0))` と解釈されて `'String' does not implement the '__pos__' method`（`var` 引数にしたのが原因。`tests/test_connection.mojo` と同じ借用引数に直した）。
+  (3) `pg_terminate_backend(pg_backend_pid())` の自己終了は `57P01` ではなく `CONNECTION`（上記「期待値の取り直し」）
+- やり直し: 3 回（(2) のコンパイルエラー 1 回、切断テストが落ちてバグ修正 1 回、修正で `fetch_all` の終状態が変わって T5 ②④ のテストを書き直し 1 回。いずれも 1 回で直った）
+- 次への注意:
+  - 確認済み: `single_row_mode` は多文 `send` では**文ごと**に働く（`SELECT 1; SELECT 2` + `set_single_row_mode` = 4 件: 1 行 / 0 行 / 1 行 / 0 行）。
+    16 MB の文は `flush()` ループで書き切れる（`state()` が `SENDING` だったかは断定しない）。multi-host（`port=1,<port>`）は `connect_blocking` で成功する。
+    接続拒否ポートは `start` が成功して `poll_connect` 側で `Connection refused`（`wait_writable` は writable を先に見るので POLLERR 文言にならない）。
+    切断後の `notifications()` も `CONNECTION` が出るまで 2〜3 回かかる（サブエージェント実測）
+  - 未確認: `PQcancel` が 0 を返す経路（errbuf の文言を message にする分岐）は**依然未到達**。T5 ② の切断後 cancel は `PQgetCancel` が NULL を返す側（`_connection_error`）に当たった。
+    「誤った値が黙って返る経路」でも「状態機械が壊れる経路」でもない（cancel の失敗は必ず `CONNECTION` になる）ので、**処分先は T8 (d) の「契約外」**（libpq に `PQcancel` を 0 で返させる条件を作れない）。
+    `PQsetSingleRowMode` が 0 を返す分岐も同様に未到達・契約外
+  - `_after_send` で `PQflush` が **-1** を返したときに状態を `IDLE` のままにしている件（turn 6 の未確認）は T5 ④ でも再現できなかった（送信は一瞬で終わる）。
+    **T8 (d) で「契約外（libpq が -1 を返す条件を作れない）」に分類する**
+  - サブエージェントからの契約外の提案（実装せず、記録のみ）: `AsyncConnection.wait_notifications(n, timeout_ms)` の追加、`notifications()` 側での `PQstatus == CONNECTION_BAD` 先行チェック、
+    テスト追加候補（`UNLISTEN` 後に来ないこと / LISTEN していないチャンネルの無視 / `LISTEN "Mixed Case"`）。いずれも Phase 5 以降の判断
+  - `test_notify.mojo` ⑥ は libpq の notice `FATAL: terminating connection due to administrator command` を stderr に出すが、`final_check.sh` 6/6 段の grep
+    （`warning:|WARNING:|implicit ROLLBACK failed`）には当たらないので 6/6 は PASS のまま（実測済み）
+  - `check` は 158 s（T4 の 169 s とほぼ同じ。16 MB と切断が乗っても増えなかった）。T6 の leak 4 ループで +15 s 程度を見込む
+
+## turn 8 — impl — T6 test_leak に Phase 4 ループ 4 本 + 陽性対照
+- やったこと: `tests/test_leak.mojo` を 14 → **18 テスト**に（サブエージェントなし。PLAN 推奨 0 本）。
+  `test_async_execute_does_not_leak`（1 接続で `send`/`fetch_all` を 10,000 回）/ `test_async_cancel_does_not_leak`（`send`→`cancel`→収集 1,000 回）/
+  `test_notify_receive_does_not_leak`（同期側が 7,000 byte payload の `NOTIFY` を 1,000 回、async が `wait_notification(2000)` で 1 件ずつ受ける）/
+  `test_async_drop_with_pending_results_does_not_leak`（2 文送って `consume_input()` だけして drop を 1,000 回）。
+  モジュール docstring の「Fourteen tests」→ Eighteen、Phase 4 の段（担う 3 解放経路）、所要の実測値を更新
+- **陽性対照（T6 (b)）**: `cancel()` の `PQfreeCancel` と `notifications()` の `PQfreemem` を**同時に**外した `src/` で 1 回計測（`build/test_leak_positive`、計測後に削除）:
+  - `notify-receive` は **FAIL**: RSS `[5285, 5629, 5974, 6318]`（単調増加、600 iteration で +1,033 pages ≈ 1.7 pages/iteration = payload ちょうど）。`PQfreemem` の欠落は検出できる
+  - `async-cancel` は **PASS のまま**: RSS `[4714, 4714, 4714, 4714]`（完全に平坦）。PLAN (b) が予期した側で、`PGcancel` は数百 byte（`fe-cancel.c`: struct + `raddr`）なので
+    1,000 iteration = 数百 KB では `TOLERANCE_PAGES` 256 にも届かない。**処分: 契約外**（`PGcancel` を膨らませる手段が無く RSS では原理的に見えない）。
+    `PQfreeCancel` は `src/pq/async_conn.mojo:1297` にあり `src_PQfreeCancel_calls=1`（チェックリスト）＋ `:1290-1291` のコメント（errbuf を読んでから free）でコードレビュー担保。
+    この経緯はループ本体のコメントにも実測値つきで書いた（`tests/test_leak.mojo` の `test_async_cancel_does_not_leak`）
+  - 計測後 `git checkout src/pq/async_conn.mojo` → `git status` が `tests/test_leak.mojo` のみ M（`PQfreeCancel` / `PQfreemem` が戻っていることを grep で確認）
+- 既存テストの期待値変更: **ゼロ**（既存 14 テストは無変更。`src/` の差分なし）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（**48 サマリ全部 0 failed**、`grep 'tests run' | grep -vc ' 0 failed'` = 0、
+  `-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、17:40:15 → 17:44:10 = **235 s**）、
+  `pixi run check` **6/6 PASS**（17:48:33 → 17:51:22 = **169 s**。5/6 段の leak は PG17 のみ）、`pixi run package` 警告ゼロ、`pixi run fmt` は `test_leak.mojo` を 1 回整形（コミット前に反映）
+- **leak の所要（P29）**: `test_leak` 全 18 テストで **74.2 s（PG17）/ 75.0 s（PG14）**。Phase 3 末の実測 74 s から **+0〜1 s** で、+15 s の枠内。
+  Phase 4 の 4 ループ自身は合計 **7.4 s**（単体実行の内訳: async-execute 2,793 ms / async-cancel 905 ms / notify-receive 154 ms / async-drop 3,588 ms）。
+  単体実行の合計は 72.2 s で、run_tests.sh の 74 s との差は計測の揺れ。RSS は 4 ループすべて両サーバーで平坦（例: PG17 `async-execute [4735 ×9]` / `notify-receive [4736 ×4]`）
+- チェックリスト（T6 行）: `leak_tests=18`（期待 18） / `leak_Fourteen=0`（期待 0） / `leak_async_import=13`（期待 ≥1）— **期待値**
+- 想定外: (1) `Optional[Notification]()` を先に作って `try` 内で代入する形が `warning: assignment to 'found' was never used` を出した。
+  `final_check.sh` 6/6 段の `grep 'warning:'` に当たるので、ラッパーは `Optional` を返して判定をテスト側に出す形（`test_notify.mojo` と同じ）に直した。
+  (2) `_payload(7000)` は既存 docstring どおり**次の 2 冪に切り上げる**ので 8,192 byte を返し、PG の payload 上限 7,999 byte を超える。
+  1 byte ずつ伸ばす `_notify_payload()` を別に足した。(3) `notify-receive` は 1,000 往復で 154 ms しかかからない（1 iteration 0.15 ms）。速すぎて疑ったが、
+  陽性対照で payload ぶんきっちり RSS が伸びたので PGnotify は 1,000 回確かに確保・解放されている
+- やり直し: 1 回（上記 (1) の warning。`Optional` を返す形に直して再ビルドで解消）
+- 次への注意:
+  - T7 は `src/pq/decode_binary.mojo` / `result.mojo` を触るので、**`pixi run bench` の「前」計測を着手直後（この木の状態）に 2 回走らせる**こと（PLAN T7 (d)。切替後と比較する）
+  - 確認済み: `cancel()` を 1,000 回連続で呼んでも接続は壊れない（`SELECT 1` 相手だと cancel が間に合わず結果が返る回も多く、`_collect_cancelled` が 57014 と成功の両方を受ける形にしてある）。
+    `consume_input()` だけして drop を 1,000 回繰り返しても落ちない（P22 の `PQfinish` 任せが成立）
+  - 未確認/契約外の積み残し（T8 (d) の表に入れる 4 件）: ① `PQcancel` が 0 を返す経路（契約外・turn 7） ② `PQsetSingleRowMode` が 0 を返す経路（契約外・turn 7）
+    ③ `_after_send` で `PQflush` が -1（契約外・turn 7） ④ **`PQfreeCancel` の欠落（契約外・このターン。RSS では原理的に不可視、コードレビュー担保）**
+  - `check` は 169 s（T4 169 s / T5 158 s と同水準）。T7 は bench 4 回ぶんが別途かかる
+
+## turn 9 — impl — T7 UTF-8 検証 + bench 記録 + docstring の「検証しない」文言の更新
+- やったこと: 推奨 1 本 / 実 **1 本**（サブエージェントが `decode_binary.mojo` のスキャナ + `test_decode_binary.mojo` の 8 件、
+  親が `result.mojo` / `__init__.mojo` / `test_connection.mojo` / `test_zero_copy.mojo` + bench 前後計測 + 統合検証）。
+  `_utf8_first_invalid`（RFC 3629 表 3-7 の直書き、最初の不正シーケンスの offset。正しければ -1）と `_validated_utf8`（速い経路は stdlib の
+  `StringSlice(from_utf8=)`、失敗時だけスキャナで位置を出して `invalid UTF-8 at byte N of column M`。セル本文は message に入れない）を
+  `decode_binary.mojo` に置き、`String` になる **3 経路**を通した: `decode_binary[String]`（`column: Int = -1` キーワード引数を足し `Row.get` / `get_optional` が列番号を渡す）/
+  `Result._text`（`PQgetvalue` + `PQgetlength` の `Span` を検証してから `String` 化）/ `Row.get_text`（戻りをそのまま返す）
+- **bench（D12。受け入れ条件ではない記録）**: 切替前 2 回 → 後 2 回（`scratch/turn-009-bench-{before,after}-{1,2}.log`。100,000 行 × 5 列 × 3 run）:
+  - text: decode **32〜33 ms → 41〜42 ms**（+9 ms、+28 %）、total **71〜76 ms → 83〜85 ms**
+  - binary: decode **7〜9 ms → 11〜13 ms**（+4 ms）、total **45〜47 ms → 49〜51 ms**
+  - 500,000 セルで +9 ms = **1 セルあたり約 18 ns**。stdlib の 1 回走査ぶんで、自前スキャナは正常系では走らない
+- **副産物（P25）**: `_text` が `PQgetlength` 基準になったので、NUL を含む text 値が NUL で切れなくなった（以前は C 文字列として読んでいた）
+- 既存テストの期待値変更: **ゼロ**。既存テストへの変更は 1 件だけで、期待値ではなく手順:
+  `tests/test_notify.mojo:385` `test_notification_waits_for_the_running_command` に `_wait_until_active`（`pg_stat_activity` が listener の backend を
+  `active` と報告するまで最大 2,000 ms 待つヘルパ）を挟んだ。理由: `send` は libpq にバイトを渡すだけで、listener の backend がまだクエリを読んでいなければ
+  **idle なので通知が即届く**。NOTIFY が先に commit するとこのテストの前提（「sleep 中は届かない」）が崩れる。T7 とは無関係の既存の競合で、
+  通しの 1 回目で実際に落ちた（`early` が 1 件、テスト全体が 9 ms で中断 = sleep が始まる前）。単体では 3 回連続 PASS だったので flake と確認してから直した。
+  P20 の主張（コマンド実行中は届かない）を弱めずに競合だけ消す形
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（**48 サマリ全部 0 failed**、exit 0、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、
+  18:11:58 → 18:16:02 = **244 s**）、`pixi run check` **6/6 PASS**（18:16:11 → 18:19:18 = **187 s**。T6 の 169 s + 18 s）、`pixi run package` 警告ゼロ、
+  `pixi run fmt` は `test_notify.mojo` を 1 回整形（コミット前に反映）。`test_decode_binary` 単体は 88 件 **0.10 s**（サーバー不要）、`test_zero_copy` は 12 件 46 s
+- チェックリスト（T7 行）: `utf8_unsafe_span=0`（期待 0） / `result_unsafe_ptr=6`（6） / `utf8_from_utf8=2`（≥2） / `utf8_scanner_def=1`（1） /
+  `utf8_invalid_message=3`（≥1） / `docs_not_validated=0`（0） / `test_decode_binary_utf8_tests=8`（≥5） / `test_decode_binary_tests=88`（≥85）— **全行期待値**
+- 陽性対照（P26。サブエージェントが実測、親が差分で確認）: `_utf8_first_invalid` を直接呼び、stdlib が弾く 4 入力すべてで offset ≥ 0
+  （`6162c32863`→2 / `61e282`→1 / `c080`→0 / `eda080`→0）、正しい 2 入力（`68c3a9` と空）で -1。
+  併せて message にセル本文（`"ab"` と `0x28` の `"("`）が出ないことを 1 件で確かめている
+- PLAN 訂正 2 件（PLAN.md に追記済み）: ① T7 の対象一覧に `tests/test_notify.mojo` を追加（上記の競合修正）
+  ② チェックリスト T7 行に実測値と、`utf8_from_utf8=2` の内訳（実呼び出し `decode_binary.mojo:334` + docstring の引用 `:304`。実装箇所は 1 つ）を注記
+- 想定外: (1) 上記 `test_notify` の競合。T7 の変更とは無関係だが通しの 1 回目を落としたので、原因（libpq の送信と backend の実行開始のずれ）まで特定して直した。
+  (2) `test_zero_copy` が 1 テスト 3.4〜3.9 s かかる。T7 のせいかを疑い `git stash` で HEAD と A/B した（HEAD 41.4 s / 11 件、T7 後 46.3 s / 12 件 = 1 件ぶんの増分のみ）。
+  **接続あたりの固定費で、Phase 4 以前からの既存の性質**（他のファイルは 1 テスト 0.1 s 台なので、この 1 ファイルだけ `_connect` の作りが重い。原因未調査）
+- やり直し: 1 回（`pixi run test` の 1 回目が `test_notify` の競合で exit 1。原因特定 → ヘルパ追加 → 2 回目で green）
+- 次への注意:
+  - 確認済み: UTF-8 検証のコストは text decode に +28 %（1 セル 18 ns）で、`String` になる 3 経路すべてが `_validated_utf8` を通る。
+    サーバーからは不正 UTF-8 を作れない（`E'\xC3\x28'::bytea::text` は PG が拒否）ので、不正系は `test_decode_binary.mojo` の単体 8 件が唯一の担保。
+    `test_zero_copy.mojo` の追加 1 件はその旨を docstring に書いてある
+  - 未確認: `_validated_utf8` の「スキャナが -1 を返した（stdlib と食い違った）」分岐（`decode_binary.mojo:339-345`）は到達不能で未到達。
+    **誤った値が黙って返る経路ではない**（どちらに転んでも `TYPE_MISMATCH` を投げる。位置が出ないだけ）ので、**処分先は T8 (d) の「契約外」**
+  - T8 (d) の表に入れる未確認/契約外は **5 件**: ① `PQcancel` が 0 を返す経路（契約外・turn 7） ② `PQsetSingleRowMode` が 0 を返す経路（契約外・turn 7）
+    ③ `_after_send` で `PQflush` が -1（契約外・turn 7） ④ `PQfreeCancel` の欠落（契約外・turn 8。RSS では原理的に不可視、コードレビュー担保）
+    ⑤ **`_validated_utf8` のスキャナ不一致分岐（契約外・このターン）**
+  - サブエージェントからの契約外の提案（実装せず、記録のみ）: `f4 90 80 80` / `f5 80 80 80` の 4 バイト境界をスキャナの単体に足す案、
+    検証失敗に専用の `PgErrorKind.ENCODING` を作る案。どちらも Phase 5 以降の判断（契約は `TYPE_MISMATCH`）
+  - Mojo 1.1.0 のメモ（サブエージェント実測）: `len(StringSlice)` は不可（`byte_length()`）、`__origin_of` は廃止で `origin_of`、
+    `var x: Int`（初期値なし）＋全分岐代入は通る（`var x = 0` だと `never used` 警告が出る形があった）
+  - `check` は 187 s。T8 は `check` + `fmt` + `package` + examples 単体で 5 分前後を見込む（PLAN の「5 分を超えたら書く」の境目）
+
+## turn 10 — impl — T8 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
+- やったこと: 推奨 0 本 / 実 **0 本**。`src/pq/__init__.mojo` の `## Asynchronous use` 節に**公開 API の全表**
+  （16 行、`AsyncConnection` の全メソッド × 返り値 × raise する `PgErrorKind`）を足し、`.gsd-lite/TRACE.md` を新設して
+  §1 チェックリスト最終実行 / §2 受け入れ基準の対応表 / §3「未確認」行の処分表（10 件）を置いた
+- (a) 名前の一致: HANDOFF §7.2 の 8 名（`start` / `poll_connect` / `socket` / `send` / `poll_result` / `notifications` / `cancel` / `wait_*`）は
+  すべて実装済み・表に記載。`PgErrorKind` 節の 7 件と `TIMEOUT` の説明は既存のまま一致。docstring は `check` 3/6 段が機械判定（**0 missing**）
+- (b) チェックリスト再実行: **全 85 行が期待値**（`absent` 0 件）。`test_file_count=24`、`src_def_ref_return=0`、
+  `tests_files_count=24`。生出力は `TRACE.md` §1（85 行）
+- (c)(d) TRACE.md §2 / §3 に表。REQ §5.1 の 4 件・§5.2 の 4 項目・§5.3 の 3 項目・§5.4 の 5 項目・§4.8〜§4.10 を
+  「担うテスト関数 / コマンド」と「turn N で PASS」で対応づけた。§3 は 10 件を **テスト追加 1 / 契約外 7 / verify 申し送り 2** に振り分け。
+  「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べた行は**残っていない**（各ターンで判定済み。このターンで追加したテストは 0 件）
+- 既存テストの期待値変更: **ゼロ**（このターンはテストを 1 行も触っていない。変更は `__init__.mojo` の docstring と `.gsd-lite/` のみ）
+- 検証（所要つき）: `pixi run fmt` → `52 files left unchanged`（差分なし）、`pixi run package` 警告ゼロ、
+  `pixi run test` 両サーバー **48 サマリ全部 0 failed**・exit 0（18:26:15 → 18:31:29 = **314 s**）、SKIP 集計行が各サーバーに 1 本ずつ、
+  `pixi run check` **6/6 PASS**（18:31:40 → 18:34:40 = **180 s**。`final_check: PASS`、6/6 段の一致行 0）、
+  `pixi run example-async`（`n = 1` / `empty polls while waiting = 19`）と `pixi run example-notify`（`channel = pq_example` / `payload = hello from pq` / `backend_pid = 1541121`）が単体実行で成功
+- PLAN 訂正 1 件（PLAN.md に追記済み）: T8 (c) の「`grep -c 'Copyable' src/pq/async_conn.mojo` が `Notification` の 1 行だけ」→ **2**。
+  `AsyncConnection` の docstring が「`Movable` and not `Copyable`」と述べる `:43` を数え落としていた。`struct AsyncConnection(Movable)`（`:277`）に `Copyable` は無いので要件自体は満たす
+- 想定外: なし
 - やり直し: 0 回
 - 次への注意:
-  - 確認済み: `pixi run test` = 両サーバー 21 ファイル × 2 + leak ビルド 1、全 PASS / 0 failed、所要 189 s（各ファイルの `took` の和。ログ `scratch/turn-013-test.log`）。
-    `pixi run check` 6/6 PASS = 143 s（`date +%s` の差 1792172545 → 1792172688。ログ `scratch/turn-013-check.log`。1/6 fmt は no diff、3/6 docstring 診断 0 件、6/6 警告 0 行）
-  - 確認済み: PLAN F1 の表 4 行の実測 — `00018000000000000001` → `0`（既存テスト PASS のまま）／`000280010000000000000001`（stripped = -32768）→ 成功して 1 行目と `==`／
-    `000280000000000000000001`（-32769）と `0003800000000000000000000001`（-32770）→ `TYPE_MISMATCH` で message に `cannot decode binary numeric` と `weight` を含む
-  - 確認済み: `grep -c '^def test_' tests/test_decode_binary.mojo` = 78（PLAN F1 (b) の期待どおり。77 → 78）
-  - 確認済み: 既存テストの期待値の変更は **0 件**（追加 1 件のみ。`test_numeric_minimum_weight_decodes` を含め既存の numeric テストは無改変で PASS）
-  - 確認済み: 追従先チェックリストのうち今回の変更が触る行の再実行 — `grep -c '^def decode_' src/pq/decode_binary.mojo` = 15（decoder は増えていない）、
-    `grep -rn -- '-> ref' --include='*.mojo' src/pq/` = 0 件、`grep -rn 'compile error' --include='*.mojo' src/pq/` の 8 行すべて消費する移動の文脈のまま（`connection.mojo:6` は既定の例外）、
-    `grep -c 'anything else' src/pq/__init__.mojo` = 1。他の行は OID / `@implicit` / encoder / example / pixi.toml に触っていないので対象外
-  - 未確認（**契約外の提案**。F1 の範囲は PLAN が名指しした 3 箇所なので直していない）: `params.mojo` の同じ関数の docstring Raises 「longer than libpq's `paramLengths` can carry (1073741823 bytes)」と
-    エラーメッセージ「libpq takes at most 1073741823」は、今回直したコメントと同じ「1 GB を `paramLengths` の限界と見る」言い方のまま。
-    `tests/test_connection.mojo:953` の `test_client_encoding_is_utf8` docstring 「libpq takes `client_encoding` from the environment」も同様（libpq の既定は `server_encoding`）。
-    どれも文言だけで、メッセージ側は部分文字列でテストされている可能性があるので verify の判断に委ねる
-  - 確認済み: PLAN の未完了タスクはこれで 0 件。次は verify round 2（turn 12 の申し送りどおり「round 1 の格子の再確認 + F1 差分の回帰」。ファズを再ビルドすると weight クラスの行が消え、dscale クラスの 71 件が残るのが期待）
-## turn 14 — verify — round 2: 合格（新しい指摘 0 件）、`main` へ `--no-ff` ローカルマージ成功（`15e8a2c`）
-- やったこと: F1 差分（`b185a69..HEAD` の 6 ファイル、コード変更は `decode_numeric` 1 箇所）を PLAN の表 4 行と照合、round 1 の格子を再確認
-  （ファズ probe を再ビルドして再実行: BAD 72 行は round 1 と同一の dscale クラス、crafted の `ok 6230 → 6224` で weight クラス 6 入力が `TYPE_MISMATCH` に移動、クラッシュ 0；
-  追従先チェックリスト 32 件 OK；T7 陽性対照は現 HEAD でもコンパイルエラー）、クリーンな `pixi run check` 6/6 PASS（131 s、41 summary 全部 `0 failed`）。
-  VERIFICATION.md を round 2 の結果で更新してブランチにコミット → リモート無しなので `main` にマージ。サブエージェント 0 本
-- 想定外:
-  (1) ファズの期待「weight クラスの BAD 行が消える」は**形が違った**。round 1 でも weight wrap は BAD 行ではなく `ok` 側に数えられていた（`String()` → 再 parse → `==` の往復は wrap した値同士で一致するため）ので、
-      修正の効果は BAD 行の増減ではなく crafted の `ok / err` 集計（6230 / 41825 → 6224 / 41831）に出た。BAD 行は 72 で不変（round 1 の VERIFICATION が「71 件」と書いていたのは数え間違い。訂正済み）
-  (2) impl が turn 13 で挙げた契約外の字句 3 件（`params.mojo:643` / `:670`、`test_connection.mojo:954`）は F1 (c) と同型で、round 1 がコメント行だけを名指しして同じ関数の docstring / メッセージを見なかったのが原因。
-      文言のみで誤動作が無いので差し戻さず残留リスク（次マイルストーンの持ち越し整理）にした
-- やり直し: 0 回
+  - 確認済み: Phase 4 の全 8 タスク完了。`pixi run test` 314 s / `pixi run check` 180 s（PLAN の見込み 330〜360 s / 260〜300 s より速い。
+    実測が見込みを下回ったのは leak が `check` では 1 サーバーのみのため）。テストファイル 24 本、`test_async` 29 件 / `test_notify` 9 件 / `test_poll` 9 件
+  - verify への申し送り（TRACE.md §3 の「verify 申し送り」2 件）: ① `poll.mojo` の Windows 分岐は未コンパイル・未検証
+    （モジュール docstring に **unverified** 明記。Phase 5 の「Windows 用コードパスのレビュー」が引き取る）
+    ② `test_zero_copy` が 1 テスト 3.4〜3.9 s（Phase 4 以前からの既存の性質。A/B 済み。Phase 5 のベンチマークが引き取る）
+  - verify が照合すべき一覧: 既存テストの期待値変更は Phase 4 全体で **ゼロ**（turn 9 の `test_notify.mojo:385` への
+    `_wait_until_active` 挿入だけが既存テストへの変更で、期待値ではなく手順。理由は turn 9 に記載）
+  - 未確認: なし（TRACE.md §3 で 10 件すべてを処分済み）
+
+## turn 11 — verify — round 1: 指摘あり（差し戻し F1 = 誤動作 1 + D12 整合 1 + 文書・例 5）/ マージなし
+- やったこと: サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用、並行 約 10 分）+ 親が `async_conn.mojo` / `poll.mojo` 通読、クリーンな `pixi run check`（**6/6 PASS、179 s**、47 サマリ全部 `0 failed`）、
+  追従先チェックリスト再実行（全行期待値。TRACE §1 との差は `init_TIMEOUT` 3 → 6 の字句のみ）、堅牢性プローブ 5 本（`scratch/turn-011-probe-grid.mojo`）。VERIFICATION.md を作成し PLAN に F1 を追記
+- 判定の根拠: 受け入れ基準 §5.1 の 4 件・§5.2・§5.4 は全部満たす。差し戻しは **`timeout_ms ≥ 2^31` の `c_int` 切り捨て**（`2^32+50` → 50 ms で timeout、`fetch_all(Int.MAX)` → 0 ms で `TIMEOUT`。親とセキュリティが独立に再現）が
+  「黙って誤動作」に当たるため。ついでに `notifications()` の UTF-8 無検証（`SQL_ASCII` DB で再現。D12 の趣旨と不整合）と文書・例 5 件を F1 に同梱。既存テストの期待値変更ゼロはコードレビュー側が全 hunk 分類で確認
+- 想定外: (1) サブエージェントの出力ファイルの更新時刻で完了を待つ `until` ループが即終了した（出力は完了時にまとめて書かれる）→ `sleep 300` の再試行で待った。
+  (2) セキュリティ側が検証のために PG17 に `pq_sec_ascii` DB を作って削除した（作業木は無変更）。(3) P3（`Sending` 中の切断）は 3 回中 1 回しか `Sending` を観測できなかったが、その 1 回で状態機械が `Idle` に戻ることを確認
+- やり直し: 1 回（上記 (1) の待ち方）
+- 次への注意: impl は F1 の**期待結果の表**だけを見て実装する（文言は表に 1 回だけ書いた）。`pq` は両サーバーで superuser なので `CREATE DATABASE pq_test_ascii` はテストが自分で作れる（`42P04` は無視）。
+  F1 (b) の `LISTEN "ch\xC3\x28"`（channel 側）が PG に拒否されたら payload 側だけにしてよい。round 2 の verify は PLAN F1 末尾「修正後にプローブで期待される変化」の数だけ照合する
+  （P1 → `USAGE`、sec-timeout 4 行 → `USAGE`、sec-ascii-notify → `TYPE_MISMATCH`、`test_poll` 11 / `test_async` 30 / `test_notify` 10〜11）。セキュリティ側プローブは DB 名 `pq_sec_ascii` を使っているので round 2 で `pq_test_ascii` に直して回す
+
+## turn 12 — impl — F1 verify round 1 の差し戻し（timeout 上限 / 通知の UTF-8 / 文書・例 5 件）
+- やったこと: 推奨 0 本 / 実 **0 本**。`_platform/poll.mojo` に `TIMEOUT_MS_MAX = 2147483647` と
+  `_reject_bad_timeout` を置き、`poll_socket` と `async_conn` の両方がこの 1 定義を使う形にした（決めた事項 17 の
+  import 向き `poll → errors` は維持。async_conn 側の同名関数は削除して import に置き換え）。`notifications()` は
+  channel / payload を UTF-8 検査するようになり、文書 5 件と `examples/async_query.mojo` のループを直した
+- 期待結果の表 7 件: 全部テストに落ちて PASS（対応表は TRACE.md §4）。`test_poll` +2 / `test_async` +1 /
+  `test_notify` +2 ＝ 11 / 30 / 11 件
+- (b) の実装: `PQfreemem` は検査の**前**に呼ぶ（`async_conn.mojo:1399`）。raise 経路でも必ず通るのでこれで
+  `src_PQfreemem_calls=3` のまま。raise の直前に `self._pending = found^`（`:1408`）で正常分を戻す
+- (b) の陽性対照: `_reject_bad_notification_text` の先頭に `if True: return` を入れたコピーで
+  `scratch/turn-012-ascii-notify.mojo` を 1 回実測 → `notification payload bytes: 0x61 0x62 0xc3 0x28  byte_length 4`。
+  すぐ戻し、同じプローブが `invalid UTF-8 at byte 2 of notification payload` になることを確認（TRACE §4 に記載）
+- 既存テストの期待値変更: **ゼロ**。既存の 2 件（`test_timeout_below_minus_one_is_rejected` /
+  `test_a_budget_below_minus_one_is_usage`）は部分文字列 `"timeout_ms must be"` しか見ていないので文言変更後も無変更で通る。
+  `test_extended_datetime.mojo:787` の SKIP は**文言だけ**（判定ロジック不変）
+- 検証（所要つき）: `pixi run fmt` 差分なし（52 files unchanged）、`pixi run package` 警告ゼロ、
+  `pixi run test` 両サーバー **48 サマリ全部 0 failed**・exit 0、SKIP 集計行が各サーバーに 1 本、
+  `pixi run check` **6/6 PASS**（19:09:55 → 19:12:50 = **175 s**）。チェックリスト再実行は全 83 行が期待値
+  （`poll_external_call_symbols=2` / `src_PQfreemem_calls=3` / `src_PQexec_calls=4` 不変）
+- round 2 用プローブの実測: `turn-011-probe-grid` の P1 → `Usage`（P2 / P5 は不変）、`turn-011-sec-timeout` の
+  4 行（`wait_readable(2**32)` / `fetch_all(Int.MAX)` / `fetch_all(1e13)` / `wait_notification(2**32)`）が全部 `Usage`、
+  `wait_readable(300)` は `Timeout` のまま
+- 想定外: (1) PLAN (b) は `strlen` 長の `Span` を指定していたが、`strlen` を `external_call` で引くと
+  stdlib が同名シンボルを別シグネチャで束縛している risk があるため（`poll.mojo` モジュール docstring の注）、
+  `String(unsafe_from_utf8_ptr=)` で作った owned コピーの `as_bytes()` を検査する形にした。不正な `String` は
+  ローカルに留まり呼び出し側へは出ない。スキャナ `_utf8_first_invalid` は `decode_binary` から import（実装 1 つ）。
+  (2) F1 (b) ② の `LISTEN "ch\xC3\x28"` は **PG が受ける**（PG17 で実測。識別子 4 byte）。ただし `LISTEN` は
+  識別子しか取らないので、`DO $$ ... format('LISTEN %I', E'ch\xC3\x28') ... $$` 経由で送った（送る SQL 自体は ASCII）
+- PLAN 訂正 1 件: F1 (b) の「`strlen` 長の `Span`」→ 「owned `String` の `as_bytes()`」（上記 (1)。
+  PLAN は「`_validated_utf8` 相当で検査する」が本題で、長さの取り方は要件・決定に触れない）
+- やり直し: 2 回（`_assert_sql_ascii` のコンパイル: `raises PgError` の `try` 本体から `assert_equal` を呼べない →
+  値だけ取り出して外で assert / `get_text` の `StringSpan` を `String()` で包む）
 - 次への注意:
-  - 確認済み: `main` は `15e8a2c`（merge commit）。ブランチ `gsd-lite/phase3-binary-all-types` は残してある。作業ツリーは `main` 上で、この state.json / PROGRESS / VERIFICATION は `main` にコミットする
-  - 確認済み: `pixi run check` = 131 s（1/6〜4/6 計 7 s、5/6 124 s）。round 1 の約 140 s / turn 13 の 143 s と同水準
-  - reflect への材料: (a) verify round 1 の指摘は impl の turn 5「未確認」と同一だった（申し送りが機能した例）、(b) 字句の指摘はクラス（同じ関数の docstring・コメント・メッセージ）でまとめて名指しする、
-    (c) ファズの「期待される変化」は BAD 行ではなく集計の `ok / err` で書く、(d) 次マイルストーンの REQ §6 持ち越し: `params.mojo:643` / `:670` の 1 GB 文言、`test_connection.mojo:954` の `client_encoding` 文言、`decode_timetz` の時刻部範囲検査（残留リスク）
-## turn 15 — reflect — phase3-binary-all-types
-- やったこと: 振り返りを .gsd-lite/reflect/20261017-0254-phase3-binary-all-types.md に作成（提案 12 件）。turns.jsonl 14 行の集計（263 分 / USD 164.07 / リトライ 0 / 権限拒否 0）、PROGRESS turn 1〜14・PLAN・VERIFICATION・DECISIONS・REQ §9・前回 reflect の提案 12 件の反映を照合（守られた 11 / 部分 1）
-- 想定外: turns.jsonl の turn 6 が `usage` 188 トークン / `num_turns` 1 と記録されている（生ログの `modelUsage` は出力 153,239）。ループがサブエージェント完了通知で再起動した短い `result` を拾ったとみられ、Minus / ツール側提案に書いた。lean-ctx MCP は未接続（素の Read / Bash で実施）
-- やり直し: 0 回
-- 次への注意: 次マイルストーンの T1 持ち越しは VERIFICATION §5 先頭の字句 3 件 + `decode_timetz` 範囲検査 + 非 UTC 分岐。plan は追従先チェックリストを最初からスクリプトにして現在値を記録、impl は「未確認」行を同ターンでテスト化か PLAN 追記で処分、PROGRESS は 1 ターン 40 行上限で長い表は別ファイルへ
+  - round 2 の verify は PLAN F1 末尾「修正後にプローブで期待される変化」の数と TRACE §4 を照合すれば足りる。
+    `turn-011-sec-ascii-notify.mojo`（DB 名 `pq_sec_ascii`）は `scratch/turn-012-ascii-notify.mojo` が
+    `pq_test_ascii` 版として置き換わっているのでそちらを使う
+  - テストが作る `pq_test_ascii` DB は**消さずに残る**（両サーバー）。`42P04` を無視するので再実行は安全
+  - `empty polls while waiting` は例の形を変えたので値が動く（今回 17。`n = 1` の行は不変）
+  - 未確認: なし（F1 で足したコードはすべてテストが通る。`_reject_bad_notification_text` の
+    `offset < 0` 分岐だけは TRACE §3 #9 と同じ到達不能分岐で、どちらでも `TYPE_MISMATCH`）

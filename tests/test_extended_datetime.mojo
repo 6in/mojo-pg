@@ -773,7 +773,8 @@ def test_timestamp_params_round_trip() raises:
     )
 
     # A `timestamptz` parameter is the same microsecond count, but the text
-    # it prints as carries the session zone, so it is only pinned under UTC.
+    # it prints as carries the session zone, so the text of the main
+    # connection's case is only pinned when that zone is UTC.
     if _is_utc(conn):
         _assert_param_roundtrip(
             conn,
@@ -783,17 +784,23 @@ def test_timestamp_params_round_trip() raises:
             "2024-02-29 12:34:56.789+00",
         )
     else:
-        var result = _execute_params_fmt(
-            conn,
-            "SELECT $1::timestamptz",
-            [TimestampTz(762525296789000)],
-            ResultFormat.BINARY,
-        )
-        var row = _row(result, 0)
-        assert_true(_get[TimestampTz](row, 0) == TimestampTz(762525296789000))
-        _ = row^
-        _ = result^
+        # `(main)` because the function goes on to run its `Asia/Tokyo` case:
+        # only the main connection's UTC assertion is skipped.
+        print("SKIP test_timestamp_params_round_trip(main): TimeZone not UTC")
 
+    # The zone dependence itself is pinned on a connection that asks for one,
+    # whatever the server's default is: the same instant prints as 21:34:56.789
+    # with a +09 zone under `Asia/Tokyo`.
+    var conn_tokyo = _connect(_conninfo() + " options='-c TimeZone=Asia/Tokyo'")
+    _assert_param_roundtrip(
+        conn_tokyo,
+        "SELECT $1::timestamptz",
+        [TimestampTz(762525296789000)],
+        TimestampTz(762525296789000),
+        "2024-02-29 21:34:56.789+09",
+    )
+
+    _ = conn_tokyo^
     _ = conn^
 
 
@@ -840,6 +847,7 @@ def test_infinite_params_round_trip() raises:
 def test_interval_infinity_on_pg17_and_later() raises:
     var conn = _connect(_conninfo())
     if conn.server_version() < PG17:
+        print("SKIP test_interval_infinity_on_pg17_and_later: server < 17")
         _ = conn^
         return
 
@@ -875,6 +883,7 @@ def test_interval_infinity_on_pg17_and_later() raises:
 def test_interval_infinity_rejected_before_pg17() raises:
     var conn = _connect(_conninfo())
     if conn.server_version() >= PG17:
+        print("SKIP test_interval_infinity_rejected_before_pg17: server 17+")
         _ = conn^
         return
 

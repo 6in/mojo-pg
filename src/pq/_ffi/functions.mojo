@@ -129,6 +129,7 @@ struct LibpqFFI(Movable):
     var PQfreemem: def(MutRawPtr) thin abi("C") -> None  # libpq-fe.h:626
 
     # --- asynchronous connection and socket -----------------------------
+    var PQconnectStart: def(CStr) thin abi("C") -> PGconnPtr  # libpq-fe.h:327
     var PQconnectStartParams: def(CStrArray, CStrArray, c_int) thin abi(
         "C"
     ) -> PGconnPtr  # libpq-fe.h:326
@@ -162,6 +163,9 @@ struct LibpqFFI(Movable):
     var PQgetResult: def(PGconnPtr) thin abi(
         "C"
     ) -> PGresultPtr  # libpq-fe.h:530
+    var PQsetSingleRowMode: def(PGconnPtr) thin abi(
+        "C"
+    ) -> c_int  # libpq-fe.h:528
 
     # --- cancellation and notifications ---------------------------------
     var PQgetCancel: def(PGconnPtr) thin abi(
@@ -298,6 +302,9 @@ struct LibpqFFI(Movable):
             self._lib, "PQfreemem"
         )
 
+        self.PQconnectStart = _dl_sym[def(CStr) thin abi("C") -> PGconnPtr](
+            self._lib, "PQconnectStart"
+        )
         self.PQconnectStartParams = _dl_sym[
             def(CStrArray, CStrArray, c_int) thin abi("C") -> PGconnPtr
         ](self._lib, "PQconnectStartParams")
@@ -342,6 +349,9 @@ struct LibpqFFI(Movable):
         self.PQgetResult = _dl_sym[def(PGconnPtr) thin abi("C") -> PGresultPtr](
             self._lib, "PQgetResult"
         )
+        self.PQsetSingleRowMode = _dl_sym[
+            def(PGconnPtr) thin abi("C") -> c_int
+        ](self._lib, "PQsetSingleRowMode")
 
         self.PQgetCancel = _dl_sym[def(PGconnPtr) thin abi("C") -> PGcancelPtr](
             self._lib, "PQgetCancel"

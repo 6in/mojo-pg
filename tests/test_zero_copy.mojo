@@ -484,6 +484,43 @@ def test_binary_non_string_oid_get_text_is_type_mismatch() raises:
     _ = conn^
 
 
+def test_get_text_checks_utf8_on_the_round_trip() raises:
+    """`get_text` validates UTF-8; only the valid side is reachable here.
+
+    The server cannot be made to send an invalid sequence: a `text` value is
+    always valid in the session encoding, and the usual trick
+    (`E'\\xC3\\x28'::bytea::text`) is rejected by PostgreSQL itself rather
+    than put on the wire. So the rejection half of the contract is measured
+    by the unit tests in `tests/test_decode_binary.mojo`, which hand the
+    decoder the byte sequences directly; what this test pins down is that the
+    check does not break the values that *do* arrive -- in either format, and
+    for a multi-byte character the check has to walk.
+    """
+    var conn = _connect(_conninfo())
+
+    var text_result = _execute_fmt(conn, String(TEXT_SQL), ResultFormat.TEXT)
+    var text_row = _row(text_result, 0)
+    assert_equal(String(_get_text(text_row, 1)), "héllo")
+    assert_equal(_get_text(text_row, 1).byte_length(), 6)
+    _ = text_row^
+    _ = text_result^
+
+    var binary_result = _execute_fmt(
+        conn, String(BINARY_STRINGS_SQL), ResultFormat.BINARY
+    )
+    var binary_row = _row(binary_result, 0)
+    assert_equal(String(_get_text(binary_row, 0)), "héllo")
+    assert_equal(_get_text(binary_row, 0).byte_length(), 6)
+
+    # The jsonb column is checked after the version byte is dropped, so a
+    # multi-byte character there lands at the same offsets as in text.
+    assert_equal(String(_get_text(binary_row, 5)), '{"a": 1}')
+
+    _ = binary_row^
+    _ = binary_result^
+    _ = conn^
+
+
 def test_null_cell_raises_null_value() raises:
     var conn = _connect(_conninfo())
     var result = _execute_fmt(conn, "SELECT NULL::text", ResultFormat.TEXT)

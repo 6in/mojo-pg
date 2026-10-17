@@ -15,6 +15,16 @@ services:
       timeout: 3s
       retries: 15
 
+  # Accepts the TCP connection and never answers the startup packet, so a
+  # connect attempt hangs until the caller's own timeout fires. The async
+  # connect timeout test (`tests/test_async.mojo`) needs that; no healthcheck,
+  # because the listener answers nothing.
+  blackhole:
+    image: alpine/socat
+    command: -u TCP-LISTEN:5432,fork,reuseaddr OPEN:/dev/null
+    ports:
+      - "127.0.0.1:54399:5432"
+
   pg14:
     image: postgres:14
     environment:
