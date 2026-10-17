@@ -344,3 +344,44 @@
 - 次への注意: impl は F1 の**期待結果の表**だけを見て実装する（文言は表に 1 回だけ書いた）。`pq` は両サーバーで superuser なので `CREATE DATABASE pq_test_ascii` はテストが自分で作れる（`42P04` は無視）。
   F1 (b) の `LISTEN "ch\xC3\x28"`（channel 側）が PG に拒否されたら payload 側だけにしてよい。round 2 の verify は PLAN F1 末尾「修正後にプローブで期待される変化」の数だけ照合する
   （P1 → `USAGE`、sec-timeout 4 行 → `USAGE`、sec-ascii-notify → `TYPE_MISMATCH`、`test_poll` 11 / `test_async` 30 / `test_notify` 10〜11）。セキュリティ側プローブは DB 名 `pq_sec_ascii` を使っているので round 2 で `pq_test_ascii` に直して回す
+
+## turn 12 — impl — F1 verify round 1 の差し戻し（timeout 上限 / 通知の UTF-8 / 文書・例 5 件）
+- やったこと: 推奨 0 本 / 実 **0 本**。`_platform/poll.mojo` に `TIMEOUT_MS_MAX = 2147483647` と
+  `_reject_bad_timeout` を置き、`poll_socket` と `async_conn` の両方がこの 1 定義を使う形にした（決めた事項 17 の
+  import 向き `poll → errors` は維持。async_conn 側の同名関数は削除して import に置き換え）。`notifications()` は
+  channel / payload を UTF-8 検査するようになり、文書 5 件と `examples/async_query.mojo` のループを直した
+- 期待結果の表 7 件: 全部テストに落ちて PASS（対応表は TRACE.md §4）。`test_poll` +2 / `test_async` +1 /
+  `test_notify` +2 ＝ 11 / 30 / 11 件
+- (b) の実装: `PQfreemem` は検査の**前**に呼ぶ（`async_conn.mojo:1399`）。raise 経路でも必ず通るのでこれで
+  `src_PQfreemem_calls=3` のまま。raise の直前に `self._pending = found^`（`:1408`）で正常分を戻す
+- (b) の陽性対照: `_reject_bad_notification_text` の先頭に `if True: return` を入れたコピーで
+  `scratch/turn-012-ascii-notify.mojo` を 1 回実測 → `notification payload bytes: 0x61 0x62 0xc3 0x28  byte_length 4`。
+  すぐ戻し、同じプローブが `invalid UTF-8 at byte 2 of notification payload` になることを確認（TRACE §4 に記載）
+- 既存テストの期待値変更: **ゼロ**。既存の 2 件（`test_timeout_below_minus_one_is_rejected` /
+  `test_a_budget_below_minus_one_is_usage`）は部分文字列 `"timeout_ms must be"` しか見ていないので文言変更後も無変更で通る。
+  `test_extended_datetime.mojo:787` の SKIP は**文言だけ**（判定ロジック不変）
+- 検証（所要つき）: `pixi run fmt` 差分なし（52 files unchanged）、`pixi run package` 警告ゼロ、
+  `pixi run test` 両サーバー **48 サマリ全部 0 failed**・exit 0、SKIP 集計行が各サーバーに 1 本、
+  `pixi run check` **6/6 PASS**（19:09:55 → 19:12:50 = **175 s**）。チェックリスト再実行は全 83 行が期待値
+  （`poll_external_call_symbols=2` / `src_PQfreemem_calls=3` / `src_PQexec_calls=4` 不変）
+- round 2 用プローブの実測: `turn-011-probe-grid` の P1 → `Usage`（P2 / P5 は不変）、`turn-011-sec-timeout` の
+  4 行（`wait_readable(2**32)` / `fetch_all(Int.MAX)` / `fetch_all(1e13)` / `wait_notification(2**32)`）が全部 `Usage`、
+  `wait_readable(300)` は `Timeout` のまま
+- 想定外: (1) PLAN (b) は `strlen` 長の `Span` を指定していたが、`strlen` を `external_call` で引くと
+  stdlib が同名シンボルを別シグネチャで束縛している risk があるため（`poll.mojo` モジュール docstring の注）、
+  `String(unsafe_from_utf8_ptr=)` で作った owned コピーの `as_bytes()` を検査する形にした。不正な `String` は
+  ローカルに留まり呼び出し側へは出ない。スキャナ `_utf8_first_invalid` は `decode_binary` から import（実装 1 つ）。
+  (2) F1 (b) ② の `LISTEN "ch\xC3\x28"` は **PG が受ける**（PG17 で実測。識別子 4 byte）。ただし `LISTEN` は
+  識別子しか取らないので、`DO $$ ... format('LISTEN %I', E'ch\xC3\x28') ... $$` 経由で送った（送る SQL 自体は ASCII）
+- PLAN 訂正 1 件: F1 (b) の「`strlen` 長の `Span`」→ 「owned `String` の `as_bytes()`」（上記 (1)。
+  PLAN は「`_validated_utf8` 相当で検査する」が本題で、長さの取り方は要件・決定に触れない）
+- やり直し: 2 回（`_assert_sql_ascii` のコンパイル: `raises PgError` の `try` 本体から `assert_equal` を呼べない →
+  値だけ取り出して外で assert / `get_text` の `StringSpan` を `String()` で包む）
+- 次への注意:
+  - round 2 の verify は PLAN F1 末尾「修正後にプローブで期待される変化」の数と TRACE §4 を照合すれば足りる。
+    `turn-011-sec-ascii-notify.mojo`（DB 名 `pq_sec_ascii`）は `scratch/turn-012-ascii-notify.mojo` が
+    `pq_test_ascii` 版として置き換わっているのでそちらを使う
+  - テストが作る `pq_test_ascii` DB は**消さずに残る**（両サーバー）。`42P04` を無視するので再実行は安全
+  - `empty polls while waiting` は例の形を変えたので値が動く（今回 17。`n = 1` の行は不変）
+  - 未確認: なし（F1 で足したコードはすべてテストが通る。`_reject_bad_notification_text` の
+    `offset < 0` 分岐だけは TRACE §3 #9 と同じ到達不能分岐で、どちらでも `TYPE_MISMATCH`）

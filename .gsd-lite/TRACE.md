@@ -6,8 +6,10 @@
 
 ## 1. 追従先チェックリストの最終実行
 
-スクリプト `.gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh` を T8 で再実行した生の出力。
-期待値は PLAN.md「追従先チェックリスト」の表。`absent` は 1 つも残っていない。
+スクリプト `.gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh` を **F1（turn 12）で再実行**した生の出力
+（生ログ: `scratch/turn-012-checklist.log`）。期待値は PLAN.md「追従先チェックリスト」の表。`absent` は 1 つも残っていない。
+T8（turn 10）の実行からの差は F1 が足した 5 行だけ: `init_TIMEOUT` 3 → 7、`test_poll_tests` 9 → 11、
+`test_async_tests` 29 → 30、`test_notify_tests` 9 → 11、`datetime_asia_tokyo` 2 → 3（F1 (c)⑤ の SKIP 文言に添えたコメントが当たる）。
 
 ```
 ## T1 持ち越し整理 / blackhole / SKIP / §4.9
@@ -18,7 +20,7 @@ testconn_PGCLIENTENCODING=1           # 期待 1
 timetz_time_of_day_is_not=0           # 期待 0
 timetz_out_of_range_sites=1           # 期待 1
 datetime_is_utc_calls=2               # 期待 2
-datetime_asia_tokyo=2                 # 期待 ≥ 1
+datetime_asia_tokyo=3                 # 期待 ≥ 1
 compose_blackhole=1                   # 期待 1
 compose_54399=1                       # 期待 1
 run_tests_SKIP=2                      # 期待 ≥ 2
@@ -41,7 +43,7 @@ conn_adopt_result_calls=1             # 期待 1
 errors_TIMEOUT=3                      # 期待 ≥ 2
 errors_six=0                          # 期待 0
 init_exactly_six=0                    # 期待 0
-init_TIMEOUT=3                        # 期待 ≥ 1
+init_TIMEOUT=7                        # 期待 ≥ 1
 ffi_PQsetSingleRowMode=3              # 期待 3（T2 で 2 → 3 に訂正済み）
 ffi_PQconnectStart_plain=1            # 期待 1
 testffi_PQsetSingleRowMode=1          # 期待 1
@@ -57,7 +59,7 @@ poll_EINTR=3                          # 期待 ≥ 1
 poll_monotonic=4                      # 期待 ≥ 1
 poll_external_call_symbols=2          # 期待 ≤ 3
 test_poll=exists                      # 期待 exists
-test_poll_tests=9                     # 期待 ≥ 7
+test_poll_tests=11                    # 期待 ≥ 7（F1 で +2）
 ## T3 / T4 AsyncConnection
 async_conn=exists                     # 期待 exists
 async_struct=1                        # 期待 1
@@ -75,9 +77,9 @@ src_PQfreemem_calls=3                 # 期待 3
 src_PQfreeCancel_calls=1              # 期待 1
 src_PQexec_calls=4                    # 期待 4
 test_async=exists                     # 期待 exists
-test_async_tests=29                   # 期待 ≥ 20
+test_async_tests=30                   # 期待 ≥ 20（F1 で +1）
 test_notify=exists                    # 期待 exists
-test_notify_tests=9                   # 期待 ≥ 8
+test_notify_tests=11                  # 期待 ≥ 8（F1 で +2）
 example_async=exists                  # 期待 exists
 example_notify=exists                 # 期待 exists
 pixi_example_tasks=2                  # 期待 2
@@ -172,6 +174,24 @@ PROGRESS 全 9 ターンの「未確認」行を列挙し、各行を **テス�
 | 8 | `PQfreeCancel` 欠落の陽性対照が見えない（turn 8） | 測定の検出力 | **契約外** | #2 と同一事象。コードレビュー担保（`src_PQfreeCancel_calls=1`） |
 | 9 | `_validated_utf8` の「スキャナが -1 を返した（stdlib と食い違った）」分岐（turn 9） | 到達不能な分岐 | **契約外** | `decode_binary.mojo:339-345`（`if offset < 0:` の分岐）。どちらに転んでも `TYPE_MISMATCH` を投げる（位置が出ないだけ）ので誤値は返らない |
 | 10 | `test_zero_copy` が 1 テスト 3.4〜3.9 s かかる原因（turn 9） | 性能の未調査 | **verify 申し送り** | turn 9 に A/B 済み（Phase 4 以前からの既存の性質。接続あたりの固定費）。正しさには影響しない。Phase 5 の「ベンチマーク」が引き取る |
+
+## 4. F1（verify round 1 の差し戻し）の期待結果 7 件（turn 12）
+
+PLAN F1「期待結果」の表の各行と、それを担うテスト。
+
+| # | 担うテスト関数 / 実測 | PASS |
+|---|---|---|
+| 1 | `test_timeout_above_c_int_max_is_rejected`（`test_poll.mojo`、経過 < 100 ms）/ `test_a_budget_above_c_int_max_is_usage_at_every_entry`（`test_async.mojo`、`wait_readable` / `fetch_all` / `wait_notification` / `connect_blocking` の 4 入口） | turn 12 |
+| 2 | `test_timeout_at_c_int_max_is_accepted`（1 byte 書いた pipe、`readable=True`・経過 < 100 ms） | turn 12 |
+| 3 | 既存の `test_timeout_below_minus_one_is_rejected` / `test_a_budget_below_minus_one_is_usage`（部分文字列 `"timeout_ms must be"` のまま無変更） | turn 12 |
+| 4 | `test_a_payload_that_is_not_utf8_is_rejected_and_dropped`（`TYPE_MISMATCH` / `invalid UTF-8 at byte 2` + `notification payload` / `"ab"` を含まない / `state()` = Idle） | turn 12 |
+| 5 | 同テスト後半（`NOTIFY pq_f1, 'ok'` が届く） | turn 12 |
+| 6 | 既存の `test_payload_survives_the_byte_limit_and_utf8`（`héllo`、期待値変更ゼロ） | turn 12 |
+| 7 | 4・5 とも `wait_notification` 経由（`None` に写らず `TYPE_MISMATCH` が伝播） | turn 12 |
+
+陽性対照（`_reject_bad_notification_text` の先頭に `if True: return` を入れたコピーで 1 回実測し、すぐ戻した）:
+`scratch/turn-012-ascii-notify.mojo` が `notification payload bytes: 0x61 0x62 0xc3 0x28  byte_length 4` を印字。
+検査を戻すと同じプローブが `PgError(kind=TypeMismatch, message=invalid UTF-8 at byte 2 of notification payload)`。
 
 契約外の提案（サブエージェントが挙げ、実装しなかったもの。Phase 5 以降の判断）:
 `AsyncConnection.wait_notifications(n, timeout_ms)` / `notifications()` 側での `PQstatus == CONNECTION_BAD` 先行チェック /

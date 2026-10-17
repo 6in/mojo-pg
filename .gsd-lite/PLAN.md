@@ -337,7 +337,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
   - 依存: T7
   - 並列サブ作業: なし（推奨本数: **0**。実行待ちと文書）
 
-- [ ] F1: verify round 1 の差し戻し — `timeout_ms` の上限（`c_int` 切り捨て・deadline 溢れ）+ `notifications()` の UTF-8 検証（D12 との整合）+ 文書・例 5 件
+- [x] F1: verify round 1 の差し戻し — `timeout_ms` の上限（`c_int` 切り捨て・deadline 溢れ）+ `notifications()` の UTF-8 検証（D12 との整合）+ 文書・例 5 件
   - 背景（VERIFICATION.md §4）: (1) `poll.mojo:165` の `c_int(timeout_ms)` は 2^31 以上で wrap し、`2^32+50` → 50 ms で `timeout`、`2^31` → 負値 = 無期限、`Int.MAX` → `fetch_all` が 0 ms で `TIMEOUT`（プローブ再現済み。`-1` 以外の「無期限」を渡す利用者が黙って誤動作する）。
     (2) `notifications()` は `relname` / `extra` を `unsafe_from_utf8_ptr` で `String` にし、`SQL_ASCII` DB の `NOTIFY ch, E'ab\xC3\x28\xF0'` が不正 UTF-8 の `String` になる（再現済み）。同じバイトは `get_text` が `TYPE_MISMATCH` にするので D12 の趣旨とパッケージ内で食い違う
   - **期待結果**（完了基準とテストはこの表だけを参照する。kind / 文言をここ以外に書かない）:
