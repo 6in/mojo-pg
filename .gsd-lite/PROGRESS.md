@@ -180,3 +180,54 @@
   `check` を回したあとは数分あけるか、実測 → `check` の順にする。初回の bench 環境作成は 1 分前後かかる
   （`pixi run bench-psycopg` の 1 回目）。`pixi.lock` は**コミット対象**で `git diff --stat pixi.lock` を PROGRESS に。
   受け入れは「Mojo の `decode` 列で binary < text が 2 回とも成立」。`check` の基線は 182 s に更新（閾値 247 s）
+
+## turn 7 — impl — T5 ベンチマーク（pixi feature `bench` + `bench_psycopg.py` + `pixi.lock` + 実測）
+- やったこと: `pixi.toml` に `[feature.bench.dependencies]` / `[feature.bench.tasks] bench-psycopg` /
+  `[environments] bench = { features = ["bench"], solve-group = "default" }` の 3 ブロックを `[tasks]` の後に追加
+  （`scratch/turn-001-pixi/pixi.toml` のコメントごとそのまま。`[dependencies]` は不変）。
+  `examples/bench_psycopg.py` は雛形を `cp`（`diff` 一致、先頭 docstring に `pixi run bench-psycopg` あり）。
+  実測 → `check` の順で回し、コミット `cab18b2`。サブエージェント 推奨 0 本 / 実 0 本（PLAN どおり親が全部）
+- 既存テストの期待値変更: **ゼロ**（`tests/` は 1 行も触っていない。コミットの 4 ファイルは
+  `pixi.toml` / `pixi.lock` / `examples/bench_psycopg.py` / `PLAN.md`）
+- (a) 環境: `pixi list -e default` の python **3.15.0 h0c7c799_101_cp315** / libpq **18.6 h4d8aa50_3** は不変、
+  `pixi list -e bench` は python **3.14.8 hbec3b18_102_cp314** + psycopg **3.3.4 pyh848bd53_0** +
+  psycopg-c **3.3.4 py314h3076274_0** + 同じ libpq **18.6 h4d8aa50_3**（solve-group が効いている）。
+  `git diff --stat pixi.lock` = `pixi.lock | Bin 62885 -> 91504 bytes`（`.gitattributes` の `-diff` 指定のため
+  行数ではなく Bin 表示。`grep -c psycopg-c pixi.lock` は **0 → 7**）
+- (c) 堅牢性（`scratch/turn-007-bench-robust.{sh,log}`）: `password=wrong` は
+  `failed: OperationalError connection failed: ... FATAL:  password authentication failed for user "pq"` の
+  **1 行 + exit 1**、`port=54390 connect_timeout=3` は `... Connection refused` + libpq 自身のヒント行で
+  **物理 2 行 + exit 1**。どちらも `Traceback` **0 行**、`^failed: OperationalError` **1 行**
+- (d) 実測（`scratch/turn-007-bench.log`。アイドル時・`check` の**前**。loadavg 0.74 → 0.92）:
+  Mojo `decode` は pass1 binary **12 / 11 / 11 ms** vs text **42 / 42 / 44 ms**、pass2 binary **12 / 12 / 14 ms** vs
+  text **41 / 41 / 41 ms** → **binary < text が 2 回とも成立**（受け入れ充足。RESEARCH 実測 12 vs 44 と同じ桁）。
+  Mojo 合計は binary 50 / 50 / 51 と 47 / 49 / 53、text 83 / 86 / 88 と 81 / 81 / 83（合計も binary 勝ち、記録のみ）。
+  psycopg は **impl=c** / 3.3.4 / libpq 180006 / server 170011 / python 3.14.8 で、decode binary 35 / 35 / 34 と
+  34 / 34 / 34 ms、text 44 / 45 / 41 と 42 / 41 / 42 ms、合計 binary 71 / 73 / 70 と 71 / 70 / 70 ms。
+  ヘッダ（README の計測環境欄の原本）: Ubuntu 24.04.5 LTS / Linux 6.8.0-147-generic aarch64 / nproc 4 /
+  MemTotal 16,337,280 kB / Mojo 1.1.0 (8189361e) / PostgreSQL **17.11 (Debian 17.11-1.pgdg13+2)**
+- 検証と所要（単位付き）: `pixi run check` **6/6 PASS**（`final_check: PASS`、`FAIL` の行 0。
+  23:53:32 → 23:56:21 = **169 s**。基線 182 s、閾値 247 s 以内）。
+  bench 2 本の所要: `pixi run bench`（Mojo）と `pixi run bench-psycopg` の 4 回ぶんを含む (d) の 1 パスが
+  23:53:01 → 23:53:08 = **7 s**（1 本あたり 1〜2 s）。**bench 環境の初回作成は 3 s**（`scratch/turn-007-bench-first.log`。
+  PLAN の見込み「1 分前後」より速かった — 既に solve 済みのパッケージがキャッシュにあったため）。
+  チェックリストの T5 行は全行期待値（`pixi_feature_bench`=2 / `pixi_bench_psycopg`=1 / `pixi_environments`=1 /
+  `lock_psycopg_c`=7（≥ 3）/ `bench_py`=exists / `bench_py_binary`=2（≥ 1）/ `bench_py_psycopg_error`=1（≥ 1））。
+  参考: `examples_pixi_run`=**2**（T6 で 7 に）、`src_def_ref_return`=0 / `tests_files_count`=24 / `test_file_count`=24
+  （T7 の期待値どおり）。生ログ: `scratch/turn-007-{bench-first,bench-robust,bench,checklist,check}.log`
+- 想定外: (1) **PLAN 訂正 1 件**（PLAN T5 (c) に追記）: 「`failed: OperationalError ...` の **1 行**」→
+  「**1 レコード**」。接続拒否では libpq の message 自体が `Is the server running on that host ...` の
+  ヒント行を含むので物理 2 行になる。判定は `^failed: OperationalError` が 1 行 + `Traceback` 0 行 + exit 1。
+  (2) 初回の bench 環境作成が 3 s（見込み 1 分前後）。遅いほうに外れていないので追わない。
+  (3) `pixi` が PATH に無く `pixi: コマンドが見つかりません`（Bash ツールは `.bashrc` を読まない構成）。
+  **`/home/parallels/.pixi/bin/pixi` を絶対パスで呼ぶ**ことで解決。`/usr/bin/time` も無いので所要は `date -Iseconds` で挟む
+- やり直し: 0 回
+- 次への注意: 次は T6（`README.md` + `LICENSE` + examples 5 本の docstring）。サブエージェント **1 本**
+  （A: `LICENSE` 取得 + examples 5 本の docstring、親: `README.md` + (d)）。
+  **`pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで**（サブエージェントにも伝える）。
+  (a) の LICENSE 取得は `pixi run python <scratch>/turn-00N-fetch-license.py` で（`curl` は allowlist 外）。
+  README のベンチ節に転記する数値は **`scratch/turn-007-bench.log`** が原本で、3 回の値を `a / b / c` で並べる
+  （Mojo decode: binary `12 / 11 / 11`、text `42 / 42 / 44`。計測環境は上の「ヘッダ」行をそのまま使う。
+  PostgreSQL は **17.11**、psycopg **3.3.4** + psycopg-c 3.3.4 impl=c、python **3.14.8**、libpq 18.6 conda-forge）。
+  1 行要約の「N 倍」は decode で **約 3.7 倍**（42 / 11.3）。再現手順の「初回は環境作成で 1 分前後」は
+  実測 3 s だったので「初回は bench 環境の作成が入る」程度の書き方にする。`check` の基線は 169 s に更新（閾値 247 s）
