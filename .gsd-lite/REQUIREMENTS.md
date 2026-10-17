@@ -11,13 +11,13 @@ Windows コードパスのレビュー、Phase 4 からの持ち越し整理。
 - `examples/`: hello_libpq / basic / params / binary / async_query / listen_notify / bench_formats の 7 本。`pixi run check` の 4/6 段が
   bench 以外を実行する
 - `examples/bench_formats.mojo` は 10 万行 × 5 列の text vs binary を測る（warm-up 1 + 3 回、exec / decode を分けて印字）。psycopg 比較は無い
-- psycopg 3.3.3 はホストの pyenv python3 にあるが pixi 環境には python が無い
+- psycopg 3.3.3 はホストの pyenv python3 にある。pixi 環境には python 3.15.0（mojo の依存）が入っているが psycopg は無い（research turn 1 で訂正。RESEARCH §1.2）
 - `tests/docker-compose.yml`: pg17 (54317) / pg14 (54314) / blackhole (54399)。`check` は Phase 4 末で 167〜187 s、`test_leak` 74 s
 - Windows: `_platform/poll.mojo` の `comptime if` の `else` に `WSAPoll` 分岐（未コンパイル・未検証、docstring 明記済み）。
   `_ffi/loader.mojo` の探索リストは linux / macos のみで `libpq.dll` の行が無い（HANDOFF §5.1 は Windows: `libpq.dll`）
 - Phase 4 VERIFICATION §5 の持ち越し: `fetch_all` が BAD にならない `CONNECTION` エラーで busy-spin し得る（`async_conn.mojo:1453-1461`）／
   `_after_send` で `PQflush` が -1 のとき pq は `IDLE`、libpq は `BUSY`／`tests/test_notify.mojo` の `SQL_ASCII` テストが `pq_test_ascii` DB を残す／
-  `test_zero_copy` が 1 テスト 3.4〜3.9 s（接続あたりの固定費。Phase 4 以前から）
+  `test_zero_copy` が 1 テスト 3.4〜3.9 **ms**（Phase 4 は TestSuite の `PASS [ n ]` を秒と読み違えていた。research turn 1 実測: 12 件 49〜56 ms、ビルド済みバイナリ 52 ms。RESEARCH §2.5）
 - Phase 4 TRACE 末尾のサブエージェント契約外提案 7 件: `AsyncConnection.wait_notifications(n, timeout_ms)`／`notifications()` の `PQstatus == CONNECTION_BAD` 先行チェック／
   `UNLISTEN` 後に来ないことのテスト／LISTEN していないチャンネルの無視／`LISTEN "Mixed Case"`／UTF-8 スキャナ単体に `f4 90 80 80` と `f5 80 80 80` の 4 バイト境界／
   検証失敗に専用の `PgErrorKind.ENCODING`
@@ -80,8 +80,9 @@ Windows コードパスのレビュー、Phase 4 からの持ち越し整理。
 
 - `fetch_all`: `kind == CONNECTION` なら `PQstatus` に関わらず drain を打ち切る（1 分岐 + テスト 1 件）
 - `_after_send`: `PQflush` が -1 のとき状態を `BUSY` に置く（1 分岐 + テスト 1 件。到達困難なら陽性対照はコードレビュー）
-- `test_zero_copy` の接続固定費（D12）: 原因を特定して TRACE に記録する（計測: `mojo run` 単体の所要と、`check` 内の所要 2 s との差も説明する）。
-  原因がテスト側（`_connect` の作り、1 テストごとの接続数、フィクスチャ）なら直す。src 側なら直さず README の既知の制限か VERIFICATION 残留リスクに書く
+- `test_zero_copy` の接続固定費（D12）: **research turn 1 で原因特定済み** — TestSuite の `PASS [ n ]` はミリ秒で、1 テスト 3.4〜3.9 ms は `test_result` と同じ接続 1 本ぶん。
+  `mojo run` の壁時計 1.6〜1.8 s はコンパイル、ビルド済みバイナリは 52 ms（RESEARCH §2.5、`scratch/turn-001-zerocopy-time.log`）。直すものは無い。
+  impl は計測表を TRACE に転記するだけ（D12 の「テスト側 / src 側」のどちらにも該当しない）
 
 ### 4.6 契約外提案 7 件（D5。すべて採用）
 
