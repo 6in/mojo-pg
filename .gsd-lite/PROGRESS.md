@@ -55,3 +55,39 @@
   `_string_payload` は `decode_binary.mojo` の private だが `result.mojo` / `tests/test_decode_binary.mojo` から名前で import している（T7 の UTF-8 検証もこの 1 箇所に足せる）。
   `run_test_cmd` は `build/last_test.log` を毎ファイル上書きするので、T3 以降で新しいテストを足しても集計はそのまま効く。`blackhole` は compose に入ったので `db-up` 済みの環境では 54399 が常に `Up`（T3 (c) ⑦ の SKIP 分岐は実際には通らない見込み）。
   `PgError` を値として返す場面では `^` が必要（想定外 (1)）
+
+## turn 4 — impl — T2 Phase 4 の土台（adopt_result / TIMEOUT / _ffi 2 本 / _platform/poll + test_poll）
+- やったこと: (a)〜(f) を 1 人で実装（並列サブ作業は推奨 1 本なのでサブエージェントは使わず。推奨 1 本 / 実 0 本）。
+  `_take_result` 本文 + `_error_field` を `result.mojo` の `adopt_result` へ移して `_take_result` は 1 行委譲（成功判定に `PGRES_SINGLE_TUPLE` 追加）、
+  `PgErrorKind.TIMEOUT`（値 6 / `Timeout`）、`_ffi` に `PQconnectStart` と `PQsetSingleRowMode`（名前表 53 → 55）、
+  `src/pq/_platform/{__init__,poll}.mojo`（`poll_socket` + `PollEvents`、POSIX と WSAPoll を `comptime if` で分岐）、`tests/test_poll.mojo` 9 件
+- 既存テストの期待値変更: **ゼロ**（`test_ffi.mojo:103` の `len(names)` 53 → 55 は追加した 2 バインドの件数そのもの。
+  他は `test_errors` に 1 件、`test_poll` に 9 件の追加だけ。同期側 `_take_result` の分類・文言は 1 字も変えていない）
+- P4（`EINTR` はコードレビュー）: `src/pq/_platform/poll.mojo:236` が `err == ErrNo.EINTR`、`:238` が `deadline - monotonic()` の残り再計算、
+  `:243` が `remaining = (left + 999_999) // 1_000_000`（切り上げ。0 に落として probe 化させない）、`:228` が `deadline`。`timeout_ms == -1` は再計算せず `continue`
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（22 ファイル × 2、全サマリ `0 failed`、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、16:04:58 → 16:09:45 = **287 s**）、
+  `pixi run check` **6/6 PASS**（16:15:57 → 16:18:10 = **133 s**。T1 の 152 s より短いのは leak が 1 サーバーのみの分の揺らぎ）、`pixi run package` 警告ゼロ。
+  `test_poll` 単体は 9 件 PASS / **0.13 s**（サーバー不要）
+- チェックリスト（T2 行）: `conn_def_take_result=1` / `conn_def_error_field=0` / `result_def_adopt_result=1` / `result_def_error_field=1` / `result_SINGLE_TUPLE=3`（期待 ≥1） /
+  `conn_adopt_result_calls=1` / `errors_TIMEOUT=3`（≥2） / `errors_six=0` / `init_exactly_six=0` / `init_TIMEOUT=1`（≥1） / `ffi_PQsetSingleRowMode=3`（PLAN 訂正、下記） /
+  `ffi_PQconnectStart_plain=1` / `testffi_PQsetSingleRowMode=1` / `testffi_PQconnectStart_plain=1` / `testffi_symbol_count_53=0` / `_55=1` /
+  `platform_init=exists` / `platform_poll=exists` / `poll_def_poll_socket=1` / `poll_comptime_if=1` / `poll_WSAPoll=10`（≥1） / `poll_EINTR=3`（≥1） / `poll_monotonic=4`（≥1） /
+  `poll_external_call_symbols=2`（≤3） / `test_poll=exists` / `test_poll_tests=9`（≥7） — **全部期待値**。全体行は `tests_files_count=22` / `test_file_count=22`（T8 で 24）
+- PLAN 訂正 3 件:
+  - `ffi_PQsetSingleRowMode` の期待 **2 → 3**（`mojo format` が `_dl_sym[...](self._lib, "PQsetSingleRowMode")` を 3 行に割るので、宣言 1 + 代入 1 + 名前文字列 1 で 3 行当たる）
+  - T7 行の `result_unsafe_ptr` 現在値 **4 → 7**、期待 **3 → 6**（`_error_field` / `adopt_result` が `result.mojo` に移り、libpq のエラー文字列を読む `unsafe_from_utf8_ptr` が 3 行増えた。
+    いずれも列値ではないので UTF-8 検証の対象外）。同じ行の `utf8_unsafe_span` は 3 → 2（T1 の `_string_payload` 一元化による。T7 の期待 0 は変えない）
+  - T2 の対象ファイルに `src/pq/transaction.mojo`（`_error_field` の import 元）と `src/pq/_ffi/__init__.mojo`（「50 libpq entry points」→ 55）を追記
+- 想定外: (1) `transaction.mojo:75` が `from pq.connection import Connection, _error_field` で移動先を参照していた（PLAN の対象一覧漏れ。`pq.result` から取るよう 1 行修正）。
+  (2) `FileDescriptor(fd).write("A")` は一時値への mutating 呼び出しで弾かれる → `var out = FileDescriptor(fd); out.write("A")`（probe と同じ形に戻した）。
+  (3) `comptime if` の非選択側に置いた `external_call["WSAPoll"]` は Linux でリンクエラーにならない（分岐ごと codegen されない。`package` も `test` も通った）
+- やり直し: 2 回（上記 (1)(2)。どちらもコンパイルエラー 1 回ずつで直った）
+- 次への注意:
+  - 確認済み: `adopt_result(pq, conn, res)` はモジュール関数で、`async_conn` からは `from pq.result import Result, ResultFormat, adopt_result` で取れる（`connection.mojo` と同じ形）。
+    `poll_socket(fd, want_read, want_write, timeout_ms)` は `timeout` を例外にせず `PollEvents.timeout` で返すので、`TIMEOUT` の文言を作るのは T3 の `wait_readable` / `wait_writable` 側。
+    `want_read = want_write = False` は純粋な sleep として使える（`test_poll.mojo:176-188` が陽性）。`_platform` は `pq` 直下に再エクスポートしていない。
+    `PGRES_SINGLE_TUPLE` は既に `adopt_result` の成功判定に入っているので T4 の single-row は `set_single_row_mode` のガードだけ足せばよい
+  - 未確認: `poll.mojo` の Windows 分岐（`WSAPoll` / `_WsaPollFd` 16 byte / 別の定数値）は**コンパイルすらされていない**（`comptime if` の非選択側）。
+    誤った値が黙って返る経路ではなく「Windows では動かない可能性」なので、処分先は T8 (d) の「未確認の処分」= モジュール docstring の **unverified** 表記を残すことで足りる（P8）。
+    `EINTR` の実挙動（シグナル下での再試行）は未確認のまま（RESEARCH §2.3 どおりテストしない。コードレビューで代替、上の P4 行）
+  - `check` は 133 s。T3 で `test_async`（pg_sleep 2 s ×2 サーバー）が乗ると PLAN の見込み 260〜300 s に近づく見込み

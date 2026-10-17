@@ -66,7 +66,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 | `test_extended_datetime_tests` | REQ §6-3 の timetz テスト 1 件は `test_decode_binary.mojo` 側。ここは変化なし | 19 | **19**（T1。`test_timestamp_params_round_trip` は書き換えで件数不変） |
 | `conn_def_take_result` / `conn_def_error_field` / `result_def_adopt_result` / `result_def_error_field` / `result_SINGLE_TUPLE` / `conn_adopt_result_calls` | D5: `adopt_result` と `_error_field` を `result.mojo` へ。`Connection._take_result` は 1 行委譲 | 1 / 1 / 0 / 0 / 0 / 0 | **1 / 0 / 1 / 1 / ≥ 1 / 1**（T2） |
 | `errors_TIMEOUT` / `errors_six` / `init_exactly_six` / `init_TIMEOUT` | D11: `errors.mojo:3,13`「six」→ seven、`__init__.mojo:174`「exactly six」→ seven + 箇条書きに `TIMEOUT` | 0 / 2 / 1 / 0 | **≥ 2 / 0 / 0 / ≥ 1**（T2。`__init__.mojo:29,108` の「six string-shaped OIDs」は別物で残す） |
-| `ffi_PQsetSingleRowMode` / `ffi_PQconnectStart_plain` / `testffi_*` / `testffi_symbol_count_53` / `_55` | §4.5: `_ffi/functions.mojo` に 2 バインド（宣言 + `_dl_sym`）、`tests/test_ffi.mojo:40-92` の名前表と `:102` の件数 53 → 55 | 0 / 0 / 0 / 0 / 1 / 0 | **2 / 1 / 1 / 1 / 0 / 1**（T2） |
+| `ffi_PQsetSingleRowMode` / `ffi_PQconnectStart_plain` / `testffi_*` / `testffi_symbol_count_53` / `_55` | §4.5: `_ffi/functions.mojo` に 2 バインド（宣言 + `_dl_sym`）、`tests/test_ffi.mojo:40-92` の名前表と `:102` の件数 53 → 55 | 0 / 0 / 0 / 0 / 1 / 0 | **3 / 1 / 1 / 1 / 0 / 1**（T2。**訂正（T2 実装時）**: `ffi_PQsetSingleRowMode` の期待 2 → **3**。`mojo format` が `_dl_sym[...](self._lib, "PQsetSingleRowMode")` を 3 行に割るため宣言 1 + 代入 1 + 名前文字列 1 で 3 行当たる） |
 | `platform_init` / `platform_poll` / `poll_*` / `test_poll` / `test_poll_tests` | §4.1: `src/pq/_platform/__init__.mojo` + `poll.mojo`、`tests/test_poll.mojo` | absent | **exists / exists / `def poll_socket` 1 / `comptime if` ≥ 1 / `WSAPoll` ≥ 1 / `EINTR` ≥ 1 / `monotonic` ≥ 1 / `external_call["` ≤ 3 / exists / ≥ 7**（T2） |
 | `async_conn` / `async_struct` / `async_state_struct` / `pollstate_struct` / `notification_struct` / `async_public_defs` | §4.2 / §4.3: `src/pq/async_conn.mojo` | absent | **exists / 1 / 1 / 1 / 1 / ≥ 20**（T3 で struct 4 つと接続〜`fetch_all`、T4 で cancel / notify / single-row が加わる） |
 | `async_called_while` / `async_cancel_insecure` | USAGE 格子のメッセージ（決めた事項 8）、P31 の docstring | absent | **≥ 6 / ≥ 1**（T3 / T4） |
@@ -75,7 +75,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
 | `test_async` / `test_async_tests` / `test_notify` / `test_notify_tests` | §4.7 | absent | **exists / ≥ 8（T3）→ ≥ 20（T5）/ exists / ≥ 3（T4）→ ≥ 8（T5）** |
 | `example_async` / `example_notify` / `pixi_example_tasks` / `final_check_examples` / `final_check_run_logged_examples` | §4.6: examples 2 本、`pixi.toml:17-19` の並び、`final_check.sh:122-124` | absent / absent / 0 / 0 / 3 | **exists / exists / 2 / 2 / 5**（T4） |
 | `leak_tests` / `leak_Fourteen` / `leak_async_import` | §5.2: `test_leak.mojo:33`「Fourteen tests」→ Eighteen + 箇条書きに Phase 4 の段、`:55-60` の所要 | 14 / 1 / 0 | **18 / 0 / ≥ 1**（T6） |
-| `utf8_unsafe_span` / `result_unsafe_ptr` / `utf8_from_utf8` / `utf8_scanner_def` / `utf8_invalid_message` / `docs_not_validated` / `test_decode_binary_utf8_tests` | §4.10: `result.mojo:435,765`、`decode_binary.mojo:715,725`、docstring 4 箇所（`result.mojo:712`、`decode_binary.mojo:651`、`__init__.mojo:111`、`test_connection.mojo:952`） | 3 / 4 / 0 / 0 / 0 / 4 / 0 | **0 / 3 / ≥ 2 / 1 / ≥ 1 / 0 / ≥ 5**（T7。`result_unsafe_ptr` の残り 3 は `column_name` / `affected_rows` / `command_tag` で、列名・タグは検証対象外） |
+| `utf8_unsafe_span` / `result_unsafe_ptr` / `utf8_from_utf8` / `utf8_scanner_def` / `utf8_invalid_message` / `docs_not_validated` / `test_decode_binary_utf8_tests` | §4.10: `result.mojo:435,765`、`decode_binary.mojo:715,725`、docstring 4 箇所（`result.mojo:712`、`decode_binary.mojo:651`、`__init__.mojo:111`、`test_connection.mojo:952`） | 3 / 4 / 0 / 0 / 0 / 4 / 0 → **2 / 7**（T1・T2 後の実測） | **0 / 6 / ≥ 2 / 1 / ≥ 1 / 0 / ≥ 5**（T7。**訂正（T2 実装時）**: `result_unsafe_ptr` の現在値 4 → **7**、期待 3 → **6**。T2 が `_error_field` / `adopt_result` を `result.mojo` に移し、libpq のエラー文字列を読む `unsafe_from_utf8_ptr` が 3 行増えたため。残り 6 は `column_name` / `affected_rows` / `command_tag` + エラー文字列 3 で、いずれも列値ではないので UTF-8 検証の対象外。`utf8_unsafe_span` の現在値 3 → 2 は T1 の `_string_payload` 一元化による） |
 | `src_def_ref_return` / `tests_files_count` / `test_file_count` | `ref` を返す公開 API を作らない（Phase 3 P19 の継続）/ テストファイル数 | 0 / 21 / 21 | **0 / 24 / 24**（T8 で確認。`test_poll` / `test_async` / `test_notify`） |
 
 ## Tasks
@@ -125,7 +125,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: (h) §4.9 の `_string_payload` + `decode_binary[String]` の書き換え + `tests/test_decode_binary.mojo` の 1 件（対象: `src/pq/decode_binary.mojo`, `tests/test_decode_binary.mojo`。**`result.mojo` は触らない**。(c) の timetz もこの 2 ファイルなので A に渡す）
     - 親: (a)(b)(d)(e)(f)(g) + `result.mojo` の `get_text` を `_string_payload` に差し替え + (i)
 
-- [ ] T2: Phase 4 の土台 — `adopt_result` の抜き出し（D5）+ `PgErrorKind.TIMEOUT`（D11）+ `_ffi` 2 バインド（§4.5）+ `_platform/poll`（§4.1 / D7）+ `tests/test_poll.mojo`
+- [x] T2: Phase 4 の土台 — `adopt_result` の抜き出し（D5）+ `PgErrorKind.TIMEOUT`（D11）+ `_ffi` 2 バインド（§4.5）+ `_platform/poll`（§4.1 / D7）+ `tests/test_poll.mojo`
   - 完了基準:
     - (a) D5 / RESEARCH §3-3 / P27: `src/pq/connection.mojo:64-82` の `_error_field` と `:613-691` の `_take_result` 本文を `src/pq/result.mojo` のモジュール関数
       `def adopt_result(pq: Pointer[LibpqFFI, MutUntrackedOrigin], conn: PGconnPtr, res: PGresultPtr) raises PgError -> Result`（**決めた事項 4**）に移す。
@@ -152,6 +152,7 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - (f) `pixi run test` 両サーバー PASS（**既存テストの期待値変更ゼロ**。`test_errors` / `test_ffi` / `test_poll` の追加分だけ）、`pixi run package` 警告ゼロ、`pixi run check` 6/6。
       チェックリストの T2 行（`conn_*` / `result_*` / `errors_*` / `init_exactly_six` / `init_TIMEOUT` / `ffi_*` / `testffi_*` / `platform_*` / `poll_*` / `test_poll*`）が期待値
   - 対象: `src/pq/connection.mojo`, `src/pq/result.mojo`, `src/pq/errors.mojo`, `src/pq/__init__.mojo`, `src/pq/_ffi/functions.mojo`, `src/pq/_platform/__init__.mojo`, `src/pq/_platform/poll.mojo`, `tests/test_errors.mojo`, `tests/test_ffi.mojo`, `tests/test_poll.mojo`
+    （**追加（T2 実装時）**: `src/pq/transaction.mojo` — `from pq.connection import Connection, _error_field`（`:75`）があり、移動先の `pq.result` から取るよう 1 行直す。PLAN の対象一覧に漏れていた。`src/pq/_ffi/__init__.mojo` の「50 libpq entry points」も 55 に）
   - 依存: T1
   - 並列サブ作業（推奨本数: **1**。`_platform/poll` + `test_poll` は 2 ファイル完結で他と重ならない）:
     - A: (d)(e) `src/pq/_platform/__init__.mojo` + `src/pq/_platform/poll.mojo` + `tests/test_poll.mojo`（契約は決めた事項 1。**最初に `poll_socket` 1 本 + テスト①をコンパイルしてから**残りを書く）
