@@ -1,10 +1,11 @@
 # VERIFICATION — phase4-async-cancel-notify
 
-- 作成: 2026-10-17 / gsd-lite-verify（turn 11 = round 1）
-- 対象: `git diff main...HEAD`（`20524cd` 起点、19 コミット。`src/` `tests/` `examples/` `pixi.toml` で 28 ファイル +5,482 / -242）
+- 作成: 2026-10-17 / gsd-lite-verify（turn 11 = round 1、turn 13 = round 2）
+- 対象: `git diff main...HEAD`（`20524cd` 起点、round 2 時点で 22 コミット。`src/` `tests/` `examples/` `pixi.toml` で 28 ファイル +5,851 / -242）
 - 対象リポジトリの `CLAUDE.md` / `AGENTS.md`: 無し（規約観点は HANDOFF.md §7・§9・§10 と PLAN「決めた事項」1〜17）
-- 判定: **round 1 = 指摘あり（差し戻し）**。誤動作を伴う指摘 1 件（`timeout_ms` の 32 bit 切り捨て）+ D12 との整合 1 件（通知文字列の UTF-8 無検証）を PLAN **F1** に
-  まとめた（文書・例の軽微 5 件を同梱）。受け入れ基準 §5.1 の 4 件・§5.4 の 5 項目はすべて満たしており、`check` は 6/6 PASS。round 2 は F1 の差分の回帰 + §3 の格子の再確認だけを行う
+- 判定: **round 2 = 合格（`main` へローカルマージ）**。§8 に round 2 の照合結果。
+  round 1（§4）は指摘あり: 誤動作を伴う指摘 1 件（`timeout_ms` の 32 bit 切り捨て）+ D12 との整合 1 件（通知文字列の UTF-8 無検証）を PLAN **F1** に
+  まとめた（文書・例の軽微 5 件を同梱）。受け入れ基準 §5.1 の 4 件・§5.4 の 5 項目は round 1 時点で満たしており、F1 はそれを崩さず差し戻し分を全部解消した
 - 実行エンジン: Claude Code（Claude Fable 5.1）
 
 ## 1. round 1 の進め方
@@ -93,3 +94,45 @@ TRACE.md §2 の対応表（REQ §5.1 の 4 件 / §5.2 の 4 項目 / §5.3 / �
 ## 7. マージ
 
 - round 1 は差し戻しのためマージしない。`git remote get-url origin` → `No such remote 'origin'`（ローカルのみ）なので、round 2 合格時は `main` へ `--no-ff` でローカルマージする
+- round 2（turn 13）: 合格。`git checkout main` → `git merge --no-ff gsd-lite/phase4-async-cancel-notify`（結果は PROGRESS turn 13）。ブランチは削除せず残す
+
+## 8. round 2（turn 13）— F1 の回帰 + round 1 格子の再確認
+
+スキルの規則どおり新しいクラスの探索はせず、(1) F1 の差分（`4616ef7..HEAD`、`src/` 3 ファイル + `examples/` 1 + `tests/` 4、+296 / -45）の通読、
+(2) PLAN F1 末尾「修正後にプローブで期待される変化」の数の照合、(3) §3 の格子プローブの再実行、(4) クリーンな `pixi run check`、(5) 追従先チェックリストの再実行、を行った。
+サブエージェントは使っていない（差分が小さく、親の通読で足りる）。
+
+### 8.1 「修正後にプローブで期待される変化」の照合（全部一致）
+
+| 期待（PLAN F1 末尾） | round 2 の実測 |
+|---|---|
+| `turn-011-probe-grid` P1: `timeout=True elapsed_ms=50` → **`USAGE` raise** | `P1 raised Usage 'timeout_ms must be -1, 0 or at most 2147483647 (got 4294967346)'` |
+| P2〜P5 は不変 | P2 `Timeout 'fetch_all timed out after 0 ms'` state=Busy → 復帰 Idle / P5 `Timeout 'connect_blocking timed out after 0 ms'` / P3 3 回とも `Busy`（round 1 の「3 回中 1 回 `Sending`」は今回 0 回。`PQflush` = 1 の非決定は既知） / P4 `Connection` elapsed 1 ms |
+| `turn-011-sec-timeout` の 4 行（`wait_readable(2**32)` / `fetch_all(Int.MAX)` / `fetch_all(1e13)` / `wait_notification(2**32)`）が全部 `USAGE`、`wait_readable(300)` は `Timeout` | 4 行とも `Usage`（`got 4294967296` / `9223372036854775807` / `10000000000000` / `4294967296`）、経過 0 ms。`fetch_all` の拒否後は `Busy` のまま → drain で `Idle`。`wait_readable(300)` は `Timeout` 303 ms |
+| `turn-011-sec-ascii-notify`（DB 名 `pq_test_ascii` 版 = `turn-012-ascii-notify.mojo`）が **`TYPE_MISMATCH` `invalid UTF-8 at byte 2 of notification payload`** | `PgError(kind=TypeMismatch, message=invalid UTF-8 at byte 2 of notification payload)` |
+| `check` 5/6 段 47 本 `0 failed`、`test_poll` 9 → **11**、`test_async` 29 → **30**、`test_notify` 9 → **10〜11** | 47 サマリ全部 `0 failed`（`grep 'tests run' \| grep -vc ' 0 failed'` = 0）。`test_poll` 11 / `test_async` 30 / `test_notify` 11（両サーバー） |
+
+### 8.2 F1 差分のレビュー（`4616ef7..HEAD`）
+
+- **表 1〜3（`timeout_ms` 上限）**: `_platform/poll.mojo` に `TIMEOUT_MS_MAX = 2_147_483_647` と `_reject_bad_timeout` を 1 定義だけ置き、`poll_socket` と `async_conn` の 6 入口（`wait_readable` / `wait_writable` / `connect_blocking` ×2 / `fetch_all` / `wait_notification`）
+  がこれを呼ぶ。import の向きは `async_conn → _platform/poll`（決めた事項 17 を維持）。上限が 2^31-1 なので `timeout_ms * 1_000_000` ≤ 2.15e15 で deadline の Int64 溢れも消える（コメントに明記）。
+  既存の `< -1` 文言は `"timeout_ms must be -1, 0 or positive"` → `"... or at most 2147483647"` に変わったが、既存テスト 2 件は `"timeout_ms must be"` しか見ていないので**期待値変更ゼロ**（コードレビューで確認）
+- **表 4〜7（通知の UTF-8）**: `notifications()`（`async_conn.mojo:1381-1417`）は `_pending` を `found` に引き取ってから `PQnotifies` を回し、`relname` / `extra` を owned `String` に複製 → **`PQfreemem` を先に呼ぶ**（`:1399`）→ `_reject_bad_notification_text` で channel → payload の順に検査 →
+  失敗なら `self._pending = found^` で正常分を戻してから raise（`:1408`）。`PGnotify` は raise 経路でも必ず解放され（`src_PQfreemem_calls=3` 不変）、不正 UTF-8 の `String` は関数内に留まって外へ出ない。
+  `wait_notification`（`:1583-1588`）は `TIMEOUT` だけを `None` に写すので `TYPE_MISMATCH` はそのまま伝播（表 7）。スキャナは `decode_binary._utf8_first_invalid` を import（実装 1 つ）
+- PLAN からの逸脱 1 件は妥当: `strlen` 長の `Span` ではなく owned `String` の `as_bytes()` を検査（`external_call["strlen"]` が stdlib の同名シンボル束縛と衝突し得る。RESEARCH §0.5 ☆ と同じ理由）
+- **文書・例 5 件**: ① `connect_blocking` の Raises に `SERVER`（2 形の docstring + `__init__.mojo` の表） ② `fetch_all` / `connect_blocking` に「`0` は予算なし = 即 `TIMEOUT`」（`__init__.mojo` の Timeouts 項にも） ③ TRACE §1 を turn 12 の再実行で差し替え（round 2 の再実行と**完全一致**、diff なし）
+  ④ `examples/async_query.mojo` が `None` + `IDLE` まで回る形（`results` カウンタで「結果なし」を判定） ⑤ `test_extended_datetime.mojo:787` の SKIP 文言に `(main)`（77 桁・1 行、`^SKIP ` 維持）
+- テストの妥当性: `test_a_budget_above_c_int_max_is_usage_at_every_entry` は 4 入口 + 経過 < 1,000 ms + 拒否後の `Busy` → `fetch_all(5000)` で回収まで断定。`test_timeout_at_c_int_max_is_accepted` が上限ちょうどを受け入れる陽性側。
+  `test_a_payload_that_is_not_utf8_is_rejected_and_dropped` / `test_a_channel_...` は `_assert_sql_ascii` で `SQL_ASCII` DB に着いていることを先に確かめる（UTF-8 DB だとサーバーが弾いて偽陽性になる）。`"ab"` が message に無いことも断定
+- セキュリティ観点の再確認: 新しい外部入力は通知バイト列のみで、検証前にコードポイント走査しない（`as_bytes()` だけ）。`CREATE DATABASE pq_test_ascii` はテストが固定文字列で発行し、両サーバーに残る（PROGRESS turn 12 に明記。`42P04` を無視するので再実行は安全）。秘密情報・インジェクション経路の追加なし
+
+### 8.3 検証コマンド（round 2）
+
+- `pixi run check` **6/6 PASS**（`scratch/turn-013-check.log`、19:18:02 → 19:20:49 = **167 s**。1/6 fmt 差分なし、2/6 precompile、3/6 docstring 診断 0、4/6 examples 5 本、5/6 両サーバー 47 サマリ `0 failed` + `skipped 1` ×2、6/6 `matched lines: 0`）
+- 追従先チェックリスト再実行（`scratch/turn-013-checklist.log`）: turn 12 の出力と **diff なし**（全 85 行期待値。`test_poll_tests=11` / `test_async_tests=30` / `test_notify_tests=11` / `src_PQfreemem_calls=3` / `src_PQexec_calls=4` / `poll_external_call_symbols=2`）
+- 作業木は clean（`git status --short` 空）、`git remote get-url origin` → `No such remote 'origin'`
+
+### 8.4 残留リスクの更新
+
+§5 の一覧はそのまま有効。F1 により「`timeout_ms` ≥ 2^31」は残留リスクから消え、「`SQL_ASCII` DB では不正 UTF-8 の通知 1 件を捨てる」が §5 末尾の記載どおり残る。新規の残留リスクなし
