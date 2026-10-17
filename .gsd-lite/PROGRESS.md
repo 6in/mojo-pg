@@ -356,3 +356,41 @@
 - 次への注意: impl は **F1 だけ**（`examples/bench_psycopg.py` + README §7 の 1〜2 行。見込み +12 行、新しいテスト資源なし）。期待結果は PLAN F1 の**表 1 つ**が唯一の正。
   検証は `scratch/turn-010-robust-grid.sh` の `bench_psycopg.py` 節（`PY=.pixi/envs/bench/bin/python` で pixi のバナー無し）を `turn-NNN-bench-robust.sh` に写して回す。
   `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで。`check` の基線は 184 s（閾値 247 s）。round 2 の verify は格子の再確認 + F1 の回帰だけ（新クラスの探索はしない）
+
+## turn 11 — impl — F1 bench_psycopg.py の堅牢性 2 クラス + README §7 の URI 字句
+- やったこと: サブエージェント **推奨 0 本 / 実 0 本**（PLAN どおり親が全部）。`examples/bench_psycopg.py` の
+  例外処理を 2 段に（`except psycopg.Error` は残し `except ValueError` を追加、明示 `sys.stdout.flush()` +
+  `except OSError` → fd 1 を `/dev/null` に dup2 して stderr に 1 行 + exit 1）、README §7 の URI の言い切りを
+  テスト側の制約として書き直し。コミット `41a4ef3`（`.py` + README + PLAN、+49 / -20）
+- 既存テストの期待値変更: **ゼロ**（`tests/` と `src/` は 1 行も触っていない）
+- (a) 実装: `main()` は `status` を持ち回って最後に 1 回だけ `sys.exit(status)`（内側で `sys.exit` すると
+  `SystemExit` が明示 flush を飛ばし、暗黙 flush で `Exception ignored` に戻ってしまう）。
+  `_discard_stdout()` は Python 公式の SIGPIPE 手順。`_run` の `sys.exit(1)`（件数不一致）は不変
+- (b) 検証 `scratch/turn-011-bench-robust.sh` / `.log`（**15 レコード** = PLAN の表 6 行 + turn 10 格子の残り 8 行 +
+  版数行）: 全行 `traceback=0 exception_ignored=0`。表の 6 行はすべて期待どおり —
+  非 UTF-8 conninfo → `failed: UnicodeEncodeError ...` 1 レコード / rc 1、`/dev/full`（正常・badpw）→
+  stderr に `failed: OSError [Errno 28] ...` 1 行 / **rc 120 → rc 1**、閉じたパイプ → rc 0、badpw / badport →
+  `failed: OperationalError ...` / rc 1、正常 → rc 0。`pixi run bench-psycopg` は rc 0 で 1 行目
+  `psycopg 3.3.4 impl=c libpq=180006 server=170011 python=3.14.8`（`scratch/turn-011-bench-psycopg.log`、
+  text 82/82/82 ms vs binary 71/69/68 ms で decode も binary < text）
+- (c) README §7: 「`key=value ...` 形式のみ」は `tests/run_tests.sh:10-13` の制約（末尾に ` password=...` を
+  付け足す）と明記し、`examples/` は `PQconnectdb` に素通しなので URI でも動くと追記（+3 行）
+- (d) `pixi run check` **6/6 PASS**（`final_check: PASS`、rc 0、`FAIL` 0 行、`0 failed` のサマリ 47 件、
+  6/6 段の `matched lines ... : 0`。00:36:09 → 00:39:18 = **189 s**。基線 184 s、閾値 247 s 以内。
+  `scratch/turn-011-check.log`）。チェックリストは **全行が期待値**（`scratch/turn-011-checklist.log`。
+  turn 10 との差は `readme_examples_links` 9 → **10** の 1 行だけで、README に増やした `examples/` の
+  言及ぶん。期待値 ≥ 7 を満たす。`bench_py_psycopg_error` = **1**（不変））
+- 想定外: (1) `except (psycopg.Error, ValueError)` と 1 つにまとめると追従先チェックリストの
+  `bench_py_psycopg_error`（文字列 `except psycopg.Error` の件数）が 0 になるので、ハンドラを 2 つに分けた
+  （PLAN (a) の書き方どおり。期待値 ≥ 1 は不変）。(2) fd 1 が閉じている場合 Python は `sys.stdout` を
+  **None** にし `print` が no-op になる（実測）ため、明示 flush は `if sys.stdout is not None` で守る必要があった
+  （守らないと `AttributeError` で turn 10 でクリーンだった「closed stdout」2 行が Traceback に退行する）。
+  (3) 差分は見込み +12 行に対し `.py` だけで +44 / -14（内側 try のインデントで本体 12 行が差分に乗る）。
+  (4) Monitor ツールの `until grep` 監視が実在しない `final_check: PASS` を 2 回報告した（ログ実物は未完了）→
+  前景の `until` ループで待ち直して確認。**監視の通知はログ実物で裏取りする**
+- やり直し: 0 回
+- 次への注意: 次は **verify round 2**（PLAN の全タスク + F1 完了）。VERIFICATION §2 の指示どおり
+  「格子の再確認 + F1 の回帰（表の 6 行）」だけで、新しいクラスは探さない。再実行できる証跡:
+  `scratch/turn-011-bench-robust.sh`（15 レコード、約 50 s）/ `turn-009-examples-robust.sh`（17 本）/
+  `turn-002-checklist.sh`（全行期待値）/ `turn-011-check.log`（189 s）。`pixi` は
+  `/home/parallels/.pixi/bin/pixi` を絶対パスで。Monitor の通知は信用せずログで裏取り
