@@ -290,7 +290,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
     - A: (a) `LICENSE` の取得と検証 + (c) examples 5 本の docstring 1 行（対象: `LICENSE`, `examples/basic.mojo`, `examples/params.mojo`, `examples/binary.mojo`, `examples/async_query.mojo`, `examples/listen_notify.mojo`）
     - 親: (b) `README.md` + (d)
 
-- [ ] T7: 統合 — `check` / examples 堅牢性の格子 / `pg_database` の後始末確認 / チェックリスト全行 / PROGRESS「未確認」行の処分表 / 所要
+- [x] T7: 統合 — `check` / examples 堅牢性の格子 / `pg_database` の後始末確認 / チェックリスト全行 / PROGRESS「未確認」行の処分表 / 所要
   - 完了基準:
     - (a) `pixi run db-reset` → `pixi run check` が **6/6 PASS**、所要（秒）が **247 s 以下**（超えたら PROGRESS に理由）。`pixi run test`（両サーバー、leak 両方）も PASS
     - (b) REQ §5 堅牢性（D4）/ P17: `scratch/turn-001-examples-robust.sh` を `turn-NNN-examples-robust.sh` にコピーし、`bench_psycopg`（`pixi run bench-psycopg` を `PQ_TEST_CONNINFO` 付きで。badpw / badport の 2 本）と

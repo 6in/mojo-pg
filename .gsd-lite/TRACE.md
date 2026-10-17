@@ -143,12 +143,87 @@ Windows 実機での動作は依然として未検証（REQ §3）。
 
 ## examples 堅牢性の格子
 
-<!-- T7 (b) -->
+<!-- T7 (b)。REQ §5 堅牢性（D4）/ P17 -->
+
+スクリプト `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-009-examples-robust.sh`
+（turn 1 のプローブ 15 本に `bench_psycopg` の badpw / badport 2 本を足した 17 本）。
+生ログ `scratch/turn-009-examples-robust.log`（2026-10-18 00:18、`pixi run check` の後）。
+判定は 3 つ: `rc=1` / `unhandled_markers=0`（`traceback|unhandled|abort|segfault|core dumped|fatal error` を
+大小無視で grep）/ 出力が `failed: ...` の 1 レコード。
+
+- `BADPW` = `host=127.0.0.1 port=54317 user=pq password=wrong dbname=pq_test`
+- `BADPORT` = `host=127.0.0.1 port=54390 user=pq password=pq dbname=pq_test connect_timeout=3`
+
+| # | ケース | rc | lines | unhandled | 出力の 1 行目 |
+|---|---|---|---|---|---|
+| 1 | `basic` badpw | 1 | 2 | 0 | `failed: PgError(kind=Connection, message=connection to server ... password authentication failed ...)` |
+| 2 | `basic` badport | 1 | 3 | 0 | `failed: PgError(kind=Connection, ... Connection refused` + libpq のヒント行） |
+| 3 | `params` badpw | 1 | 2 | 0 | 同上（`kind=Connection`） |
+| 4 | `params` badport | 1 | 3 | 0 | 同上 |
+| 5 | `binary` badpw | 1 | 2 | 0 | 同上 |
+| 6 | `binary` badport | 1 | 3 | 0 | 同上 |
+| 7 | `async_query` badpw | 1 | 2 | 0 | 同上 |
+| 8 | `async_query` badport | 1 | 3 | 0 | 同上 |
+| 9 | `listen_notify` badpw | 1 | 2 | 0 | 同上 |
+| 10 | `listen_notify` badport | 1 | 3 | 0 | 同上 |
+| 11 | `bench_formats` badpw | 1 | 2 | 0 | 同上 |
+| 12 | `bench_formats` badport | 1 | 3 | 0 | 同上 |
+| 13 | `hello_libpq` nolib（`PQ_MOJO_LIBPQ=/nonexistent/libpq.so`） | 1 | 1 | 0 | `failed: PgError(kind=LibpqLoad, message=libpq not found. tried: /nonexistent/libpq.so: dlopen failed ...)` |
+| 14 | `basic` 不正 conninfo（`port=abc`） | 1 | 2 | 0 | `failed: PgError(kind=Connection, message=invalid integer value "abc" for connection option "port")` |
+| 15 | `basic` nolib | 1 | 1 | 0 | `failed: PgError(kind=LibpqLoad, ...)` |
+| 16 | `bench_psycopg` badpw | 1 | 2 | 0 | `failed: OperationalError connection failed: ... FATAL:  password authentication failed for user "pq"`（1 行目は pixi のタスクバナー） |
+| 17 | `bench_psycopg` badport | 1 | 3 | 0 | `failed: OperationalError connection failed: ... Connection refused` + libpq のヒント行 |
+
+**結果 17/17**: 全行 `rc=1` かつ `unhandled_markers=0`。`Traceback` / `Unhandled` / `stack trace` は 1 行も出ていない
+（`lines` の 2〜3 は libpq 自身が message に含める改行・ヒント行と pixi のバナーで、レコードは 1 件。PLAN T5 (c) の訂正と同じ判定）。
+examples 7 本（`hello_libpq` を含む）と bench 2 本（Mojo の `bench_formats`、psycopg）がすべて `PgError` /
+`psycopg.Error` を印字して終了コード 1 で終わる。この格子は `check` に入れていない（決めた事項 / RESEARCH §3-9:
+`check` に + 70 s 載せない）ので、verify は上記スクリプトを再実行して再現できる
+（PLAN の見積もり ≈ 70 s。今回はログの書き込み完了が 00:18:24、起動が 00:17:45 以降なので **40 s 弱**）。
 
 ## 受け入れ基準対応表
 
-<!-- T7 (d) -->
+<!-- T7 (d)。HANDOFF §10 Phase 5 の 3 項目 + REQ §5 の各行 -->
+
+| 受け入れ基準（出典） | 担保したタスク | テスト / 検査 | ログ |
+|---|---|---|---|
+| HANDOFF §10-1: ベンチマーク結果が README にある | T5 (d) + T6 (b) | `README.md` §6（Mojo / psycopg × text / binary、3 回の値を `a / b / c`、計測環境 + 日付 + 再現手順）。12 セルを原本ログと 1 つずつ照合（turn 8） | `scratch/turn-007-bench.log`（原本・pass 1）、`turn-007-bench-first.log` |
+| HANDOFF §10-2: `examples/` が全部実行できる | T1 (g) + T6 (c) + T7 (a)(b) | `check` 4/6 段が 5 本を実行、`pixi run hello-libpq` と `pixi run bench`/`bench-psycopg` は `check` 外で別途。7 本すべて docstring に `pixi run <task>`（`examples_pixi_run` = 7） | `scratch/turn-009-check.log`、`turn-008-hello.log`、`turn-007-bench.log` |
+| HANDOFF §10-3: Windows 用コード（`WSAPoll`、DLL 名）が存在し、未検証であることが README に明記 | T4 (a)(b)(c)(e) | `poll.mojo` の `WSAPoll` / `WSAGetLastError` / 10009・10022・10038 分類、`loader.mojo` の `libpq.dll`、TRACE 照合表 12 行 + URL 4 本、`README.md` §8（`readme_unverified_windows` = 3） | `scratch/turn-006-win-typecheck.log`、`turn-009-checklist.log` |
+| REQ §5 共通: `pixi run check` が PASS（fmt / precompile / docstring / examples / tests 両サーバー / 警告ゼロ） | T7 (a) | `pixi run check` 6/6 PASS（`final_check: PASS`）。`pixi run test` も両サーバー PASS（leak 両方） | `scratch/turn-009-check.log`、`turn-009-test.log` |
+| REQ §5 堅牢性（D4）: DB 未起動・認証失敗・切断・不正引数でトレースバックを出さず、既存データを失わない。examples / bench は `PgError` を印字して exit 1 | T1 (g) + T5 (c) + T7 (b) + T3 (a) | 格子 17 本が全行 `rc=1` / `unhandled_markers=0`。既存データの保全は `wait_notifications` の `out` 復元テスト ⑧⑨（`test_notify.mojo`）と `_drop_ascii_database` の「失敗を握って元の結果を隠さない」形で担保 | `scratch/turn-009-examples-robust.log`、`turn-007-bench-robust.log`、`turn-005-notify-norestore2.log` |
+| REQ §5 持ち越し: `fetch_all` が `kind == CONNECTION` で打ち切る | T1 (a)(b) | `test_fetch_all_stops_draining_on_a_closed_socket`（`tests/test_async.mojo`。修正前は 2000 ms 後に `TIMEOUT` で FAIL = 陽性対照） | `scratch/turn-001-probe-closefd.log`、`turn-003-check.log` |
+| REQ §5 持ち越し: `PQflush` -1 の分岐がコードにある（到達困難ならレビューで担保し TRACE に記載） | T1 (c) | TRACE「`_after_send` -1 のコードレビュー」節（libpq 根拠 3 行）。`async_after_send_PGASYNC_BUSY` ≥ 1 / `left_at_idle` = 0 | `scratch/turn-003-checklist.log`、`turn-009-checklist.log` |
+| REQ §5 持ち越し: `test_notify` 実行後に `pq_test_ascii` が残らない | T1 (d)(e) + T7 (c) | `_drop_ascii_database()` を先頭と末尾（`WITH (FORCE)`）。`docker exec psql ... pg_database` が pg17 / pg14 とも 0 行（turn 3・4・5・6 と T7 で再確認）。陽性対照は末尾 DROP を外した scratch が 1 行残すこと | `scratch/turn-003-{db-reset,check}.log`、`turn-009-pgdatabase.log` |
+| REQ §5 持ち越し: `test_zero_copy` の原因が TRACE に記録されている | T1 (h) | TRACE「`test_zero_copy` の所要」節（5 行の表、単位 ms、結論「接続 1 本の固定費。直すものは無い」） | `scratch/turn-001-zerocopy-time.log` |
+| REQ §5 契約外提案: 新テストがすべて PASS | T2 / T3 | `test_errors` 9 / `test_decode_binary` 88 / `test_notify` 24 / `test_async` 31 / `test_poll` 11（全サマリ `0 failed`） | `scratch/turn-009-test.log` |
+| REQ §5 契約外提案: `ENCODING` への期待値変更で取りこぼしが無い（`grep -rn 'invalid UTF-8' tests/` の全件が `ENCODING`） | T2 (c) | `tests_TYPE_MISMATCH` = 91 / `tests_ENCODING` ≥ 8 / `src_utf8_and_type_mismatch_same_line` = 0 / `src_invalid_utf8_raise_sites` = 4。変更した 7 行は PROGRESS turn 4 に全列挙 | `scratch/turn-004-checklist.log`、`turn-009-checklist.log` |
+| REQ §5 Windows: 照合表が TRACE にあり `loader.mojo` に `libpq.dll` の行がある。Linux / macOS の挙動は変わらない | T4 (c)(e)(f) | `trace_wsapoll_table` ≥ 1 / `loader_libpq_dll` ≥ 2 / `test_poll_tests` = 11（不変）。挙動不変は `check` PASS で担保 | `scratch/turn-006-{checklist,check}.log`、`turn-009-check.log` |
+| REQ §5 README: コード片は `examples/` から抜粋し `examples/` の実行で検証済み。型表と `PgErrorKind` 一覧が実装と一致 | T6 (b)(d) | `turn-008-readme-excerpts.py`（6 ブロック逐語一致 `missing_total=0`）、`turn-008-typetable.py`（OID 19 行・Mojo 型列が `__init__.mojo:42-62` と一致）、`PgErrorKind` 8 値が `errors.mojo` の宣言順・印字名と一致 | `scratch/turn-008-{readme-excerpts,typetable}.log` |
+| REQ §5 所要: `check` が 167〜187 s + 60 s = 247 s を超えない | T7 (a) | 各ターンの `check` 実測（185 / 177 / 177 / 182・215 / 169 / 187 s）と T7 の実測。すべて閾値以内 | `scratch/turn-00{3,4,5,6,7,8,9}-check*.log` |
 
 ## 未確認行の処分表
 
-<!-- T7 (e) -->
+<!-- T7 (e)。REQ §9 impl 項目 -->
+
+`grep -n '未確認' .gsd-lite/PROGRESS.md` の実行結果は turn 3〜8 の本文に **0 件**
+（2 件のヒットは turn 8「次への注意」が T7 (e) の手順を書いた行そのもので、未確認事項ではない）。
+そこで同じ趣旨の「このターンでは断定しきれなかった／追わなかった」行を turn 3〜8 の
+**想定外・陽性対照・やり直し**から全部拾い、各行を 1 つの処分先に振り分けた。
+「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べる行は ★ を付けた。
+
+| # | turn | 拾った行（要旨） | 処分 | 根拠 / 行き先 |
+|---|---|---|---|---|
+| 1 | 3 (c) | `_after_send` の `PQflush == -1` 分岐は同一スレッドでは到達不能（★ 状態機械: ここで `IDLE` のままだと次の `send` が libpq の文言で落ちる） | **契約外と明記** | テストを書けないのでコードレビューで担保。TRACE「`_after_send` -1 のコードレビュー」節（libpq 根拠 3 行 + `probe-closefd.log` B）。`BUSY` を置く 1 行は `check` のコンパイルで存在を担保 |
+| 2 | 3 (4) | `test_notify` 実行中に stderr に `NOTICE: database "pq_test_ascii" does not exist, skipping` が 1 行出る | **契約外と明記** | 2 件目の ASCII テストの先頭 `DROP IF EXISTS` が出す NOTICE で、1 件目の末尾 DROP が効いている証拠。`check` 6/6 段のパターン（`warning:|WARNING:|implicit ROLLBACK failed`）には当たらない（RESEARCH P7）。T7 (a) の `check` で 0 件を再確認 |
+| 3 | 4 (3) | `src_TYPE_MISMATCH` が目安 105 ではなく 106（`decode_binary.mojo:46` に両方の語が残る） | **PLAN 訂正済み** | 期待値 ≤ 106 の範囲内。チェックリスト `src_TYPE_MISMATCH` で毎ターン監視（T7 (f) で再確認） |
+| 4 | 4 (2) | `test_errors` / `test_notify` は `discover_tests[__functions_in_module()]` 方式で `main()` への登録が不要だった | **契約外と明記** | 依頼文の前提が古かっただけで実装は正しい。テスト件数（`test_errors_tests` = 9 / `test_notify_tests` = 24）がチェックリストで担保 |
+| 5 | 5 (陽性対照) | PLAN T3 (c)⑧ は restore 7 行なしでも PASS = `out` 保全を判別しない（★ 誤った値: 保全が壊れると集めた通知が黙って消える） | **テスト追加** | ⑨ `test_wait_notifications_keeps_collected_ones_across_two_round_trips` を追加（restore なしで FAIL を確認。`turn-005-notify-norestore2.log`）。PLAN 訂正（turn 5）に記載 |
+| 6 | 5 (1) | `async_reject_lost_calls` の T3 期待値 ≥ 4 → 3（不変） | **PLAN 訂正済み** | `_collect_notifications` に 1 箇所集約した結果。PLAN 表と TRACE「PLAN 訂正（turn 5）」 |
+| 7 | 6 (d) | Windows `else` 分岐は複製ビルドで型検査・リンクが通るところまで。**Windows 実機での動作は未検証**（★ 状態機械: `_is_usage_error` の分類違いは Windows でだけ出る） | **verify 申し送り**（スコープ外） | REQ §3「Windows での実行・コンパイルは対象外」。TRACE「Windows 照合表」+ `README.md` §8「未検証」の明記 + `loader.mojo` docstring の `unverified` で開示。照合表 12 行は verify が URL と突き合わせる |
+| 8 | 6 (1)(2) | `loader_libpq_dll` 1 → ≥ 2、`loader_platform_map` が最初 1 だった | **PLAN 訂正済み / 実装修正済み** | 前者は PLAN 訂正（turn 6）、後者は docstring の言い換えで 0 に戻した（識別子を使わずに理由を残す形） |
+| 9 | 6 (3), 8 (3) | `check` の所要が 215 s / 187 s と揺れる（同時実行のノイズ） | **契約外と明記** | 閾値 247 s（決めた事項 20）以内なので追わない。T7 (a) の実測を基線として PROGRESS に記録 |
+| 10 | 7 (1) | bench の堅牢性は「`failed: OperationalError` の 1 行」ではなく物理 2 行（libpq のヒント行） | **PLAN 訂正済み** | 判定を「`^failed: OperationalError` が 1 行 + `Traceback` 0 行 + exit 1」に訂正（PLAN T5 (c)）。T7 (b) の格子でも同じ判定 |
+| 11 | 7 (2) | bench 環境の初回作成が 3 s（見込み 1 分前後） | **契約外と明記** | 遅いほうに外れていないので追わない。README の再現手順は「初回は bench 環境の作成が入る」と書き、秒数を約束していない |
+| 12 | 8 (1) | `head -3 LICENSE` が 1 行ずれていた（公式ファイルは先頭が空行） | **PLAN 訂正済み** | `head -4` に訂正。全文同一の裏は行数 202 / 11,358 bytes が公式値と一致していることで取っている |
+| 13 | 8 (やり直し 1 回) | README のコード片が最初 `examples/` と逐語一致していなかった | **テスト追加（機械確認）** | `scratch/turn-008-readme-excerpts.py` で 6 ブロックを行単位に照合（`blocks=6 missing_total=0`）。verify も同スクリプトで再現できる |
