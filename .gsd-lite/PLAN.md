@@ -77,7 +77,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
 | `test_notify_tests` / `test_notify_lost_message_fixed` | §4.6: BAD 後の文言固定テスト 1 件（T2）、`wait_notifications` 8 件 + 契約外 3 件（T3） | **≥ 12（T2）→ ≥ 21（T3）/ ≥ 1（T2）** |
 | `async_wait_notifications_def` / `async_n_must_be` / `init_wait_notifications` | §4.6.1: `async_conn.mojo` の新 API + `__init__.mojo` の API 表 + `## Asynchronous use` | **1 / 1 / ≥ 2**（T3） |
 | `test_notify_wait_notifications_calls` / `test_async_wait_notifications` / `test_notify_mixed_case` / `test_notify_unlisten` / `test_notify_n_must_be` | §4.6.1 テスト（決めた事項 6 の格子）+ `test_async.mojo:1373-1380` の Connecting 格子と `:1403-1417` の予算格子に各 1 行 | **≥ 8 / ≥ 3 / ≥ 2 / ≥ 1 / ≥ 1**（T3） |
-| `loader_libpq_dll` / `loader_platform_map` / `loader_homebrew` / `loader_default_candidates_def` / `loader_CompilationTarget` | §4.4 / RESEARCH §2.4: `src/pq/_ffi/loader.mojo:16,24-28` | **1 / 0 / 1 / 1 / ≥ 3**（T4） |
+| `loader_libpq_dll` / `loader_platform_map` / `loader_homebrew` / `loader_default_candidates_def` / `loader_CompilationTarget` | §4.4 / RESEARCH §2.4: `src/pq/_ffi/loader.mojo:16,24-28` | **≥ 2 / 0 / 1 / 1 / ≥ 3**（T4。`loader_libpq_dll` は turn 6 訂正） |
 | `poll_WSAGetLastError` / `poll_external_call_symbols` / `poll_get_errno` / `poll_10022` / `poll_only_two_symbols` / `poll_win10_2004` / `poll_WSAStartup` | §4.4 / RESEARCH §2.3 #6・#8・#11: `src/pq/_platform/poll.mojo:24-27,183-232,271-285` | **≥ 2 / 3 / ≥ 1 / ≥ 1 / 0 / ≥ 1 / ≥ 1**（T4） |
 | `trace_wsapoll_table` / `test_poll_tests` | 照合表 12 行を TRACE に / `tests/test_poll.mojo` は不変 | **≥ 1 / 11**（T4） |
 | `pixi_feature_bench` / `pixi_bench_psycopg` / `pixi_environments` / `lock_psycopg_c` | §4.1 / RESEARCH §2.1: `pixi.toml` + `pixi.lock`（3 プラットフォーム） | **2 / 1 / 1 / ≥ 3**（T5） |
@@ -212,7 +212,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
     - A: (c)(d) `tests/test_notify.mojo` の 11 件 + ヘルパ（対象: `tests/test_notify.mojo` のみ。**ヘルパ名は上記 (c) のとおり**。親が src を入れるまでコンパイルは通らないので書くだけ）
     - 親: (a)(b)(e)(f)
 
-- [ ] T4: Windows コードパスのレビュー（§4.4 / D6）— `poll.mojo` の `WSAGetLastError`、`loader.mojo` の `libpq.dll`、照合表を TRACE に、`else` 分岐の複製ビルド
+- [x] T4: Windows コードパスのレビュー（§4.4 / D6）— `poll.mojo` の `WSAGetLastError`、`loader.mojo` の `libpq.dll`、照合表を TRACE に、`else` 分岐の複製ビルド
   - 完了基準:
     - (a) RESEARCH §2.3 #6 / P11 / 決めた事項 7: `src/pq/_platform/poll.mojo` の `_poll_once`（`:183-232`）を **`Tuple[Int, Int, Int]`（ret, flags, err）** に。POSIX 分岐は `ret < 0` のとき
       `Int(get_errno().value)`（それ以外 0）、Windows 分岐は `ret < 0` のとき `Int(external_call["WSAGetLastError", c_int]())`。`poll_socket`（`:271-285`）は `err` を 2 つのヘルパで分類:

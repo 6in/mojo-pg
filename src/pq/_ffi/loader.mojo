@@ -8,12 +8,14 @@ from `libpq()` / `libpq_ptr()` instead of killing the process. A cached failure
 is never retried: later calls raise the same error.
 
 Candidates come from `PQ_MOJO_LIBPQ` when it is set (that one path only),
-otherwise from the OS default sonames.
+otherwise from the OS default sonames (`libpq.so.5` / `libpq.so` on Linux, the
+dylibs and the two Homebrew paths on macOS, `libpq.dll` on Windows -- the last
+**unverified**, like everything else Windows here, see `_platform/poll`).
 """
 
 from std.ffi import _Global
 from std.os import getenv
-from std.sys.info import platform_map
+from std.sys.info import CompilationTarget
 
 from pq.errors import PgError, PgErrorKind
 
@@ -21,18 +23,31 @@ from .functions import LibpqFFI
 
 comptime _MIN_LIBPQ_VERSION = 140000
 
-comptime _DEFAULT_CANDIDATES = platform_map[
-    "libpq_candidates",
-    linux="libpq.so.5,libpq.so",
-    macos="libpq.5.dylib,libpq.dylib,/opt/homebrew/opt/libpq/lib/libpq.5.dylib,/usr/local/opt/libpq/lib/libpq.5.dylib",
-]()
+
+def _default_candidates() -> StaticString:
+    """The comma-separated search list for the current OS.
+
+    A `comptime if` chain rather than the stdlib's compile-time platform map,
+    which takes no `windows=` parameter in Mojo 1.1.0. On Windows the search
+    is left to `LoadLibrary`'s own order (the executable's directory,
+    System32, then `PATH`); `PQ_MOJO_LIBPQ` names a full path anywhere.
+
+    Returns:
+        The default candidates, in the order they are tried.
+    """
+    comptime if CompilationTarget.is_linux():
+        return "libpq.so.5,libpq.so"
+    elif CompilationTarget.is_macos():
+        return "libpq.5.dylib,libpq.dylib,/opt/homebrew/opt/libpq/lib/libpq.5.dylib,/usr/local/opt/libpq/lib/libpq.5.dylib"
+    else:
+        return "libpq.dll"
 
 
 def _candidates() -> List[String]:
     var override = getenv("PQ_MOJO_LIBPQ")
     if override != "":
         return [override]
-    var defaults = String(_DEFAULT_CANDIDATES)
+    var defaults = String(_default_candidates())
     var out = List[String]()
     for part in defaults.split(","):
         out.append(String(part))
