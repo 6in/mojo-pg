@@ -19,7 +19,7 @@ from std.time import monotonic
 
 from pq.async_conn import AsyncConnection, AsyncState, Notification
 from pq.connection import Connection
-from pq.errors import PgError
+from pq.errors import PgError, PgErrorKind
 from pq.result import Result
 
 comptime DEFAULT_CONNINFO = (
@@ -31,8 +31,10 @@ comptime DEFAULT_CONNINFO = (
 #
 # A `TestSuite` test only declares `raises` (plain `Error`), and `PgError` does
 # not implicitly convert to `Error`, so a `raises PgError` API cannot be called
-# straight from a test. These wrappers translate the success paths; no test
-# here inspects a `PgError`, so there are no failure-path wrappers.
+# straight from a test. These wrappers translate in both directions: success
+# paths re-raise as `Error`, and the one failure path here -- `notifications`
+# on a connection the server has dropped -- hands the `PgError` back for
+# inspection.
 
 
 def _conninfo() -> String:
@@ -225,6 +227,114 @@ def _elapsed_ms(since: Int) raises -> Int:
     return (monotonic() - since) // 1_000_000
 
 
+def _notifications_error(mut conn: AsyncConnection) -> Optional[PgError]:
+    """Report whether `notifications` refused the connection this time.
+
+    Unlike the other failure-path wrappers in this suite, one call is not
+    expected to fail: a backend that has just been terminated is not visible
+    to `PQconsumeInput` until the kernel has seen the end of the stream, so
+    the caller loops on this.
+
+    Args:
+        conn: The connection whose backend may already be gone.
+
+    Returns:
+        The raised `PgError`, or None when the call succeeded.
+    """
+    try:
+        var found = conn.notifications()
+        _ = found^
+    except e:
+        return e.copy()
+    return None
+
+
+def _pause_until_readable(mut conn: AsyncConnection, timeout_ms: Int):
+    """Wait a little for the socket, swallowing whatever the wait says.
+
+    Used only to pace a retry loop: a timeout means nothing has arrived yet,
+    and a lost connection is exactly what the loop is waiting to observe
+    through a real API call, so neither is an error here.
+
+    Args:
+        conn: The connection to wait on.
+        timeout_ms: Milliseconds to wait at most.
+    """
+    try:
+        conn.wait_readable(timeout_ms)
+    except:
+        pass
+
+
+def _collect_notifications(
+    mut conn: AsyncConnection, want: Int, timeout_ms: Int
+) raises -> List[Notification]:
+    """Call `notifications` until `want` have arrived or the budget runs out.
+
+    One `notifications` call is not a promise of every notification the
+    server has sent -- they arrive when they arrive -- so a test that needs a
+    fixed number of them loops, as the API's own docstring prescribes.
+
+    Args:
+        conn: The listening connection.
+        want: How many notifications to wait for.
+        timeout_ms: Milliseconds allowed for the whole collection.
+
+    Returns:
+        Everything collected, oldest first; fewer than `want` when the budget
+        ran out.
+
+    Raises:
+        Error: If `notifications` raised a `PgError`.
+    """
+    var found = List[Notification]()
+    var deadline = monotonic() + timeout_ms * 1_000_000
+    while len(found) < want:
+        var batch = _notifications(conn)
+        for i in range(len(batch)):
+            found.append(batch[i].copy())
+        if len(found) >= want or monotonic() >= deadline:
+            break
+        _pause_until_readable(conn, 50)
+    return found^
+
+
+def _async_backend_pid(mut conn: AsyncConnection) raises -> Int:
+    """Return the process ID of the backend serving the async connection.
+
+    Args:
+        conn: The idle asynchronous connection.
+
+    Returns:
+        `pg_backend_pid()` as an `Int`.
+
+    Raises:
+        Error: If the query failed.
+    """
+    _send(conn, "SELECT pg_backend_pid()")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    try:
+        return Int(results[0][0].get[Int32](0))
+    except e:
+        raise Error(String(e))
+
+
+def _payload_at_the_limit() -> String:
+    """Build the longest payload `NOTIFY` accepts.
+
+    PostgreSQL keeps the payload in 8000 bytes including its NUL terminator,
+    on PG14 and PG17 alike, so 7999 bytes is the limit rather than 8000.
+
+    Returns:
+        7999 `x` bytes.
+    """
+    var out = String()
+    while out.byte_length() < 7999:
+        out += "x"
+    return out^
+
+
 # --- tests -------------------------------------------------------------------
 
 
@@ -270,6 +380,142 @@ def test_wait_notification_times_out_to_none() raises:
     var took = _elapsed_ms(started)
     assert_false(Bool(got), "a notification arrived on a silent channel")
     assert_true(took >= 50, "gave up after only " + String(took) + " ms")
+
+
+def test_notification_waits_for_the_running_command() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_during")
+    var sender = _open(_conninfo())
+    var sender_pid = _backend_pid(sender)
+    _send(listener, "SELECT pg_sleep(0.3)")
+    _ = _execute(sender, "NOTIFY pq_t5_during, 'during'")
+    # The listening backend only delivers notifications between commands, so
+    # nothing can have arrived while the sleep is still running.
+    var early = _notifications(listener)
+    assert_equal(len(early), 0)
+    var results = _fetch_all(listener, 5000)
+    assert_equal(len(results), 1)
+    var found = _collect_notifications(listener, 1, 2000)
+    assert_equal(len(found), 1)
+    assert_equal(found[0].channel, "pq_t5_during")
+    assert_equal(found[0].payload, "during")
+    assert_equal(found[0].backend_pid, sender_pid)
+    _ = sender^
+
+
+def test_payload_survives_the_byte_limit_and_utf8() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_payload")
+    var sender = _open(_conninfo())
+    var sender_pid = _backend_pid(sender)
+    var biggest = _payload_at_the_limit()
+    assert_equal(biggest.byte_length(), 7999)
+    _ = _execute(sender, "NOTIFY pq_t5_payload, '" + biggest + "'")
+    # `héllo` is five characters in six bytes: the payload is carried as
+    # bytes, so the length that matters is the byte length.
+    _ = _execute(sender, "NOTIFY pq_t5_payload, 'héllo'")
+    var found = _collect_notifications(listener, 2, 5000)
+    assert_equal(len(found), 2)
+    assert_equal(found[0].payload.byte_length(), 7999)
+    assert_equal(found[0].payload, biggest)
+    assert_equal(found[0].backend_pid, sender_pid)
+    assert_equal(found[1].payload.byte_length(), 6)
+    assert_equal(found[1].payload, "héllo")
+    assert_equal(found[1].backend_pid, sender_pid)
+    _ = sender^
+
+
+def test_notify_is_delivered_at_commit() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_tx")
+    var sender = _open(_conninfo())
+    var sender_pid = _backend_pid(sender)
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t5_tx, 'committed'")
+    # PostgreSQL delivers at commit, so an uncommitted NOTIFY is invisible
+    # and the wait spends its budget and answers None.
+    var early = _wait_notification(listener, 300)
+    assert_false(Bool(early), "an uncommitted notification was delivered")
+    _ = _execute(sender, "COMMIT")
+    var got = _wait_notification(listener, 2000)
+    assert_true(Bool(got), "the committed notification never arrived")
+    assert_equal(got.value().channel, "pq_t5_tx")
+    assert_equal(got.value().payload, "committed")
+    assert_equal(got.value().backend_pid, sender_pid)
+    _ = sender^
+
+
+def test_notify_reaches_its_own_connection() raises:
+    var conn = _connect_blocking(_conninfo(), 5000)
+    _listen(conn, "pq_t5_self")
+    var own_pid = _async_backend_pid(conn)
+    _send(conn, "NOTIFY pq_t5_self, 'self'")
+    var results = _fetch_all(conn, 5000)
+    assert_equal(len(results), 1)
+    var found = _collect_notifications(conn, 1, 2000)
+    assert_equal(len(found), 1)
+    assert_equal(found[0].channel, "pq_t5_self")
+    assert_equal(found[0].payload, "self")
+    # Listening and notifying on one connection is allowed, and the sender's
+    # backend PID is then the listener's own.
+    assert_equal(found[0].backend_pid, own_pid)
+
+
+def test_second_wait_notification_answers_without_waiting() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_queue")
+    var sender = _open(_conninfo())
+    var sender_pid = _backend_pid(sender)
+    # One transaction, two distinct payloads: both are delivered together at
+    # commit -- identical payloads on one channel would be collapsed into one
+    # -- so a single round trip can carry the pair.
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t5_queue, 'first'")
+    _ = _execute(sender, "NOTIFY pq_t5_queue, 'second'")
+    _ = _execute(sender, "COMMIT")
+    var first = _wait_notification(listener, 5000)
+    assert_true(Bool(first), "the first notification never arrived")
+    assert_equal(first.value().payload, "first")
+    assert_equal(first.value().backend_pid, sender_pid)
+    # Whatever the first wait picked up beyond the one it returned is held,
+    # so this call answers from that queue instead of waiting on the socket.
+    var started = monotonic()
+    var second = _wait_notification(listener, 5000)
+    var took = _elapsed_ms(started)
+    assert_true(Bool(second), "the second notification never arrived")
+    assert_equal(second.value().payload, "second")
+    assert_equal(second.value().backend_pid, sender_pid)
+    assert_true(took < 50, "the queued notification took " + String(took))
+    _ = sender^
+
+
+def test_notifications_reports_a_lost_connection() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_gone")
+    var listener_pid = _async_backend_pid(listener)
+    var killer = _open(_conninfo())
+    _ = _execute(
+        killer, "SELECT pg_terminate_backend(" + String(listener_pid) + ")"
+    )
+    # The first call can still succeed: the backend is gone but the kernel
+    # may not have seen the end of the stream yet, so retry rather than bet
+    # on one round of timing.
+    var error = Optional[PgError](None)
+    var tries = 0
+    while tries < 20:
+        tries += 1
+        error = _notifications_error(listener)
+        if error:
+            break
+        _pause_until_readable(listener, 50)
+    assert_true(
+        Bool(error),
+        "notifications() still succeeded after " + String(tries) + " tries",
+    )
+    assert_true(
+        error.value().kind == PgErrorKind.CONNECTION, String(error.value())
+    )
+    _ = killer^
 
 
 def main() raises:

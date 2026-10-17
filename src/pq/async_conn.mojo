@@ -1175,6 +1175,26 @@ struct AsyncConnection(Movable):
         self._single_row_allowed = False
         return self._pq[].PQisBusy(self._conn) != 0
 
+    def _consume_or_end_command(mut self) raises PgError:
+        """Read the socket for `poll_result`, ending the command if it is lost.
+
+        `consume_input` leaves the state alone on failure, because a command
+        whose connection merely hiccuped is still in flight. Here the question
+        is different: once libpq reports the connection bad, the NULL result
+        that ends the command can never arrive, so leaving the connection
+        `BUSY` would make a `poll_result` loop spin forever and would answer
+        every later `send` with `USAGE` instead of saying the connection is
+        gone. The command is therefore ended before the error is raised.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` carrying libpq's own message.
+        """
+        if self._pq[].PQconsumeInput(self._conn) != 0:
+            return
+        if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            self._state = AsyncState.IDLE
+        raise self._connection_error()
+
     def poll_result(mut self) raises PgError -> Optional[Result]:
         """Collect the next result of the command in flight, if one is ready.
 
@@ -1190,7 +1210,10 @@ struct AsyncConnection(Movable):
         A raised server error leaves the command in flight: the NULL result
         has not been read yet, so the connection stays `BUSY` and the next
         call is what brings it back to `IDLE`. That is what makes a failed
-        statement recoverable without reconnecting.
+        statement recoverable without reconnecting. A *lost* connection is
+        the one exception -- no NULL result can arrive on it, so the command
+        is ended and the state is `IDLE` by the time the `CONNECTION` error
+        is raised, which is what keeps this loop finite.
 
         Returns:
             The next `Result`, or None when none is ready or the command is
@@ -1208,11 +1231,9 @@ struct AsyncConnection(Movable):
             if not self.flush():
                 # Still unwritten. Read anything the server has sent anyway,
                 # so a server that fails mid-send is noticed.
-                if self._pq[].PQconsumeInput(self._conn) == 0:
-                    raise self._connection_error()
+                self._consume_or_end_command()
                 return None
-        if self._pq[].PQconsumeInput(self._conn) == 0:
-            raise self._connection_error()
+        self._consume_or_end_command()
         self._single_row_allowed = False
         if self._pq[].PQisBusy(self._conn) != 0:
             return None
