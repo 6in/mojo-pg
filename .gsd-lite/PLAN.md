@@ -322,12 +322,13 @@ bash .gsd-lite/logs/phase4-async-cancel-notify/scratch/turn-002-checklist.sh   #
     - A: (a) の `_utf8_first_invalid` + `_validated_utf8` + `decode_binary[String]` の差し替え + (c) の `test_decode_binary.mojo`（対象: `src/pq/decode_binary.mojo`, `tests/test_decode_binary.mojo`）
     - 親: (d) の「前」計測を**最初に** → (b) `result.mojo` / `__init__.mojo` / `test_connection.mojo` / `test_zero_copy.mojo` → 統合 → (d) の「後」計測 → (e)
 
-- [ ] T8: 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
+- [x] T8: 文書の最終整備 + 受け入れ基準の総点検 + 最終判定
   - 完了基準:
     - (a) `src/pq/__init__.mojo` の `## Asynchronous use` 節を公開 API 一覧（`AsyncConnection` の全メソッドと raise する kind）で完成させ、`## PgErrorKind` 節の 7 件・`TIMEOUT` の説明と `HANDOFF.md §7.2` の名前（`start` / `poll_connect` / `socket` / `send` / `poll_result` / `notifications` / `cancel` / `wait_*`）が一致。
       `src/pq/async_conn.mojo` の全公開 struct / メソッドに docstring（3/6 段 = 0）、`_platform/poll.mojo` はモジュール docstring に Windows 未検証
     - (b) 追従先チェックリストスクリプトを**再実行**し、全行が期待値（`absent` が残っていない、`test_file_count` 24、`src_def_ref_return` 0）。出力を `.gsd-lite/TRACE.md` に貼る（REQ §9: 30 行超の表は TRACE.md）
-    - (c) `.gsd-lite/TRACE.md` に受け入れ基準対応表: REQ §5.1 の 4 件（§5.1-1 → T3 ④、§5.1-2 → T4 (b) ①、§5.1-3 → T4 (c) ①、§5.1-4 → T3 ⑦）、§5.2 の 4 項目（状態 9 種 × 入力 → T3 / T5 の格子、解放経路 → T6、`Movable` のみ → `grep -c 'Copyable' src/pq/async_conn.mojo` が `Notification` の 1 行だけ、10,000 / 1,000 回 → T6）、§5.3、§5.4 の 5 項目、§4.8〜§4.10 → 各 T。
+    - (c) `.gsd-lite/TRACE.md` に受け入れ基準対応表: REQ §5.1 の 4 件（§5.1-1 → T3 ④、§5.1-2 → T4 (b) ①、§5.1-3 → T4 (c) ①、§5.1-4 → T3 ⑦）、§5.2 の 4 項目（状態 9 種 × 入力 → T3 / T5 の格子、解放経路 → T6、`Movable` のみ → `grep -c 'Copyable' src/pq/async_conn.mojo` が **2**（**訂正（T8 実装時）**: PLAN の「`Notification` の 1 行だけ」は
+      `AsyncConnection` の docstring が「`Movable` and not `Copyable`」と述べる `:43` を数え落としたもの。`struct AsyncConnection(Movable)` に `Copyable` は無い）、10,000 / 1,000 回 → T6）、§5.3、§5.4 の 5 項目、§4.8〜§4.10 → 各 T。
       それぞれ「担うテスト関数名 / コマンド」と「turn N で PASS」を書く
     - (d) **PROGRESS の全『未確認』行を列挙し、各行を テスト追加 / 契約外と明記 / verify 申し送り のいずれか 1 つに振り分けた表**（REQ §9 impl 項目）を TRACE.md に。「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べた行が残っていればこのターンでテストにする
     - (e) `pixi run fmt` → 差分なし、`pixi run package` 警告ゼロ、**`pixi run check` 6/6 PASS**（所要を書く）、`pixi run test` 両サーバー全 PASS（`grep 'tests run' <log> | grep -vc ' 0 failed'` = 0、SKIP 集計行が各サーバーに出る）。

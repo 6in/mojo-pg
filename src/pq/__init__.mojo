@@ -253,6 +253,35 @@ if note:
     print(note.value().channel, note.value().payload)
 ```
 
+The whole surface, with the `PgErrorKind` each method can raise. Every
+method that takes a `timeout_ms` also raises `USAGE` for a budget below
+`-1`, and every one that talks to libpq raises `USAGE` when called in a
+state the step does not belong to:
+
+| Method | Answers | Raises |
+|---|---|---|
+| `start(conninfo)`, `start(params)` | an `AsyncConnection` in `CONNECTING` | `TYPE_MISMATCH`, `LIBPQ_LOAD`, `CONNECTION` |
+| `connect_blocking(conninfo, timeout_ms)`, `connect_blocking(params, timeout_ms)` | an `AsyncConnection` in `IDLE` | those, plus `TIMEOUT` and `USAGE` |
+| `poll_connect()` | `PollState` | `CONNECTION`, `SERVER` |
+| `socket()`, `state()`, `status()`, `transaction_status()` | `Int`, `AsyncState`, `Int`, `Int` | nothing |
+| `send(sql)`, `send(sql, params, result_format)` | nothing | `TYPE_MISMATCH`, `USAGE`, `CONNECTION` |
+| `send_prepare(name, sql, param_types)`, `send_prepared(name, params, result_format)` | nothing | `TYPE_MISMATCH`, `USAGE`, `CONNECTION` |
+| `flush()` | True once the command is fully written | `USAGE`, `CONNECTION` |
+| `set_single_row_mode()` | nothing | `USAGE` |
+| `consume_input()` | nothing | `USAGE`, `CONNECTION` |
+| `is_busy()` | True while no complete result has arrived | nothing |
+| `poll_result()` | `Optional[Result]` | `USAGE`, `CONNECTION`, `SERVER` |
+| `fetch_all(timeout_ms)` | `List[Result]` | `TIMEOUT`, `USAGE`, `SERVER`, `CONNECTION` |
+| `cancel()` | nothing | `USAGE`, `CONNECTION` |
+| `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION` |
+| `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION` |
+| `wait_readable(timeout_ms)`, `wait_writable(timeout_ms)` | nothing | `TIMEOUT`, `CONNECTION`, `USAGE` |
+
+`AsyncState` is `CONNECTING` / `IDLE` / `SENDING` / `BUSY` and `PollState`
+is `NEED_READ` / `NEED_WRITE` / `READY`; a failed handshake is the raised
+`CONNECTION` rather than a fourth `PollState`. `Notification` carries
+`channel`, `payload` and `backend_pid`.
+
 ## `PgErrorKind`
 
 Every `pq` API raises `PgError`, and its `kind` is one of exactly seven
