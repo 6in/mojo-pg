@@ -26,3 +26,32 @@
 - 次への注意: impl は T1 から。`pixi run db-up` で `blackhole` が上がるのは T1 (e) を書いた後。T1 (f) の陽性対照（port=1 で `run_tests.sh` の exit code ≠ 0）は数十秒で終わる。
   T3 の `async_conn.mojo` は決めた事項 6〜9 を契約にして `start` / `poll_connect` / `connect_blocking` から書き始める（最初の 1 本をコンパイルしてから）。
   未確認: `"x" * 16000000` の形の文字列反復が Mojo 1.1.0 にあるか（T5 ⑤。無ければ `List[UInt8]` から作る）／`PGcancel` の確保サイズが leak の陽性対照に出るか（T6 (b)。見えなければ「契約外」と書く）／`check` の所要 260〜300 s（見込み）
+
+## turn 3 — impl — T1 持ち越し整理 + blackhole + SKIP 集計 + 文字列 OID 判定の一元化
+- やったこと: (a)〜(i) を 1 人で実装（並列サブ作業は 1 本なのでサブエージェントは使わず）。REQ §6 の 4 件（params の上限文言 / client_encoding の docstring /
+  `decode_timetz` の時刻範囲検査 + テスト 2 ケース / 非 UTC `else` を `options='-c TimeZone=Asia/Tokyo'` の専用接続ケースに）、`tests/docker-compose.yml` に `blackhole`（socat・54399、`db-up` で `Up`）、
+  `run_tests.sh` の `tee` + `${PIPESTATUS[0]}` + SKIP 集計（`run_test_cmd` 関数 1 本に集約。leak バイナリも同じ経路）、`print("SKIP <name>: <reason>")` 3 箇所、
+  `decode_binary._string_payload` に文字列系 OID 判定 + jsonb バージョンバイトを一元化して `decode_binary[String]` と `Row.get_text` の両方を通した（`result.mojo` の import 6 名が不要になり削除）
+- 期待値の取り直し（REQ §9 常設）: 同期 `Connection` + `options='-c TimeZone=Asia/Tokyo'` で `SELECT '2024-02-29 12:34:56.789+00'::timestamptz` = `2024-02-29 21:34:56.789+09`（`SHOW TimeZone` = `Asia/Tokyo`）。
+  (d) の期待文字列と一致（プローブ `scratch/turn-003-probe-tokyo.mojo`）
+- 既存テストの期待値変更: **ゼロ**（変えたのは (b) の docstring と (d) の分岐、追加した 2 ファイル 3 テスト分だけ。`test_extended_datetime` は 19 件のまま、`test_decode_binary` は 78 → 80 件）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（21 ファイル × 2 = 42 サマリ全部 0 failed、`-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、per-file 合計 **243 s**）、
+  `pixi run check` **6/6 PASS**（15:52:13 → 15:54:45 = **152 s**。PLAN の見込み 260〜300 s より速い。Phase 4 のテストがまだ 0 本なので当然で、T3 以降で増える）、`pixi run package` 警告ゼロ。
+  (f) の陽性対照: `PQ_TEST_CONNINFO='... port=1 ...' bash tests/run_tests.sh` の **exit code = 1**（`tee` が終了コードを飲んでいない）、集計行も出た（`-- 127.0.0.1:1 skipped 0`）
+- チェックリスト（T1 行）: `params_libpq_takes_at_most=0` / `params_MaxAllocSize=3`（期待 ≥2） / `testconn_from_the_environment=0` / `testconn_PGCLIENTENCODING=1` / `timetz_time_of_day_is_not=0` /
+  `timetz_out_of_range_sites=1` / `datetime_is_utc_calls=2` / `datetime_asia_tokyo=2` / `compose_blackhole=1` / `compose_54399=1` / `run_tests_SKIP=2` / `run_tests_pipefail=2` /
+  `leak_old_SKIP_colon=0` / `string_payload_def=1` / `string_payload_calls=2` / `jsonb_version_checks=2` / `oid_varchar_checks=1` / `test_decode_binary_tests=80` / `test_extended_datetime_tests=19` — **全部期待値**。
+  `tests_print_SKIP` だけはスクリプトが `absent(tests/test_async.mojo)` を返す（T3 まで対象ファイルが無い）ので手で数えた: **4**（期待 ≥3）
+- PLAN 訂正 3 件:
+  - `(g)` の `_skip_on_macos()` 呼び出し **11 → 10**（実測 `grep -c` = 10。PLAN の数え違い）
+  - `(d)(g)` の SKIP 文言を短縮: `main connection TimeZone is not UTC` → `TimeZone is not UTC`、`server is older than 17` → `server < 17`、`server is 17 or later` → `server 17+`
+    （根拠: 元の文言は 80 桁を超え `mojo format` が `print(` と文字列を別行に割る。割れるとチェックリストのパターン `print("SKIP ` が当たらない。形式 `SKIP <name>: <reason>` と `run_tests.sh` の `^SKIP ` は不変）
+  - 追従先チェックリストの `tests_print_SKIP` 行に「T3 まではスクリプトが `absent` を返すので手で数える」注記（スクリプト自体は変更していない）
+- 想定外: (1) `except e: return e` が `PgError` は `ImplicitlyCopyable` でないとして弾かれた → `return e^`（テストのヘルパ `_payload_error`）。
+  (2) `print("SKIP ...")` の 1 行制約（上の PLAN 訂正）。`mojo format` は文字列を割れないので `print(` ごと改行する。
+  (3) `check` が 152 s で見込みより速かった（Phase 4 のテストがまだ無いだけ）
+- やり直し: 1 回（上記 (1) の `return e^`。コンパイルエラー 1 回で直った）
+- 次への注意: T2 から。`print("SKIP ` と、同じく grep で数える行は **1 行に収まる文言**にする（80 桁。`mojo format` が割ると機械チェックが当たらない）。
+  `_string_payload` は `decode_binary.mojo` の private だが `result.mojo` / `tests/test_decode_binary.mojo` から名前で import している（T7 の UTF-8 検証もこの 1 箇所に足せる）。
+  `run_test_cmd` は `build/last_test.log` を毎ファイル上書きするので、T3 以降で新しいテストを足しても集計はそのまま効く。`blackhole` は compose に入ったので `db-up` 済みの環境では 54399 が常に `Up`（T3 (c) ⑦ の SKIP 分岐は実際には通らない見込み）。
+  `PgError` を値として返す場面では `^` が必要（想定外 (1)）
