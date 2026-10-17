@@ -129,8 +129,8 @@ struct Connection(Movable):
         statement of the session. Both `SET`s travel in one `PQexec`, which
         makes them one implicit transaction: either both settings land or
         neither does, so no connection is ever handed out with only
-        `DateStyle` pinned. Phase 4's asynchronous connect will send the same
-        SQL as its first query step.
+        `DateStyle` pinned. `AsyncConnection.poll_connect` sends the same SQL
+        as its first query step.
 
         A failed setup raises, and the `Connection` built a line earlier is
         destroyed on the way out -- its `__deinit__` is what runs `PQfinish`,

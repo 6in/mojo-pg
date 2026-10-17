@@ -4,15 +4,17 @@ Layout follows HANDOFF.md §4. Phase 1 adds `_ffi`, `connection`, `result`.
 Phase 2 adds `params`, `prepared`, `transaction`. Phase 3 adds
 `decode_binary`, `types_numeric`, `types_datetime` and `types_uuid` -- the
 binary decoders and the value types for PostgreSQL types Mojo has no
-built-in for.
+built-in for. Phase 4 adds `_platform/poll` and `async_conn` -- the
+non-blocking connection and the one `poll(2)` call it waits on.
 
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
-`PreparedStatement`, `Transaction`, the `Decimal`, `UUID`, `Date`,
-`Timestamp`, `TimestampTz`, `Time`, `TimeTz` and `Interval` value types for
-the PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK` /
+`PreparedStatement`, `Transaction`, `AsyncConnection` with its `AsyncState`,
+`PollState` and `Notification`, the `Decimal`, `UUID`, `Date`, `Timestamp`,
+`TimestampTz`, `Time`, `TimeTz` and `Interval` value types for the
+PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK` /
 `CONNECTION_BAD` status constants and the five `PQTRANS_*` transaction
 status constants.
 
@@ -169,6 +171,54 @@ enclosing scope -- which is where the implicit `ROLLBACK` or the
 *after* that line inspect the outcome with `conn.execute`. `_ = x^` is a
 "keep it alive until here" marker, not an eager free.
 
+## Asynchronous use
+
+`AsyncConnection` is the non-blocking connection. It never waits unless
+asked: each round trip is a step the caller drives, and `state()` says where
+the connection is between the steps.
+
+```
+Connecting --(poll_connect returns Ready)--> Idle
+Idle --(send*)--> Sending or Busy
+Sending --(flush returns True)--> Busy
+Busy --(poll_result returns None, state Idle)--> Idle
+```
+
+```mojo
+var conn = AsyncConnection.connect_blocking(conninfo, 5000)
+conn.send("SELECT pg_sleep(2), 1")
+var results = conn.fetch_all(5000)
+print(results[0][0].get[Int32](1))
+```
+
+- **Stepping it yourself.** `start` then `poll_connect` until it answers
+  `PollState.READY`, waiting for whichever direction it asks for; then
+  `send*`, `flush` while `SENDING`, and `poll_result` until it answers None
+  with `state() == AsyncState.IDLE`. A None while `BUSY` means "nothing yet",
+  so wait for readability and call again.
+- **Letting it block.** `connect_blocking` is that handshake loop and
+  `fetch_all` is that result loop, each with a millisecond budget for the
+  **whole** operation. `wait_readable` / `wait_writable` are the single waits
+  underneath, in case only part of the loop should be written by hand.
+- **Timeouts.** Running out of budget is `PgErrorKind.TIMEOUT` and nothing
+  else: the connection is untouched and still usable, and the command it was
+  waiting for is still in flight. `timeout_ms` is `-1` for no limit and `0`
+  to test the current state without waiting.
+- **One command at a time.** `send*` is accepted only in `IDLE`, and a
+  command is over when `poll_result` has seen the None, which is later than
+  `is_busy` turning False -- `SELECT 1; SELECT 2` answers with two results
+  and then the None. Calling a method in the wrong state is
+  `PgErrorKind.USAGE` with `<method>() called while <State>`, detected
+  before libpq sees it.
+- **Failures are recoverable.** A statement that fails leaves the rest of
+  the command collectable: `fetch_all` drains to the end before raising, and
+  a hand-written loop just keeps calling `poll_result` until `IDLE`. The
+  connection is usable for the next `send` either way.
+
+`cancel`, `set_single_row_mode` and the `LISTEN` / `NOTIFY` side --
+`notifications` and `wait_notification` -- are documented here once they
+land.
+
 ## `PgErrorKind`
 
 Every `pq` API raises `PgError`, and its `kind` is one of exactly seven
@@ -205,6 +255,7 @@ from ._ffi.types import (
     PQTRANS_INTRANS,
     PQTRANS_UNKNOWN,
 )
+from .async_conn import AsyncConnection, AsyncState, Notification, PollState
 from .connection import Connection
 from .errors import PgError, PgErrorKind
 from .params import Param
