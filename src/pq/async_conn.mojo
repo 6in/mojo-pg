@@ -1579,15 +1579,92 @@ struct AsyncConnection(Movable):
             raise first_error.take()
         return results^
 
+    def _collect_notifications(
+        mut self, method: StaticString, n: Int, timeout_ms: Int
+    ) raises PgError -> List[Notification]:
+        """Collect up to `n` notifications on one budget.
+
+        The `notifications` / wait loop written once, for both public waits.
+        Running out of budget is **not** an error here, unlike every other
+        budget in this struct: nothing arriving is the ordinary outcome of
+        listening, so this answers with whatever it has -- between none and
+        `n - 1` of them.
+
+        A round trip can deliver more notifications than are asked for, so
+        the surplus is held on `_pending`, oldest first, and the next call
+        answers from it without touching the socket.
+
+        Args:
+            method: Name of the public method, without parentheses, for the
+                messages of the entry checks.
+            n: How many to collect before returning, at least 1.
+            timeout_ms: Milliseconds allowed for the whole collection, at most
+                `TIMEOUT_MS_MAX`. `0` looks once without waiting, `-1` waits
+                forever.
+
+        Returns:
+            The notifications collected, oldest first; fewer than `n` when the
+            budget ran out first.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `<method>() called while
+                Connecting` or when `timeout_ms` is outside
+                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.ENCODING` for a
+                notification whose text is not UTF-8 (see `notifications`),
+                or `PgErrorKind.CONNECTION` when the connection is lost --
+                `<method>() called on a lost connection` once the status has
+                turned `CONNECTION_BAD`.
+        """
+        _reject_bad_timeout(timeout_ms)
+        self._reject_connecting(method)
+        self._reject_lost(method)
+        var out = List[Notification]()
+        var deadline = monotonic() + timeout_ms * 1_000_000
+        while True:
+            var found: List[Notification]
+            try:
+                found = self.notifications()
+            except e:
+                # A rejection on a later round trip must not cost the caller
+                # the notifications of the earlier ones: what this call has
+                # collected goes back in front of `_pending`, so the next
+                # call delivers it in the order it arrived.
+                var restored = List[Notification]()
+                for i in range(len(out)):
+                    restored.append(out[i].copy())
+                for i in range(len(self._pending)):
+                    restored.append(self._pending[i].copy())
+                self._pending = restored^
+                raise e^
+            for i in range(len(found)):
+                if len(out) < n:
+                    out.append(found[i].copy())
+                else:
+                    self._pending.append(found[i].copy())
+            if len(out) >= n:
+                return out^
+            var remaining = -1
+            if timeout_ms >= 0:
+                var left = deadline - monotonic()
+                # Round up, as `fetch_all` does: a sub-millisecond remainder
+                # is still time the caller allowed.
+                remaining = (left + 999_999) // 1_000_000 if left > 0 else 0
+                if remaining <= 0:
+                    return out^
+            try:
+                self.wait_readable(remaining)
+            except e:
+                if e.kind == PgErrorKind.TIMEOUT:
+                    return out^
+                raise e^
+
     def wait_notification(
         mut self, timeout_ms: Int
     ) raises PgError -> Optional[Notification]:
         """Wait for one `LISTEN` / `NOTIFY` message and return it.
 
-        The `notifications` / wait loop written once, with a budget for the
-        whole wait. Running out of it is **not** an error here, unlike every
-        other budget in this struct: nothing arriving is the ordinary outcome
-        of listening, so it answers None.
+        `_collect_notifications` asked for one: running out of the budget is
+        not an error, it is None.
 
         A round trip can deliver several notifications at once while this
         returns one, so the surplus is held and the next call answers from it
@@ -1610,27 +1687,55 @@ struct AsyncConnection(Movable):
                 `wait_notification() called on a lost connection` once the
                 status has turned `CONNECTION_BAD`.
         """
+        var found = self._collect_notifications(
+            "wait_notification", 1, timeout_ms
+        )
+        if len(found) == 0:
+            return None
+        return found[0].copy()
+
+    def wait_notifications(
+        mut self, n: Int, timeout_ms: Int
+    ) raises PgError -> List[Notification]:
+        """Wait for `n` `LISTEN` / `NOTIFY` messages and return them.
+
+        One budget for the whole batch rather than one per notification, and
+        an expired budget is an answer rather than an error: a reader that
+        wants five and gets two in the time it allowed is told so, and the
+        two are real. That is what distinguishes this from a `wait_notification`
+        loop, which cannot tell a caller how much of its budget is left.
+
+        The surplus of a round trip that delivers more than `n` is held, so a
+        following `wait_notification` or `wait_notifications` answers from it
+        without waiting. `n = Int.MAX` is therefore a way to say "everything
+        that arrives within the budget" rather than an error.
+
+        Args:
+            n: How many notifications to collect, at least 1.
+            timeout_ms: Milliseconds allowed for the whole batch, at most
+                `TIMEOUT_MS_MAX`. `0` looks once without waiting, `-1` waits
+                forever.
+
+        Returns:
+            Exactly `n` notifications, oldest first, or the 0 to `n - 1` that
+            arrived before the budget ran out.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` with `wait_notifications: n must be
+                at least 1 (got N)` for an `n` below 1, with
+                `wait_notifications() called while Connecting`, or when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`,
+                `PgErrorKind.ENCODING` for a notification whose text is not
+                UTF-8 (see `notifications`) -- the ones already collected are
+                kept for the next call -- or `PgErrorKind.CONNECTION` when the
+                connection is lost.
+        """
         _reject_bad_timeout(timeout_ms)
-        self._reject_connecting("wait_notification")
-        self._reject_lost("wait_notification")
-        var deadline = monotonic() + timeout_ms * 1_000_000
-        while True:
-            var found = self.notifications()
-            if len(found) > 0:
-                for i in range(1, len(found)):
-                    self._pending.append(found[i].copy())
-                return found[0].copy()
-            var remaining = -1
-            if timeout_ms >= 0:
-                var left = deadline - monotonic()
-                # Round up, as `fetch_all` does: a sub-millisecond remainder
-                # is still time the caller allowed.
-                remaining = (left + 999_999) // 1_000_000 if left > 0 else 0
-                if remaining <= 0:
-                    return None
-            try:
-                self.wait_readable(remaining)
-            except e:
-                if e.kind == PgErrorKind.TIMEOUT:
-                    return None
-                raise e^
+        if n < 1:
+            raise PgError(
+                PgErrorKind.USAGE,
+                String(
+                    "wait_notifications: n must be at least 1 (got ", n, ")"
+                ),
+            )
+        return self._collect_notifications("wait_notifications", n, timeout_ms)

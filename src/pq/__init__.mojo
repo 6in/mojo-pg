@@ -247,7 +247,9 @@ print(results[0][0].get[Int32](1))
   then collect with `notifications` (everything that has arrived, possibly
   nothing) or `wait_notification` (one, with a budget). Neither promises
   that one call sees every notification already sent, so a reader that needs
-  *n* of them keeps calling. `wait_notification` answers None when its
+  *n* of them keeps calling -- or calls `wait_notifications(n, timeout_ms)`,
+  which collects up to *n* with one budget and answers with what it has when
+  the budget ends. `wait_notification` answers None when its
   budget runs out -- nothing arriving is a normal outcome, not a `TIMEOUT`.
   Channel and payload are checked as UTF-8 like any text value, so a
   notification carrying other bytes (which a `SQL_ASCII` database allows) is
@@ -284,6 +286,7 @@ called in a state the step does not belong to:
 | `cancel()` | nothing | `USAGE`, `CONNECTION` |
 | `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION`, `ENCODING` (channel or payload is not UTF-8) |
 | `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION`, `ENCODING` |
+| `wait_notifications(n, timeout_ms)` | `List[Notification]`, 0 to n-1 of them on an expired budget | `USAGE`, `CONNECTION`, `ENCODING` |
 | `wait_readable(timeout_ms)`, `wait_writable(timeout_ms)` | nothing | `TIMEOUT`, `CONNECTION`, `USAGE` |
 
 `AsyncState` is `CONNECTING` / `IDLE` / `SENDING` / `BUSY` and `PollState`

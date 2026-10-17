@@ -1003,6 +1003,30 @@ def _wait_notification_error(
     raise Error("expected a PgError from wait_notification")
 
 
+def _wait_notifications_error(
+    mut conn: AsyncConnection, n: Int, timeout_ms: Int
+) raises -> PgError:
+    """Return the `PgError` raised by a `wait_notifications` that must fail.
+
+    Args:
+        conn: The connection to listen on.
+        n: How many notifications to ask for.
+        timeout_ms: Milliseconds to wait in total.
+
+    Returns:
+        The raised `PgError`.
+
+    Raises:
+        Error: If the call returned instead of raising.
+    """
+    try:
+        var got = conn.wait_notifications(n, timeout_ms)
+        _ = got^
+    except e:
+        return e^
+    raise Error("expected a PgError from wait_notifications")
+
+
 def _assert_timeout_too_large(error: PgError) raises:
     """Check that `error` is the refusal of a budget above the `c_int` bound.
 
@@ -1378,6 +1402,9 @@ def test_every_call_while_connecting_is_usage() raises:
     _assert_connecting_usage(_consume_input_error(conn), "consume_input")
     _assert_connecting_usage(_poll_result_error(conn), "poll_result")
     _assert_connecting_usage(_notifications_error(conn), "notifications")
+    _assert_connecting_usage(
+        _wait_notifications_error(conn, 1, 100), "wait_notifications"
+    )
     _assert_connecting_usage(_fetch_all_error(conn, 100), "fetch_all")
     # None of them touched the handshake, which still completes.
     _poll_to_ready(conn)
@@ -1415,6 +1442,7 @@ def test_a_budget_above_c_int_max_is_usage_at_every_entry() raises:
     # connection is still `Busy` and the results are still collectable.
     assert_true(conn.state() == AsyncState.BUSY)
     _assert_timeout_too_large(_wait_notification_error(conn, 4294967296))
+    _assert_timeout_too_large(_wait_notifications_error(conn, 1, 4294967296))
     _assert_timeout_too_large(_connect_blocking_error(_conninfo(), 4294967296))
     var took = _elapsed_ms(t0)
     assert_true(took < 1000, "the rejections took " + String(took) + " ms")
