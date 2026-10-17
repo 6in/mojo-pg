@@ -516,7 +516,7 @@ def test_a_payload_that_is_not_utf8_is_rejected_and_dropped() raises:
     # same bytes, so a notification must not quietly carry them.
     _ = _execute(sender, "NOTIFY pq_f1, E'ab\\xC3\\x28'")
     var error = _wait_notification_error(listener, 2000)
-    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
     assert_true(
         error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
     )
@@ -560,7 +560,7 @@ def test_a_channel_that_is_not_utf8_is_rejected_and_dropped() raises:
         ),
     )
     var error = _wait_notification_error(listener, 2000)
-    assert_true(error.kind == PgErrorKind.TYPE_MISMATCH, String(error))
+    assert_true(error.kind == PgErrorKind.ENCODING, String(error))
     assert_true(
         error.message.find("invalid UTF-8 at byte 2") >= 0, error.message
     )
@@ -729,6 +729,51 @@ def test_notifications_reports_a_lost_connection() raises:
     )
     assert_true(
         error.value().kind == PgErrorKind.CONNECTION, String(error.value())
+    )
+    _ = killer^
+
+
+def test_a_lost_connection_is_reported_with_a_fixed_message() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t5_fixed")
+    var listener_pid = _async_backend_pid(listener)
+    var killer = _open(_conninfo())
+    _ = _execute(
+        killer, "SELECT pg_terminate_backend(" + String(listener_pid) + ")"
+    )
+    # Same retry as the test above: the loss is only observable once the
+    # kernel has seen the end of the stream.
+    var error = Optional[PgError](None)
+    var tries = 0
+    while tries < 20:
+        tries += 1
+        error = _notifications_error(listener)
+        if error:
+            break
+        _pause_until_readable(listener, 50)
+    assert_true(
+        Bool(error),
+        "notifications() still succeeded after " + String(tries) + " tries",
+    )
+    # Every later call has to answer with exactly the same message. libpq
+    # appends to its own error buffer, so reading `PQerrorMessage` after a
+    # lost connection grows the text on each call; the message asserted
+    # here is ours, and three calls must not make it any longer.
+    for _ in range(3):
+        var again = _notifications_error(listener)
+        assert_true(Bool(again), "notifications() succeeded after the loss")
+        assert_true(
+            again.value().kind == PgErrorKind.CONNECTION, String(again.value())
+        )
+        assert_equal(
+            again.value().message, "notifications() called on a lost connection"
+        )
+    # `wait_notification` refuses the same connection under its own name,
+    # so the message names the method the caller actually called.
+    var waited = _wait_notification_error(listener, 100)
+    assert_true(waited.kind == PgErrorKind.CONNECTION, String(waited))
+    assert_equal(
+        waited.message, "wait_notification() called on a lost connection"
     )
     _ = killer^
 

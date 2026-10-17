@@ -1,6 +1,6 @@
 """Error types for the `pq` package.
 
-Defines `PgErrorKind`, a small `Int` newtype enumerating the seven failure
+Defines `PgErrorKind`, a small `Int` newtype enumerating the eight failure
 categories the package can report, and `PgError`, the single error type raised
 by `pq` APIs via typed `raises PgError`.
 """
@@ -10,8 +10,9 @@ by `pq` APIs via typed `raises PgError`.
 struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
     """Category of a `PgError`.
 
-    An `Int` newtype with exactly seven constants: `LIBPQ_LOAD`, `CONNECTION`,
-    `SERVER`, `NULL_VALUE`, `TYPE_MISMATCH`, `USAGE` and `TIMEOUT`.
+    An `Int` newtype with exactly eight constants: `LIBPQ_LOAD`, `CONNECTION`,
+    `SERVER`, `NULL_VALUE`, `TYPE_MISMATCH`, `USAGE`, `TIMEOUT` and
+    `ENCODING`.
     """
 
     var value: Int
@@ -49,6 +50,15 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
     Raised only by the asynchronous API's blocking helpers. The connection is
     untouched and still usable: the statement is simply still running, so the
     caller can keep waiting, or `cancel()` it.
+    """
+
+    comptime ENCODING = Self(7)
+    """Text that reached the client is not valid UTF-8.
+
+    Raised for a column decoded as `String` / `StringSlice`, or for a
+    notification's channel or payload. The offending bytes are never quoted
+    in the message. Distinct from `TYPE_MISMATCH`, which is about OIDs,
+    widths and indices.
     """
 
     def __eq__(self, other: Self) -> Bool:
@@ -93,6 +103,8 @@ struct PgErrorKind(Equatable, TrivialRegisterPassable, Writable):
             writer.write("Usage")
         elif self == Self.TIMEOUT:
             writer.write("Timeout")
+        elif self == Self.ENCODING:
+            writer.write("Encoding")
 
 
 struct PgError(Copyable, Writable):

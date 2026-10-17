@@ -540,7 +540,7 @@ struct Result(Iterable, Movable, Sized):
         The length comes from `PQgetlength` rather than from a NUL scan, so a
         `text` value holding an embedded NUL arrives whole instead of being
         cut at the NUL, and the bytes are checked as UTF-8 before they become
-        a `String`: an invalid sequence is a `TYPE_MISMATCH` naming the byte
+        a `String`: an invalid sequence is an `ENCODING` error naming the byte
         offset, not a silently mangled value.
 
         Args:
@@ -554,7 +554,8 @@ struct Result(Iterable, Movable, Sized):
         Raises:
             PgError: `TYPE_MISMATCH` when `PQgetvalue` returns NULL, which
                 only happens for an out-of-range coordinate that skipped
-                `_check_cell`, or when the cell is not valid UTF-8.
+                `_check_cell`, or `ENCODING` when the cell is not valid
+                UTF-8.
         """
         var p = self._pq[].PQgetvalue(self._res, c_int(row), c_int(col))
         if not p:
@@ -845,13 +846,13 @@ struct Row[origin: ImmOrigin](Copyable):
            `_ = res^` is **not** a destroy: it is a keep-alive marker, so
            `var s = res[0].get_text(0); _ = res^; print(s)` is correct.
         3. The bytes are checked as UTF-8 before the slice is handed back, so
-           an invalid sequence raises `TYPE_MISMATCH` naming the byte offset
+           an invalid sequence raises `ENCODING` naming the byte offset
            (the cell's own bytes are never put in the message) rather than
            coming back as a malformed slice. What `pq` does **not** do is set
            `client_encoding`: libpq defaults it to the database's
            `server_encoding` unless `PGCLIENTENCODING` says otherwise, so a
            connection to a non-UTF-8 database turns every non-ASCII cell into
-           that `TYPE_MISMATCH`. The test suite checks the encoding is `UTF8`
+           that `ENCODING` error. The test suite checks the encoding is `UTF8`
            on the test containers.
         4. No `ref` is returned, here or anywhere else in `pq`: the slice
            carries the origin, so there is no reference to outlive.
@@ -875,9 +876,10 @@ struct Row[origin: ImmOrigin](Copyable):
         Raises:
             PgError: `NULL_VALUE` when the cell is SQL NULL; `TYPE_MISMATCH`
                 when `col` is outside `0..Result.column_count() - 1`, when
-                the column is binary and its OID is not one of the six, when
-                a binary `jsonb` cell is empty or carries a version byte
-                other than 1, or when the cell is not valid UTF-8.
+                the column is binary and its OID is not one of the six, or
+                when a binary `jsonb` cell is empty or carries a version
+                byte other than 1; `ENCODING` when the cell is not valid
+                UTF-8.
         """
         var bytes = self.get_bytes(col)
         if self._res[].column_format(col) == ResultFormat.BINARY:

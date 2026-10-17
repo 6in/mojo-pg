@@ -129,7 +129,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
     - A: (d) `tests/test_notify.mojo` の `_drop_ascii_database` + `_ascii_conninfo` の書き換え + 2 テスト末尾の DROP + docstring（対象: `tests/test_notify.mojo` のみ。(e) の陽性対照 scratch も A が作って 54317 で 1 回回す）
     - 親: (a)(b)(c)(f)(g)(h)(i)
 
-- [ ] T2: `PgErrorKind.ENCODING`（§4.6.2 / D9）+ `notifications()` の先行チェック（§4.6）+ UTF-8 スキャナの 4 バイト境界 2 件（§4.6）+ 既存テストの期待値変更
+- [x] T2: `PgErrorKind.ENCODING`（§4.6.2 / D9）+ `notifications()` の先行チェック（§4.6）+ UTF-8 スキャナの 4 バイト境界 2 件（§4.6）+ 既存テストの期待値変更
   - 完了基準:
     - (a) D9 / 決めた事項 2: `src/pq/errors.mojo:46-52` の後に `comptime ENCODING = Self(7)` + docstring（「Text that reached the client is not valid UTF-8: a column decoded as `String` /
       `StringSlice`, or a notification's channel / payload. The offending bytes are never quoted in the message. Distinct from `TYPE_MISMATCH`, which is about OIDs, widths and indices」）、

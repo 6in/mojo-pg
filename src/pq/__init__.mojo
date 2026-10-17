@@ -32,7 +32,7 @@ binary it accepts only the six string-shaped OIDs in the table, because
 there is nothing sensible to hand back for the others.
 
 Every cell that becomes a `String`, a `StringSlice` or text handed to a
-decoder is checked as UTF-8 first: an invalid sequence is a `TYPE_MISMATCH`
+decoder is checked as UTF-8 first: an invalid sequence is an `ENCODING` error
 reading `invalid UTF-8 at byte N of column M`, with the cell's own bytes left
 out of the message. An embedded NUL is **not** invalid -- the length comes
 from `PQgetlength`, never from a NUL scan, so a `text` value holding a NUL
@@ -119,7 +119,7 @@ for row in res:
   OIDs in binary; `get_bytes` accepts every column in either format and hands
   back the region as it is, so a `bytea` is the eight bytes of `\\x00ff00` in
   text format and the three bytes `00 ff 00` in binary. `get_text` checks the
-  region as UTF-8 and raises `TYPE_MISMATCH` with the byte offset when it is
+  region as UTF-8 and raises `ENCODING` with the byte offset when it is
   not; `get_bytes` has no encoding to check. `pq` still never sets
   `client_encoding`: libpq defaults it to the database's `server_encoding`
   (or `PGCLIENTENCODING`), and the tests only check that this is `UTF8` on
@@ -251,8 +251,8 @@ print(results[0][0].get[Int32](1))
   budget runs out -- nothing arriving is a normal outcome, not a `TIMEOUT`.
   Channel and payload are checked as UTF-8 like any text value, so a
   notification carrying other bytes (which a `SQL_ASCII` database allows) is
-  dropped with a `TYPE_MISMATCH` instead of arriving mangled; the connection
-  stays usable and the next call delivers the rest.
+  dropped with an `ENCODING` error instead of arriving mangled; the
+  connection stays usable and the next call delivers the rest.
 
 ```mojo
 conn.send("LISTEN jobs")
@@ -282,8 +282,8 @@ called in a state the step does not belong to:
 | `poll_result()` | `Optional[Result]` | `USAGE`, `CONNECTION`, `SERVER` |
 | `fetch_all(timeout_ms)` | `List[Result]` | `TIMEOUT`, `USAGE`, `SERVER`, `CONNECTION` |
 | `cancel()` | nothing | `USAGE`, `CONNECTION` |
-| `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION`, `TYPE_MISMATCH` (channel or payload is not UTF-8) |
-| `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION`, `TYPE_MISMATCH` |
+| `notifications()` | `List[Notification]` | `USAGE`, `CONNECTION`, `ENCODING` (channel or payload is not UTF-8) |
+| `wait_notification(timeout_ms)` | `Optional[Notification]`, None on an expired budget | `USAGE`, `CONNECTION`, `ENCODING` |
 | `wait_readable(timeout_ms)`, `wait_writable(timeout_ms)` | nothing | `TIMEOUT`, `CONNECTION`, `USAGE` |
 
 `AsyncState` is `CONNECTING` / `IDLE` / `SENDING` / `BUSY` and `PollState`
@@ -293,7 +293,7 @@ is `NEED_READ` / `NEED_WRITE` / `READY`; a failed handshake is the raised
 
 ## `PgErrorKind`
 
-Every `pq` API raises `PgError`, and its `kind` is one of exactly seven
+Every `pq` API raises `PgError`, and its `kind` is one of exactly eight
 values. The name in parentheses is what `PgErrorKind.write_to` prints:
 
 - `LIBPQ_LOAD` (`LibpqLoad`) -- libpq itself could not be loaded.
@@ -310,6 +310,9 @@ values. The name in parentheses is what `PgErrorKind.write_to` prints:
   diagnostics are empty.
 - `TIMEOUT` (`Timeout`) -- an asynchronous wait ran out of time. The
   connection is untouched and still usable.
+- `ENCODING` (`Encoding`) -- text that reached the client is not UTF-8: a
+  `String` cell or a notification's channel / payload. The connection and
+  the result are untouched.
 
 The two embedded-NUL cases are deliberately **not** the same kind: a NUL
 byte in the `sql` text is `TYPE_MISMATCH`, like every other argument libpq

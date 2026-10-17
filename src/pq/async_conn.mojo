@@ -264,7 +264,7 @@ def _reject_bad_notification_text[
     `SQL_ASCII` database accepts `NOTIFY ch, E'ab\\xC3\\x28'` and libpq hands
     the bytes over untouched, so without this a `Notification` could carry a
     `String` that is not UTF-8 -- while `get_text` rejects the very same bytes
-    as `TYPE_MISMATCH`.
+    as `ENCODING`.
 
     The message names the offset but never the bytes, for the reason
     `_validated_utf8` gives: text that is not UTF-8 cannot be quoted in an
@@ -278,7 +278,7 @@ def _reject_bad_notification_text[
         what: Which part of the notification it is, for the message.
 
     Raises:
-        PgError: `PgErrorKind.TYPE_MISMATCH` with the message `invalid UTF-8
+        PgError: `PgErrorKind.ENCODING` with the message `invalid UTF-8
             at byte N of notification <what>` when `bytes` are not
             well-formed UTF-8.
     """
@@ -292,11 +292,11 @@ def _reject_bad_notification_text[
         # Unreachable unless the scanner and the stdlib disagree; still a
         # rejection, just without a position to name.
         raise PgError(
-            PgErrorKind.TYPE_MISMATCH,
+            PgErrorKind.ENCODING,
             String("invalid UTF-8 of notification ", what),
         )
     raise PgError(
-        PgErrorKind.TYPE_MISMATCH,
+        PgErrorKind.ENCODING,
         String("invalid UTF-8 at byte ", offset, " of notification ", what),
     )
 
@@ -591,6 +591,28 @@ struct AsyncConnection(Movable):
             raise PgError(
                 PgErrorKind.USAGE,
                 String(method, "() called while ", self._state),
+            )
+
+    def _reject_lost(self, method: StaticString) raises PgError:
+        """Raise `CONNECTION` when the connection is already known lost.
+
+        Asked before libpq is, so a caller that keeps polling a dead
+        connection gets the same message every time. libpq appends to its
+        own error buffer on every refused call, so without this the message
+        from `PQerrorMessage` grows by a `connection not open` line per
+        call -- the same failure, reported differently each time.
+
+        Args:
+            method: Name of the calling method, without parentheses.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` with `<method>() called on a
+                lost connection` when `PQstatus` is `CONNECTION_BAD`.
+        """
+        if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(method, "() called on a lost connection"),
             )
 
     def _connection_error(self) -> PgError:
@@ -1369,8 +1391,8 @@ struct AsyncConnection(Movable):
 
         Channel and payload are checked as UTF-8 before they become a
         `Notification`, the way `Row.get_text` checks a cell: a `SQL_ASCII`
-        database can deliver bytes that are not UTF-8, and that is a
-        `TYPE_MISMATCH` rather than a silently mangled string. Only the
+        database can deliver bytes that are not UTF-8, and that is an
+        `ENCODING` error rather than a silently mangled string. Only the
         offending notification is lost -- the connection stays usable, its
         state is untouched, and notifications already collected by the same
         call are delivered by the next one.
@@ -1381,12 +1403,15 @@ struct AsyncConnection(Movable):
 
         Raises:
             PgError: `PgErrorKind.USAGE` with `notifications() called while
-                Connecting`, `PgErrorKind.TYPE_MISMATCH` with `invalid UTF-8
+                Connecting`, `PgErrorKind.ENCODING` with `invalid UTF-8
                 at byte N of notification channel` / `... payload`, or
-                `PgErrorKind.CONNECTION` when the connection is lost,
-                carrying libpq's own message.
+                `PgErrorKind.CONNECTION` when the connection is lost --
+                `notifications() called on a lost connection` once the
+                status has turned `CONNECTION_BAD`, otherwise libpq's own
+                message.
         """
         self._reject_connecting("notifications")
+        self._reject_lost("notifications")
         if self._pq[].PQconsumeInput(self._conn) == 0:
             raise self._connection_error()
         var found = self._pending.copy()
@@ -1579,12 +1604,15 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.USAGE` with `wait_notification() called
                 while Connecting` or when `timeout_ms` is outside
-                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.TYPE_MISMATCH` for a
+                `-1 .. TIMEOUT_MS_MAX`, `PgErrorKind.ENCODING` for a
                 notification whose text is not UTF-8 (see `notifications`),
-                or `PgErrorKind.CONNECTION` when the connection is lost.
+                or `PgErrorKind.CONNECTION` when the connection is lost --
+                `wait_notification() called on a lost connection` once the
+                status has turned `CONNECTION_BAD`.
         """
         _reject_bad_timeout(timeout_ms)
         self._reject_connecting("wait_notification")
+        self._reject_lost("wait_notification")
         var deadline = monotonic() + timeout_ms * 1_000_000
         while True:
             var found = self.notifications()

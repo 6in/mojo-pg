@@ -38,13 +38,14 @@ number:
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
 The bytes are checked to be well-formed UTF-8 first, and a cell that is not
-raises `PgErrorKind.TYPE_MISMATCH` naming the byte offset and the column but
+raises `PgErrorKind.ENCODING` naming the byte offset and the column but
 never quoting the cell. `pq` still does not set `client_encoding`, so it is
 the server's `client_encoding` that decides whether cells arrive as UTF-8 at
 all.
 
-Every failure raises `PgError(PgErrorKind.TYPE_MISMATCH, ...)`; an OID
-mismatch message points the caller at `ResultFormat.TEXT` as the fallback.
+Every failure raises `PgError(PgErrorKind.TYPE_MISMATCH, ...)` except the
+UTF-8 check, which raises `ENCODING`; an OID mismatch message points the
+caller at `ResultFormat.TEXT` as the fallback.
 """
 
 from std.memory import bitcast
@@ -326,7 +327,7 @@ def _validated_utf8[
         A `StringSlice` over `bytes`, borrowed from the same storage.
 
     Raises:
-        PgError: `PgErrorKind.TYPE_MISMATCH` with the message
+        PgError: `PgErrorKind.ENCODING` with the message
             `invalid UTF-8 at byte N of column M` when `bytes` are not
             well-formed UTF-8.
     """
@@ -340,11 +341,11 @@ def _validated_utf8[
         # Unreachable unless the scanner and the stdlib disagree; still a
         # rejection, just without a position to name.
         raise PgError(
-            PgErrorKind.TYPE_MISMATCH,
+            PgErrorKind.ENCODING,
             String("invalid UTF-8 of column ", label),
         )
     raise PgError(
-        PgErrorKind.TYPE_MISMATCH,
+        PgErrorKind.ENCODING,
         String("invalid UTF-8 at byte ", offset, " of column ", label),
     )
 
@@ -856,7 +857,7 @@ def decode_binary[
         PgError: `PgErrorKind.TYPE_MISMATCH` when `oid` does not match
             `T`, when a fixed-width cell has the wrong number of bytes, or
             when the wire value is outside the type's domain.
-        PgError: `PgErrorKind.TYPE_MISMATCH` with the message
+        PgError: `PgErrorKind.ENCODING` with the message
             `invalid UTF-8 at byte N of column M` when `T` is `String` and
             the cell's payload is not well-formed UTF-8. The message names
             the position only; it never quotes the cell.

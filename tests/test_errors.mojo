@@ -65,5 +65,11 @@ def test_timeout_kind_discriminant_and_name() raises:
     assert_true(PgErrorKind.TIMEOUT != PgErrorKind.USAGE)
 
 
+def test_encoding_kind_discriminant_and_name() raises:
+    assert_equal(PgErrorKind.ENCODING.value, 7)
+    assert_equal(String(PgErrorKind.ENCODING), "Encoding")
+    assert_true(PgErrorKind.ENCODING != PgErrorKind.TYPE_MISMATCH)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
