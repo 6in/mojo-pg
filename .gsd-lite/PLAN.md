@@ -240,7 +240,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
   - 依存: T1（TRACE.md の存在）
   - 並列サブ作業: サブエージェント **0 本（親が全部）**。src 2 ファイルとも小さく、(d) は (a) が決まってから
 
-- [ ] T5: ベンチマーク（§4.1 / D2）— pixi feature `bench` + `examples/bench_psycopg.py` + `pixi.lock` + 実測ログ
+- [x] T5: ベンチマーク（§4.1 / D2）— pixi feature `bench` + `examples/bench_psycopg.py` + `pixi.lock` + 実測ログ
   - 完了基準:
     - (a) RESEARCH §2.1 / 決めた事項 10: `pixi.toml` に `[feature.bench.dependencies] python = ">=3.10"` / `psycopg = ">=3.2"`、`[feature.bench.tasks] bench-psycopg = "python examples/bench_psycopg.py"`、
       `[environments] bench = { features = ["bench"], solve-group = "default" }`（`scratch/turn-001-pixi/pixi.toml` の 3 ブロックとコメントをそのまま。`[dependencies]` は触らない → default 環境の python 3.15 は不変）。
@@ -248,7 +248,9 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
     - (b) `examples/bench_psycopg.py` = `scratch/turn-001-pixi/examples/bench_psycopg.py` をそのまま（`SQL` / `ROWS` / `RUNS` は `examples/bench_formats.mojo:30-40` と同値、`autocommit=True`、warm-up 1 + 3 回 text / binary 交互、
       全セルを読む、`rows != ROWS` や合計 0 で exit 1、`psycopg.Error` → `failed: <型名> <message>` + exit 1）。先頭 docstring に「Run it with `pixi run bench-psycopg`」があることを確認（RESEARCH 版にある）
     - (c) 堅牢性（§4.1 / §5）: `PQ_TEST_CONNINFO="host=127.0.0.1 port=54317 user=pq password=wrong dbname=pq_test"` と `"... port=54390 ... connect_timeout=3"` を環境で渡した `pixi run bench-psycopg` が
-      **`failed: OperationalError ...` の 1 行 + 終了コード 1**、`Traceback` が出ない。結果を PROGRESS に 1 行
+      **`failed: OperationalError ...` で始まる 1 レコード + 終了コード 1**、`Traceback` が出ない。結果を PROGRESS に 1 行
+      （PLAN 訂正: 「1 行」→「1 レコード」。libpq の message 自体が `Is the server running on that host ...` のヒント行を含むため、
+      接続拒否のケースは物理 2 行になる。`^failed: OperationalError` の行数が 1 で `Traceback` が 0 なら合格）
     - (d) 実測（P14 / REQ §9「`check` 直後に測らない」）: `check` を回した直後ではなく、**アイドル時に** `pixi run bench` → `pixi run bench-psycopg` → `pixi run bench` → `pixi run bench-psycopg` の順で 2 回ずつ
       回し、全出力を `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-NNN-bench.log` に残す（`tee`）。先頭に `date -Iseconds` と `lsb_release -ds` / `nproc` / `pixi run mojo --version` /
       `docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SHOW server_version"` の出力を書く（README の計測環境欄の原本）。**受け入れ（REQ §4.1）**: Mojo の `decode` 列で **binary < text** が 2 回とも成立
