@@ -35,9 +35,11 @@ Mojo（1.1.0）から libpq の非ブロッキング API を使い、**明示的
 
 - `poll_socket(fd: Int, want_read: Bool, want_write: Bool, timeout_ms: Int) raises PgError -> PollEvents`
   （名前は plan が決めてよい）。Linux / macOS は libc `poll()` を `external_call` で呼び、`struct pollfd` を Mojo の struct で定義する
-  （`fd: Int32`、`events: Int16`、`revents: Int16`。レイアウトは両 OS で同じ。`POLLIN` / `POLLOUT` / `POLLERR` / `POLLHUP` / `POLLNVAL` の値は
-  OS で異なる → research が確定）
-- Windows は `WSAPoll`（`ws2_32.dll`）と `SOCKET`（ポインタ幅）の分岐を `@parameter if`（コンパイル時 OS 判定。手段は research）で**書くが未検証**。
+  （`fd: Int32`、`events: Int16`、`revents: Int16`。レイアウトは両 OS で同じ。`POLLIN 0x0001` / `POLLOUT 0x0004` / `POLLERR 0x0008` / `POLLHUP 0x0010` /
+  `POLLNVAL 0x0020` は **Linux（x86_64 / aarch64）と macOS で同一**、Windows の `WSAPoll` だけ別値（`POLLIN 0x0300` / `POLLOUT 0x0010` / `POLLERR 0x0001` / `POLLHUP 0x0002` /
+  `POLLNVAL 0x0004`）（research turn 1 訂正。RESEARCH §2.3））
+- Windows は `WSAPoll`（`ws2_32.dll`）と `SOCKET`（ポインタ幅。`WSAPOLLFD` は 16 byte）の分岐を `comptime if CompilationTarget.is_linux(): ... elif CompilationTarget.is_macos(): ... else:` の
+  **`else`** に**書くが未検証**（Mojo 1.1.0 に `is_windows()` も `platform_map(windows=)` も無く、`@parameter if` は構文エラー。research turn 1 訂正）。
   モジュール docstring に「未検証」と明記。Phase 5 がレビュー
 - `timeout_ms`: `0` は即時、`-1` は無期限（libc `poll` と同じ）、それ以外は正のミリ秒。負の `-1` 以外は `USAGE`
 - `EINTR` は残り時間で再試行する（単調時計で測る。手段は research）
@@ -134,7 +136,8 @@ Mojo（1.1.0）から libpq の非ブロッキング API を使い、**明示的
 - §5.1 の 4 件を 1 件ずつテストにする。`pg_sleep(2)` のカウンタは「`poll_result` が `None` を返した回数 ≥ 1 かつ経過 ≥ 2 s」で判定
 - cancel: `send("SELECT pg_sleep(10)")` → `wait_readable(100)` を 1 回 → `cancel()` → `fetch_all(5000)` が `57014` で失敗し、`cancel()` 呼び出しから
   例外までの経過が 1 s 未満（単調時計）
-- NOTIFY: 別 `Connection` から `NOTIFY` 2 件（payload あり / 空）→ `notifications()` が 2 件、順序とフィールドが一致。`backend_pid` が
+- NOTIFY: 別 `Connection` から `NOTIFY` 2 件（payload あり / 空）→ `wait_notification(2000)` を 2 回呼んで 2 件（2 件は別メッセージで届き、1 回の `notifications()` では
+  1 件しか揃わないことがある。PG14 で実測。research turn 1 訂正）、順序とフィールドが一致。3 回目の `wait_notification(200)` は `None`。`backend_pid` が
   `SELECT pg_backend_pid()` と一致
 - タイムアウト: docker-compose に「accept するが応答しない」リスナー（D10。ポートは `54399`、方法は research）を足し、
   `connect_blocking(conninfo, 500)` が `TIMEOUT` で戻り、経過が 500 ms 以上 1,500 ms 未満
