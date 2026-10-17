@@ -385,3 +385,12 @@
   - `empty polls while waiting` は例の形を変えたので値が動く（今回 17。`n = 1` の行は不変）
   - 未確認: なし（F1 で足したコードはすべてテストが通る。`_reject_bad_notification_text` の
     `offset < 0` 分岐だけは TRACE §3 #9 と同じ到達不能分岐で、どちらでも `TYPE_MISMATCH`）
+
+## turn 13 — verify — round 2: 合格 / 指摘 0 / `main` へ `--no-ff` ローカルマージ成功
+- やったこと: サブエージェントなし（F1 差分 +296 / -45 を親が通読）。PLAN F1 末尾「修正後にプローブで期待される変化」を `turn-011-probe-grid` / `turn-011-sec-timeout` / `turn-012-ascii-notify` の再実行で全項目一致を確認
+  （P1 と timeout 4 入口が `Usage`、SQL_ASCII 通知が `TypeMismatch`、P2〜P5 不変）。クリーンな `pixi run check` **6/6 PASS**（19:18:02 → 19:20:49 = **167 s**、47 サマリ `0 failed`、`skipped 1` ×2）、
+  追従先チェックリスト再実行は turn 12 と diff なし。VERIFICATION.md §8 に round 2 を追記して合格に更新 → `git checkout main` → `git merge --no-ff gsd-lite/phase4-async-cancel-notify`（衝突なし、42 ファイル）。ブランチは残す
+- 想定外: なし（P3 は 3 回とも `Busy` で `Sending` を 1 回も観測しなかったが、round 1 の「3 回中 1 回」と同じ非決定の範囲）
+- やり直し: 0 回
+- 次への注意: reflect は REQ §9 の実験（T5「テスト 2 ファイル型を 1 本」の USD を Phase 3 T6 の 2 本・USD 10.77 と比べる）を生ログから。verify 側の学び: round 1 の「修正後にプローブで期待される変化」を数で書いておいたので round 2 は 10 分で終わった（プローブ 3 本 + check 1 回 + 通読）。
+  テストが両サーバーに `pq_test_ascii` DB を残す（Phase 5 の環境整備で `db-reset` 相当を考える余地）。`PQcancel` の deprecated 注記と Windows 分岐の未検証は Phase 5 への申し送りのまま
