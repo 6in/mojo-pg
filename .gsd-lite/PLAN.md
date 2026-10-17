@@ -307,6 +307,40 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -tAc "SELECT datname FROM pg_data
   - 依存: T6
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（実行と転記だけ）
 
+- [ ] F1: `examples/bench_psycopg.py` の堅牢性（REQ §5 D4「どの入力・出力状態でもトレースバックを出さず … 終了コード 1」の取りこぼし 2 クラス）+ README の字句 1 件（verify round 1 / turn 10）
+  - 背景（`VERIFICATION.md` §3、生ログ `.gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-010-robust-grid.log`）: Mojo の examples 7 本と loader は入力クラス（非 UTF-8 / 制御文字 / 100 KB / 引用符不整合 /
+    空白のみ / 存在しない DB / `libc.so.6` / ディレクトリ / 空ファイル）× 出力クラス（`/dev/full` / 閉じた stdout / パイプ閉鎖）の全部で `failed: PgError(...)` + exit 1 か正常終了で、トレースバックなし。
+    **`bench_psycopg.py` だけ** 2 クラスで外れる: (ⅰ) `PQ_TEST_CONNINFO` に UTF-8 でないバイトがあると psycopg の `conninfo.encode()` が **`UnicodeEncodeError`（`ValueError` の子）** を投げ、
+    `except psycopg.Error` を素通りして **Traceback** + exit 1；(ⅱ) stdout が書けない（`/dev/full`）と、正常経路・badpw 経路とも終了時の flush で
+    **`Exception ignored while flushing sys.stdout: OSError`** が stderr に出て **exit 120**
+  - **期待結果（この表が唯一の正。完了基準とテストはこの表を参照する）**:
+
+    | 条件 | exit | stdout | stderr |
+    |---|---|---|---|
+    | `PQ_TEST_CONNINFO` に UTF-8 でないバイト（例 `$'... dbname=\xff\xfe\xc3\x28'`） | 1 | `failed: UnicodeEncodeError ...` の 1 レコード | 空（`Traceback` 0 行） |
+    | stdout が `/dev/full`（正常経路） | 1 | （書けない） | `failed: OSError ...` の 1 行。`Exception ignored` / `Traceback` 0 行 |
+    | stdout が `/dev/full`（badpw 経路） | 1 | （書けない） | 同上 |
+    | stdout が閉じたパイプ（`\| head -c 1`） | 0 か 1 | — | `Exception ignored` / `Traceback` 0 行 |
+    | 回帰: badpw / badport（T7 (b) の 2 本） | 1 | `failed: OperationalError ...` の 1 レコード | 空 |
+    | 回帰: 正常（`pixi run bench-psycopg`） | 0 | 従来どおり（`impl=c` の 1 行目 + 表） | 空 |
+
+  - 完了基準:
+    - (a) `main()` の例外処理を**親クラス**で 2 段にする（plan と同じ規則）: 既存 `except psycopg.Error` に加えて **`except ValueError`**（`UnicodeEncodeError` の親。conninfo の文字列を
+      psycopg がエンコードできない）を同じ `failed: <型名> <message>` + exit 1 に。**stdout の書き込み失敗は `OSError`** で受ける: 本体と上記 2 ハンドラの後に `sys.stdout.flush()` を
+      明示的に呼び（終了時の暗黙 flush に任せない）、`OSError` を捕まえたら Python 公式ドキュメント（`signal` モジュール「Note on SIGPIPE」）の手順
+      `os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())` で fd 1 を `/dev/null` に差し替えてから `failed: <型名> <message>` を **stderr** に 1 行書き exit 1
+      （差し替えないと終了時の flush がもう一度失敗して `Exception ignored` が出る）。`_run` の `sys.exit(1)`（件数不一致）は変えない。見込み **+12 行前後**、新しいテスト資源なし
+    - (b) 検証: `scratch/turn-010-robust-grid.sh` の `bench_psycopg.py` 節（12 本。`PY=.pixi/envs/bench/bin/python` で pixi のバナー無し）を `turn-NNN-bench-robust.sh` に写して実行し、
+      表の 6 行がすべて期待どおり（`grep -c` で `Traceback` 0 / `Exception ignored` 0 / `^failed:` 1）。ログ `scratch/turn-NNN-bench-robust.log`。
+      `pixi run bench-psycopg`（正常）が exit 0 で 1 行目 `psycopg 3.3.4 impl=c ...`
+    - (c) README §7「テストの回し方」の `PQ_TEST_CONNINFO` の括弧書き「`key=value ...` 形式のみ。`postgres://` の URI は受けません」を実態に合わせる: **URI を受けないのはテスト**
+      （`tests/run_tests.sh:11-12`: 末尾に ` password=...` を付け足すので URI では壊れる）で、examples は `Connection.open` が `PQconnectdb` に渡すので URI でも動く
+      （turn 10 の格子で `postgresql://pq:pq@127.0.0.1:54317/pq_test` の `basic` が exit 0）。1〜2 行の言い換え。`readme_h2` = 10 などチェックリストの README 行は不変
+    - (d) `pixi run check` 6/6 PASS（`.py` と README は `check` の対象外だが最終判定コマンドなので回す。基線 184 s、閾値 247 s）。チェックリスト全行が期待値（`bench_py_psycopg_error` ≥ 1 は不変）
+  - 対象: `examples/bench_psycopg.py`, `README.md`
+  - 依存: T7
+  - 並列サブ作業: サブエージェント **0 本（親が全部）**
+
 ## 決めた事項
 
 1. **タスク分割は RESEARCH §6 の T1〜T6 を 7 つに**（T2 を「`ENCODING` + 先行チェック + 格子」と「`wait_notifications` + 契約外テスト」に分けた）。T2 単体でも src 5 + tests 3 ファイルあり、

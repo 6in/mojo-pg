@@ -341,3 +341,18 @@
   `turn-008-readme-excerpts.py`（README コード片の逐語一致）/ `turn-008-typetable.py`（型表 19 行）。
   **`pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで**。verify 用 DB を作るなら `pq_verify_<turn>` で同ターンに消す。
   申し送り 1 件: Windows 実機は未検証（REQ §3 スコープ外。TRACE「未確認行の処分表」#7 と README §8 で開示済み）
+
+## turn 10 — verify — 指摘あり（F1 の 1 タスク、指摘 3 件）/ round 1 → impl に差し戻し / マージなし
+- やったこと: `git diff main...HEAD` のコード 20 ファイルを読み（サブエージェント 0 本）、`pixi run check` をクリーンな木で再実行（**6/6 PASS、184 s**、`0 failed` 47 件、
+  `pg_database` 両サーバー 0 行）、チェックリスト再実行（turn 9 と完全一致）、README のベンチ 12 セル × 4 行を `turn-007-bench.log` pass 1 と照合（一致）、
+  コード片 6 本 / 型表 19 行のスクリプト再実行（一致）、Windows 照合表 12 行を Microsoft Learn の 2 ページと突き合わせ（一致）。
+  round 1 の堅牢性格子 **37 本**（`scratch/turn-010-robust-grid.sh` / `.log`: 入力 = 非 UTF-8 / 制御文字 / 100 KB / 引用符不整合 / URI / `libc.so.6` / ディレクトリ / 空ファイル、
+  出力 = `/dev/full` / 閉じた stdout / パイプ閉鎖）。Mojo 側は全面クリーン、**`bench_psycopg.py` だけ 2 クラスで外れた** → PLAN 末尾に F1、`VERIFICATION.md` に round 1 を記録
+- 指摘: (1) `bench_psycopg.py` は非 UTF-8 の conninfo で `UnicodeEncodeError`（`ValueError` の子）の **Traceback**（`except psycopg.Error` の素通り）；
+  (2) stdout が `/dev/full` だと終了時 flush の `OSError` が **`Exception ignored` + exit 120**（正常・badpw とも）；(3) README §7「URI は受けません」は examples には当たらない（文書のみ、F1 (c) に同梱）
+- 想定外: (1) 1 MB の環境変数は `env` 自体が E2BIG で渡せない（ハーネスの限界）→ 100 KB で再試行し 3 本とも `server closed the connection` + exit 1 で合格。
+  (2) impl の格子 17 本は RESEARCH の 15 本を踏襲して「DB 側の失敗」だけだったため、出力経路と入力エンコードのクラスが無かった（VERIFICATION §3 に理由を記載）
+- やり直し: 0 回
+- 次への注意: impl は **F1 だけ**（`examples/bench_psycopg.py` + README §7 の 1〜2 行。見込み +12 行、新しいテスト資源なし）。期待結果は PLAN F1 の**表 1 つ**が唯一の正。
+  検証は `scratch/turn-010-robust-grid.sh` の `bench_psycopg.py` 節（`PY=.pixi/envs/bench/bin/python` で pixi のバナー無し）を `turn-NNN-bench-robust.sh` に写して回す。
+  `pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで。`check` の基線は 184 s（閾値 247 s）。round 2 の verify は格子の再確認 + F1 の回帰だけ（新クラスの探索はしない）
