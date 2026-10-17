@@ -296,3 +296,48 @@
   (e) の「未確認」行は turn 3 以降の PROGRESS を `grep -n '未確認' .gsd-lite/PROGRESS.md` で拾う。
   (f) のチェックリストは `turn-008-checklist.log` が直前の全行の現在値（T6 行まで全部期待値なので、
   T7 では `turn-009-checklist.log` を取り直して全行を突き合わせるだけ）
+
+## turn 9 — impl — T7 統合（check / 堅牢性格子 / 後始末 / 対応表 / 処分表）
+- やったこと: サブエージェント **推奨 0 本 / 実 0 本**（PLAN どおり親が全部）。コードは 1 行も変えていない
+  （`src/` / `tests/` / `examples/` / `pixi.toml` は不変）。`TRACE.md` に T7 の 3 節を書き、コミット `7d900d6`
+  （`TRACE.md` + `PLAN.md` の 2 ファイル、+79 / -4）
+- 既存テストの期待値変更: **ゼロ**（`tests/` は 1 行も触っていない）
+- (a) `pixi run db-reset`（3 コンテナとも `Healthy`。`scratch/turn-009-db-reset.log`）→ `pixi run check`
+  **6/6 PASS**（`final_check: PASS`、`FAIL` の行 0、6/6 段の `matched lines in build/final_check.log: 0`。
+  00:10:02 → 00:13:12 = **190 s**。基線 187 s、閾値 **247 s** 以内）。`pixi run test` 両サーバー PASS
+  （`0 failed` のサマリ **48 件**、`FAIL` 0 行。**`test_leak` は両サーバーで実行** = 85 s / 82 s、
+  合計 00:13:27 → 00:17:44 = **257 s**。`skipped 1` は各サーバー 1 件ずつの
+  `test_interval_infinity_*`（PG 版数条件つきテスト。pg17 側と pg14 側で逆の 1 件が飛ぶ））
+- (b) 堅牢性の格子 **17/17**: 全行 `rc=1` かつ `unhandled_markers=0`
+  （`Traceback` / `Unhandled` / `stack trace` / `abort` / `segfault` が 0 件）。
+  examples 7 本 × badpw / badport + `hello_libpq` nolib + `basic` nolib + `basic` 不正 conninfo（`port=abc`）+
+  **`bench-psycopg` badpw / badport の 2 本を新規に追加**（turn 1 の 15 本 → 17 本）。
+  スクリプト `scratch/turn-009-examples-robust.sh`、生ログ `scratch/turn-009-examples-robust.log`、所要 40 s 弱。
+  表は `TRACE.md`「examples 堅牢性の格子」節
+- (c) 後始末: `pixi run test` の後に `docker exec ... psql` を**両サーバー**で実行し
+  `pq_test_%` が **pg17 0 行 / pg14 0 行**（`scratch/turn-009-pgdatabase.log`）
+- (d) `TRACE.md`「受け入れ基準対応表」節: HANDOFF §10 Phase 5 の 3 項目 + REQ §5 の 11 行を
+  **14 行の表**（基準 → 担保タスク → テスト / 検査 → ログ）に
+- (e) `TRACE.md`「未確認行の処分表」節: `grep -n '未確認' .gsd-lite/PROGRESS.md` は turn 3〜8 の本文に
+  **0 件**（ヒット 2 件は turn 8 の「次への注意」が手順を書いた行そのもの）。そこで同趣旨の
+  「断定しきれなかった / 追わなかった」行を turn 3〜8 の想定外・陽性対照・やり直しから **13 件**拾い、
+  **テスト追加 2 / 契約外と明記 5 / PLAN 訂正済み 5 / verify 申し送り 1** に振り分けた。
+  ★（誤った値が黙って返る・状態機械が壊れる経路）は 3 件 — `_after_send` -1（到達不能 → コードレビューで担保）、
+  `wait_notifications` の `out` 保全（⑨ のテストで担保）、Windows の `_is_usage_error` 分類（スコープ外 → verify 申し送り）
+- (f) チェックリスト **全行が期待値**（`scratch/turn-009-checklist.log`。turn 8 との差は
+  `trace_zero_copy` 4 → **5** の 1 行だけで、これは今回 TRACE に足した 3 節が `test_zero_copy` に言及したため。
+  期待値 ≥ 1 を満たす）。T7 の 3 行も `src_def_ref_return`=**0** / `tests_files_count`=**24** / `test_file_count`=**24**。
+  **PLAN 訂正は 0 件**（TRACE の「PLAN 訂正」節に追記なし）
+- (g) `git status` クリーン（`pixi.lock` / `README.md` / `LICENSE` / `examples/bench_psycopg.py` は
+  turn 7・8 でコミット済み）。全 7 タスク `- [x]` になったので `phase: "verify"` / `next_command: "/gsd-lite-verify"` へ
+- 想定外: (1) **`pixi run check` の 5/6 段は `test_leak` を 1 台目だけで回す**（段の見出しにそう書いてある）ので、
+  PLAN (a) の「leak 両方」は `pixi run test` を別に回して初めて満たせた（`check` だけでは足りない）。
+  (2) `check` が 190 s で基線 187 s より 3 s 長い（閾値 247 s 内。turn 6 で 215 s まで揺れているのと同じノイズ）。
+  (3) 待ち合わせに使った監視コマンドの grep パターン `final_check` が
+  ログ先頭の pixi バナー（`bash tests/final_check.sh`）に当たって一度空振りした → `final_check: (PASS|FAIL)` に直した
+- やり直し: 0 回
+- 次への注意: 次は **verify**（全タスク完了）。verify が再実行できる証跡: `check`（190 s）/ `pixi run test`（257 s、leak 両方）/
+  `scratch/turn-009-examples-robust.sh`（17 本、40 s 弱）/ `scratch/turn-002-checklist.sh`（全行期待値）/
+  `turn-008-readme-excerpts.py`（README コード片の逐語一致）/ `turn-008-typetable.py`（型表 19 行）。
+  **`pixi` は `/home/parallels/.pixi/bin/pixi` を絶対パスで**。verify 用 DB を作るなら `pq_verify_<turn>` で同ターンに消す。
+  申し送り 1 件: Windows 実機は未検証（REQ §3 スコープ外。TRACE「未確認行の処分表」#7 と README §8 で開示済み）
