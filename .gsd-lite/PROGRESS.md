@@ -220,3 +220,38 @@
   - `test_notify.mojo` ⑥ は libpq の notice `FATAL: terminating connection due to administrator command` を stderr に出すが、`final_check.sh` 6/6 段の grep
     （`warning:|WARNING:|implicit ROLLBACK failed`）には当たらないので 6/6 は PASS のまま（実測済み）
   - `check` は 158 s（T4 の 169 s とほぼ同じ。16 MB と切断が乗っても増えなかった）。T6 の leak 4 ループで +15 s 程度を見込む
+
+## turn 8 — impl — T6 test_leak に Phase 4 ループ 4 本 + 陽性対照
+- やったこと: `tests/test_leak.mojo` を 14 → **18 テスト**に（サブエージェントなし。PLAN 推奨 0 本）。
+  `test_async_execute_does_not_leak`（1 接続で `send`/`fetch_all` を 10,000 回）/ `test_async_cancel_does_not_leak`（`send`→`cancel`→収集 1,000 回）/
+  `test_notify_receive_does_not_leak`（同期側が 7,000 byte payload の `NOTIFY` を 1,000 回、async が `wait_notification(2000)` で 1 件ずつ受ける）/
+  `test_async_drop_with_pending_results_does_not_leak`（2 文送って `consume_input()` だけして drop を 1,000 回）。
+  モジュール docstring の「Fourteen tests」→ Eighteen、Phase 4 の段（担う 3 解放経路）、所要の実測値を更新
+- **陽性対照（T6 (b)）**: `cancel()` の `PQfreeCancel` と `notifications()` の `PQfreemem` を**同時に**外した `src/` で 1 回計測（`build/test_leak_positive`、計測後に削除）:
+  - `notify-receive` は **FAIL**: RSS `[5285, 5629, 5974, 6318]`（単調増加、600 iteration で +1,033 pages ≈ 1.7 pages/iteration = payload ちょうど）。`PQfreemem` の欠落は検出できる
+  - `async-cancel` は **PASS のまま**: RSS `[4714, 4714, 4714, 4714]`（完全に平坦）。PLAN (b) が予期した側で、`PGcancel` は数百 byte（`fe-cancel.c`: struct + `raddr`）なので
+    1,000 iteration = 数百 KB では `TOLERANCE_PAGES` 256 にも届かない。**処分: 契約外**（`PGcancel` を膨らませる手段が無く RSS では原理的に見えない）。
+    `PQfreeCancel` は `src/pq/async_conn.mojo:1297` にあり `src_PQfreeCancel_calls=1`（チェックリスト）＋ `:1290-1291` のコメント（errbuf を読んでから free）でコードレビュー担保。
+    この経緯はループ本体のコメントにも実測値つきで書いた（`tests/test_leak.mojo` の `test_async_cancel_does_not_leak`）
+  - 計測後 `git checkout src/pq/async_conn.mojo` → `git status` が `tests/test_leak.mojo` のみ M（`PQfreeCancel` / `PQfreemem` が戻っていることを grep で確認）
+- 既存テストの期待値変更: **ゼロ**（既存 14 テストは無変更。`src/` の差分なし）
+- 検証（所要つき）: `pixi run test` 両サーバー PASS（**48 サマリ全部 0 failed**、`grep 'tests run' | grep -vc ' 0 failed'` = 0、
+  `-- 127.0.0.1:54317 skipped 1` / `-- 127.0.0.1:54314 skipped 1`、17:40:15 → 17:44:10 = **235 s**）、
+  `pixi run check` **6/6 PASS**（17:48:33 → 17:51:22 = **169 s**。5/6 段の leak は PG17 のみ）、`pixi run package` 警告ゼロ、`pixi run fmt` は `test_leak.mojo` を 1 回整形（コミット前に反映）
+- **leak の所要（P29）**: `test_leak` 全 18 テストで **74.2 s（PG17）/ 75.0 s（PG14）**。Phase 3 末の実測 74 s から **+0〜1 s** で、+15 s の枠内。
+  Phase 4 の 4 ループ自身は合計 **7.4 s**（単体実行の内訳: async-execute 2,793 ms / async-cancel 905 ms / notify-receive 154 ms / async-drop 3,588 ms）。
+  単体実行の合計は 72.2 s で、run_tests.sh の 74 s との差は計測の揺れ。RSS は 4 ループすべて両サーバーで平坦（例: PG17 `async-execute [4735 ×9]` / `notify-receive [4736 ×4]`）
+- チェックリスト（T6 行）: `leak_tests=18`（期待 18） / `leak_Fourteen=0`（期待 0） / `leak_async_import=13`（期待 ≥1）— **期待値**
+- 想定外: (1) `Optional[Notification]()` を先に作って `try` 内で代入する形が `warning: assignment to 'found' was never used` を出した。
+  `final_check.sh` 6/6 段の `grep 'warning:'` に当たるので、ラッパーは `Optional` を返して判定をテスト側に出す形（`test_notify.mojo` と同じ）に直した。
+  (2) `_payload(7000)` は既存 docstring どおり**次の 2 冪に切り上げる**ので 8,192 byte を返し、PG の payload 上限 7,999 byte を超える。
+  1 byte ずつ伸ばす `_notify_payload()` を別に足した。(3) `notify-receive` は 1,000 往復で 154 ms しかかからない（1 iteration 0.15 ms）。速すぎて疑ったが、
+  陽性対照で payload ぶんきっちり RSS が伸びたので PGnotify は 1,000 回確かに確保・解放されている
+- やり直し: 1 回（上記 (1) の warning。`Optional` を返す形に直して再ビルドで解消）
+- 次への注意:
+  - T7 は `src/pq/decode_binary.mojo` / `result.mojo` を触るので、**`pixi run bench` の「前」計測を着手直後（この木の状態）に 2 回走らせる**こと（PLAN T7 (d)。切替後と比較する）
+  - 確認済み: `cancel()` を 1,000 回連続で呼んでも接続は壊れない（`SELECT 1` 相手だと cancel が間に合わず結果が返る回も多く、`_collect_cancelled` が 57014 と成功の両方を受ける形にしてある）。
+    `consume_input()` だけして drop を 1,000 回繰り返しても落ちない（P22 の `PQfinish` 任せが成立）
+  - 未確認/契約外の積み残し（T8 (d) の表に入れる 4 件）: ① `PQcancel` が 0 を返す経路（契約外・turn 7） ② `PQsetSingleRowMode` が 0 を返す経路（契約外・turn 7）
+    ③ `_after_send` で `PQflush` が -1（契約外・turn 7） ④ **`PQfreeCancel` の欠落（契約外・このターン。RSS では原理的に不可視、コードレビュー担保）**
+  - `check` は 169 s（T4 169 s / T5 158 s と同水準）。T7 は bench 4 回ぶんが別途かかる
