@@ -126,9 +126,96 @@ readme_unverified_windows=3 / readme_h2=10
 
 verify は PR 後に GitHub の URL（`https://github.com/6in/mojo-pg.git`）で git 経路を再実測する（RESEARCH §6）。
 
+## チェックリスト（turn 5）
+
+全文は `scratch/turn-005-checklist.log`。T3 の行と、不変であるべき行を転記する。T4 / T5 の key は
+すべて `0` / `absent(...)`（未着手。turn 4 と同じ）。
+
+```
+## T3 ci.yml + .github/scripts
+wf_ci_exists=exists            # 期待 exists
+ci_os_ubuntu_latest=1          # 期待 ≥ 1
+ci_os_ubuntu_arm=1             # 期待 ≥ 1
+ci_os_macos_latest=1           # 期待 ≥ 1
+ci_fail_fast_false=1           # 期待 1
+ci_timeout_minutes=1           # 期待 ≥ 1（ジョブ 1 つなので 1）
+ci_permissions=1               # 期待 ≥ 1（先頭 contents: read）
+ci_secrets_refs=0              # 期待 0（P14）
+ci_branches_main=2             # 期待 2（pull_request / push。P15）
+ci_pull_request=1              # 期待 1
+ci_setup_pixi_pinned=1         # 期待 1
+ci_pixi_version=1              # 期待 1
+ci_run_install_false=1         # 期待 1
+ci_locked_true=1               # 期待 1
+ci_pixi_run_check=3            # 期待 ≥ 1（step 名 / env コメント / run の 3 行）
+ci_pixi_build=1                # 期待 ≥ 1（`pixi build -o dist` を維持。下の「`pixi build` の deprecated」参照）
+ci_upload_artifact=2           # 期待 ≥ 2（.conda と final_check.log）
+ci_artifact_pq_conda=1         # 期待 ≥ 1
+ci_windows_reason=1            # 期待 ≥ 1（先頭コメント。B7）
+ci_conninfo_5432=1             # 期待 ≥ 1
+ci_retry_sh=4                  # 期待 ≥ 3（install / compose pull / build の 3 呼び出し + コメント 1）
+scripts_retry=exists / scripts_macos_pg=exists / scripts_blackhole=exists   # 期待 exists ×3
+macos_pg_scram=4               # 期待 ≥ 1
+macos_pg_ctl_wait=1            # 期待 ≥ 1（`-w -t 60`）
+macos_pg_wrong_password=3      # 期待 ≥ 1
+macos_pg_schema_sql=2          # 期待 ≥ 1
+macos_pg_reload=3              # 期待 ≥ 1
+blackhole_held=5               # 期待 ≥ 1（P8）
+tests_sh_bash4_only=0          # 期待 0（不変。final_check.sh / run_tests.sh は未変更）
+## T1 / T2（不変）
+async_restore_collected_def=1 / _sites=3 / async_wait_readable_timeout_return=3 /
+test_notify_tests=25 / test_notify_restore_collected=2 / readme_sigpipe=2 / readme_rc_141=1 /
+pixi_db_up_wait_timeout=1 / trace_exists=exists / trace_checklist_section=2（turn 3 / 4 の節で 2。T1 の期待は ≥ 1）/
+pixi_preview=1 / pixi_package_section=1 / pixi_version_literal=1 / pixi_version_workspace=1 /
+pixi_pkg_name_pq=2 / pixi_pkg_path=1 / pixi_backend_mojo=1 / pixi_mojo_compiler=3 /
+pixi_run_dep_libpq=2 / gitignore_dist=1 / pixi_lock_changed_vs_main=0
+## 全体（release.yml 待ち = T4）
+workflows_files=1              # 期待 2（T4 で release.yml を足して到達）
+all_timeout_minutes / all_permissions / all_secrets_refs / all_contents_write = absent(release.yml)
+src_def_ref_return=0 / test_file_count=24 / examples_mojo_count=7 / final_check_examples=5   # 不変
+```
+
+## `pixi build` の deprecated をワークフローに書くか（turn 5 の判断）
+
+turn 4 の「想定外 (1)」の宿題。**`pixi build -o dist` のまま書いた**（`pixi publish` に変えない）。根拠:
+
+- 警告は deprecation のみで rc 0、生成物は `pixi publish --path . --target-dir dist` と同じ（RESEARCH §2.1 で確認済み）
+- CI の pixi は `pixi-version: v0.82.0` に固定（決めた事項 5）＝ ローカルと同じ版なので、
+  ローカルで通った形がそのまま CI で通る。`pixi publish` に変えると「ローカルで検証していない形」を CI に置くことになる
+- チェックリストの key `ci_pixi_build` / `release_pixi_build` は `pixi build -o dist` を数えるので、
+  **PLAN 訂正は不要**（パターンも期待値も変わらない）
+- 警告は `pixi run check` の 6/6 段（`$LOG` の `warning:` 数え上げ）には入らない（`pixi build` は `final_check.sh` の外）
+
 ## blackhole / retry のローカル陽性対照
 
-T3 で記入。
+turn 5（T3）。親が自分で再実測した値（サブエージェントの報告とも一致）。ログは
+`scratch/turn-005-retry-{false,true}-parent.log` / `turn-005-blackhole-parent.log`。
+
+| 対照 | コマンド | 結果 | 判定 |
+|---|---|---|---|
+| retry 失敗 | `pixi run bash .github/scripts/retry.sh 2 1 false` | **rc 1**、`retry: attempt` 行 4 本（= 2 試行 × 「開始」「失敗」）、stderr 最終行 `retry: giving up after 2 tries` | PASS |
+| retry 成功 | `pixi run bash .github/scripts/retry.sh 2 1 true` | **rc 0**、`attempt` 行 1 本（1 回で即 return） | PASS |
+| blackhole 保持 | `python3 .github/scripts/blackhole.py 54398` を起動 → connect → `settimeout(0.5)` → `recv(1)` | **`TimeoutError`（= `socket.timeout`）を送出**。EOF の `b''` ではない = accept したソケットを閉じていない（P8） | PASS |
+| 構文 | `pixi run bash -n retry.sh macos-postgres.sh` / `python3 -m py_compile blackhole.py` | いずれも rc 0 | PASS |
+| actionlint | `pixi exec --spec actionlint actionlint .github/workflows/ci.yml` | 出力なし（指摘 0） | PASS |
+
+- ポートは **54398**（54399 は docker の `tests-blackhole-1` が使用中。CI の macOS では 54399 を使う:
+  `test_async.mojo:66` が 54399 固定で、macOS には compose が無いため衝突しない）
+- 後片付け: 起動した `blackhole.py` は停止済み（`pgrep -x python3` で残骸なし）
+- `macos-postgres.sh` は **macOS 専用のため実動作は未検証**（Linux 開発機では brew / `pg_ctl` / BSD `sed -i ''` が無い）。
+  静的検査は `bash -n` rc 0 + bash 3.2 互換（配列・`mapfile`・`declare -A`・`${x,,}` 不使用）のコードレビューまで。
+  実動作の初見は **verify の PR の macOS ジョブ**（陽性対照 2 件がスクリプト内で `exit 1` するので、
+  trust のまま通ってしまう事故はジョブの赤で検出できる）
+
+## `check` の所要（turn 5）
+
+| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
+|---|---|---|---|---|---|
+| 5 | T3 | `pixi run check` | 2026-10-18T10:54:16+09:00 → 2026-10-18T10:57:09+09:00 | **173 s** | PASS 6/6（rc 0。閾値 247 s / 見積もり 170〜220 s の内側） |
+
+Mojo 側は T3 で未変更なので turn 3（189 s）/ turn 4（183 s）と同じ範囲。`-- 127.0.0.1:54314 skipped 1`
+（PG14 側の leak 1 件）は従来どおり。開始時刻は `build/final_check.log` の `=== [1/6 …]`、終了は `=== [6/6 …]` +
+summary の 1 s。
 
 ## 受け入れ基準対応表
 

@@ -149,7 +149,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T1
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（manifest 1 ファイル + 実測）
 
-- [ ] T3: `.github/workflows/ci.yml`（3 OS × 1 ジョブ `check`）+ `.github/scripts/{retry.sh, macos-postgres.sh, blackhole.py}`（B1〜B5 / B7 の静的部分）
+- [x] T3: `.github/workflows/ci.yml`（3 OS × 1 ジョブ `check`）+ `.github/scripts/{retry.sh, macos-postgres.sh, blackhole.py}`（B1〜B5 / B7 の静的部分）
   - 完了基準:
     - (a) `ci.yml`（決めた事項 4〜7）: `name: CI`、`on: pull_request: branches: [main]` / `push: branches: [main]`、先頭 `permissions: contents: read`、
       `concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: true }`、ジョブ `check`（`name: check (${{ matrix.os }})`、`runs-on: ${{ matrix.os }}`、`timeout-minutes: 45`、
