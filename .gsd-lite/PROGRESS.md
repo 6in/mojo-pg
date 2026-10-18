@@ -69,3 +69,18 @@
   タスクの rc で判定する）。T4 は `release.yml` + `check-tag-version.sh` + `release-notes.py` + `CHANGELOG.md`、サブエージェント **1 本**（CHANGELOG だけ）。`release.yml` も `pixi build -o dist` で書く（turn 5 の判断。key `release_pixi_build`）。
   `py_compile` が作る `__pycache__` は **コミット前に `rm -rf` する**（T4 も `release-notes.py` で py_compile を回すので再発する。`.gitignore` は T3 / T4 の対象ファイルでないので足していない）。
   `release-notes.py` のローカル検証は `CHANGELOG.md` を書いた後でないと通らない（`0.1.0` 節が必要）ので、サブエージェントの CHANGELOG を統合してから (c) を実行する順にする
+
+## turn 6 — impl — T4 `release.yml` + `check-tag-version.sh` / `release-notes.py` + `CHANGELOG.md`
+- やったこと: `release.yml` を新設（`on.push.tags: ["v*"]` + `workflow_dispatch` = build までの dry run、先頭 `permissions: contents: read`、ジョブ 3 つ = `verify-version`（10 分）→ `build` 3 OS matrix（45 分 / `fail-fast: false`）→
+  `release`（15 分・`if: github.ref_type == 'tag'`・このジョブだけ `contents: write`）。`setup-pixi` の入力は T3 と同一、ネットワーク依存は `retry.sh 3 15` で包む。添付は 3 OS の `.conda` + `git archive` の tarball、本文は
+  `release-notes.py` の出力を `gh release create --notes-file`（`GH_TOKEN: ${{ github.token }}`）、flat な `dist/` でのファイル名衝突は `uniq -d` で検出して `exit 1`）。`check-tag-version.sh`（`pixi workspace version get` と `${tag#v}` の比較）と
+  `release-notes.py`（`## [<version>]` 節を抽出。節が無い / 空なら rc 1）を追加。サブエージェント **1 本**（PLAN どおり `CHANGELOG.md` のみ。Keep a Changelog 1.1.0 / `## [Unreleased]` + `## [0.1.0] - 2026-10-18` / Phase 1〜5 の `### Added` 5 行）。
+  検証: `actionlint` 2 本とも指摘 0、`bash -n` rc 0、`py_compile` rc 0、陽性対照 6 ケース（タグ 3 値 = rc 0/1/1、notes 3 値 = rc 0/1/1）、**`pixi run check` 6/6 PASS = 170 s**（閾値 247 s）。チェックリストの T4 行 23 key + 全体行 5 key すべて期待値、T1〜T3 と不変行も変化なし
+- 想定外: (1) **`check-tag-version.sh` の中の `pixi` が開発機では引けない**（rc 127）。CI は `setup-pixi` が PATH に置くのでスクリプトは正しく、ローカル検証だけ PATH を足すラッパ `scratch/turn-006-check-tag.sh` を作って回した
+  （スクリプト側に PATH フォールバックは入れない = 契約外）。(2) **turn 5 と同種のコメント混入が再発**: 冒頭コメントの「a `v*` tag push」と「raises this to `contents: write`」で `release_tags_v` / `release_contents_write` /
+  `all_contents_write` が 2 になった（期待 1）→ コメントを言い換えて 1 に戻した（YAML の実体は不変。**PLAN 訂正ではない**）。(3) サブエージェントの報告の「git remote が無い」は誤り（`origin` = `https://github.com/6in/mojo-pg.git`）。CHANGELOG のリンクはそのままで正しい
+- やり直し: 2 回（上の (1) のラッパ追加と (2) のコメント言い換え。どちらも検証で検出 → 再実行して期待値を確認。既存テストの期待値変更は 0 件）
+- 次への注意: **key のパターンと同じ文字列をコメント・見出しに書かない**（turn 5 / 6 で連続して踏んだ。T5 は README なので `readme_*` の 22 key すべてが文章と直接当たる。書いたら必ずチェックリストを回して数を確かめる）。
+  T5 は README 1 ファイル（サブエージェント 0 本）。`readme_h2` は **10 → 11**（English 節 +1）が唯一の増加で、`readme_dash_I_src` / `readme_six_stages=1` / `readme_compose_three=2` / `readme_unverified_windows≥3` は不変に保つ。
+  ジョブ名は `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`（D4 の required checks もこの 3 つ）。待ち上限の 2 値は compose `--wait-timeout 180` と `pg_ctl -w -t 60`。
+  リリース手順には「タグは `v<version>`（`v` 無しは `verify-version` で落ちる）」「`workflow_dispatch` は main にマージ後しか起動できない」を入れる。`py_compile` の `__pycache__` はコミット前に `rm -rf`（今回も発生）

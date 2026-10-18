@@ -217,6 +217,95 @@ Mojo 側は T3 で未変更なので turn 3（189 s）/ turn 4（183 s）と同�
 （PG14 側の leak 1 件）は従来どおり。開始時刻は `build/final_check.log` の `=== [1/6 …]`、終了は `=== [6/6 …]` +
 summary の 1 s。
 
+## チェックリスト（turn 6）
+
+全文は `scratch/turn-006-checklist.log`。T4 の行と全体行を転記する。T5 の key は
+すべて `0`（未着手。`readme_h2=10` / `readme_dash_I_src=1` / `readme_six_stages=1` /
+`readme_compose_three=2` / `readme_unverified_windows=3` / `readme_windows_toolchain=1` は turn 5 と同じ）。
+
+```
+## T4 release.yml + CHANGELOG + scripts
+wf_release_exists=exists       # 期待 exists
+release_tags_v=1               # 期待 1（`tags: ["v*"]` の 1 行だけ。下の「コメントが grep に当たる」参照）
+release_workflow_dispatch=1    # 期待 1
+release_version_check_sh=1     # 期待 ≥ 1
+release_notes_py=2             # 期待 ≥ 1（verify-version と release の 2 ジョブで呼ぶ）
+release_gh_release_create=1    # 期待 ≥ 1
+release_gh_token=1             # 期待 ≥ 1（P16）
+release_contents_write=1       # 期待 1（release ジョブのみ。P14）
+release_contents_read=1        # 期待 ≥ 1（先頭）
+release_timeout_minutes=3      # 期待 ≥ 3（10 / 45 / 15）
+release_secrets_refs=0         # 期待 0（P14）
+release_git_archive=1          # 期待 ≥ 1
+release_ref_type_tag=3         # 期待 ≥ 1（先頭コメント + verify-version のステップ + release ジョブ）
+release_pixi_build=1           # 期待 ≥ 1（`pixi build -o dist` = turn 5 の判断どおり）
+release_dup_check=1            # 期待 ≥ 1（P5）
+scripts_check_tag_version=exists  # 期待 exists
+scripts_release_notes=exists      # 期待 exists
+check_tag_version_pixi=2          # 期待 ≥ 1（コメント + 実行の 2 行）
+changelog_exists=exists        # 期待 exists
+changelog_010_heading=1        # 期待 1
+changelog_unreleased_heading=1 # 期待 1
+changelog_keep_a_changelog=1   # 期待 ≥ 1
+changelog_phase_lines=5        # 期待 ≥ 5（Phase 1〜5 各 1 行）
+## 全体
+workflows_files=2              # 期待 2（ci.yml / release.yml）
+all_timeout_minutes=4          # 期待 ≥ 4（ci 1 + release 3）
+all_permissions=3              # 期待 ≥ 3（ci 1 + release 2）
+all_secrets_refs=0             # 期待 0
+all_contents_write=1           # 期待 1
+## T1 / T2 / T3（不変）
+async_restore_collected_def=1 / _sites=3 / test_notify_tests=25 / readme_sigpipe=2 / pixi_db_up_wait_timeout=1
+pixi_preview=1 / pixi_package_section=1 / pixi_pkg_name_pq=2 / pixi_mojo_compiler=3 / pixi_lock_changed_vs_main=0
+wf_ci_exists=exists / ci_branches_main=2 / ci_secrets_refs=0 / ci_upload_artifact=2 / tests_sh_bash4_only=0
+src_def_ref_return=0 / test_file_count=24 / examples_mojo_count=7 / final_check_examples=5
+```
+
+**コメントが grep に当たる（turn 5 と同種の再発）**: `release.yml` の冒頭コメントに
+「a `v*` tag push」、`permissions` 上のコメントに「raises this to `contents: write`」と書いたため
+`release_tags_v=2` / `release_contents_write=2` / `all_contents_write=2`（期待はいずれも 1）になった。
+コメントを言い換えて 1 に戻した（YAML の実体は変えていない）。**PLAN 訂正ではない**（期待値は正しく、
+原因は実装側のコメント文言）。残るタスクでも「key のパターンと同じ文字列をコメントに書かない」。
+
+## `check-tag-version.sh` / `release-notes.py` のローカル陽性対照（turn 6）
+
+`check-tag-version.sh`（`scratch/turn-006-check-tag.sh` 経由。下記注記）:
+
+| 引数 | stdout / stderr | rc | 期待 |
+|---|---|---|---|
+| `v0.1.0` | `tag v0.1.0 matches pixi.toml version 0.1.0` | **0** | 一致で 0（C2） |
+| `v0.2.0` | `tag v0.2.0 != pixi.toml version 0.1.0`（stderr） | **1** | 不一致で 1 |
+| `0.1.0` | `tag 0.1.0 must start with "v" (expected form: v<version>)`（stderr） | **1** | `v` 無しは不一致扱い（境界値） |
+
+注記: スクリプトは `pixi` を **PATH から引く**（CI は `setup-pixi` が置く）。開発機では
+`~/.pixi/bin` が PATH に無く、`pixi run bash <script>` の中でも引けない（rc 127 を 1 回踏んだ）ので、
+PATH を足すだけのラッパ `scratch/turn-006-check-tag.sh` から 3 ケースを回した。
+**スクリプト側に PATH のフォールバックは入れていない**（契約外。CI の前提は setup-pixi）。
+
+`release-notes.py`:
+
+| 引数 | 出力 | rc | 期待 |
+|---|---|---|---|
+| `0.1.0` | 先頭行 `### Added` + Phase 1〜5 の 5 行（リンク定義行は含まない） | **0** | 非空・先頭が `### `（T4 (c)） |
+| `9.9.9` | `release-notes.py: no ## [9.9.9] section in CHANGELOG.md`（stderr） | **1** | 節が無い（P17） |
+| `Unreleased` | `release-notes.py: ## [Unreleased] section in CHANGELOG.md is empty`（stderr） | **1** | 本文が空（P17。空節の分岐を実際に通した） |
+
+節の終端は「次の `## [` 見出し」または「`[x.y.z]: ` 形式のリンク定義行」の手前。見出し直後と節末の
+空行は落とすので、`## [0.1.0]` の次が空行でも出力の先頭は `### Added` になる。
+
+静的検査: `actionlint .github/workflows/ci.yml .github/workflows/release.yml` 指摘 0（rc 0）、
+`bash -n .github/scripts/check-tag-version.sh` rc 0、`python3 -m py_compile .github/scripts/release-notes.py` rc 0
+（`__pycache__` はコミット前に削除）。
+
+## `check` の所要（turn 6）
+
+| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
+|---|---|---|---|---|---|
+| 6 | T4 | `pixi run check` | 2026-10-18T11:03:37+09:00 → 2026-10-18T11:06:27+09:00 | **170 s** | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
+
+T4 は YAML / Python / shell / Markdown のみで Mojo 側は未変更なので turn 3（189 s）/ 4（183 s）/
+5（173 s）と同じ範囲。`-- 127.0.0.1:54314 skipped 1`（PG14 側の leak 1 件）も従来どおり。
+
 ## 受け入れ基準対応表
 
 T6 で記入（REQ §4 の A1〜F2）。

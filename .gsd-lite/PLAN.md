@@ -182,7 +182,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
     - A: `.github/scripts/retry.sh` + `macos-postgres.sh` + `blackhole.py` の 3 本と (b)(c)(d) のローカル陽性対照（対象: `.github/scripts/*`。**ci.yml は触らない**）
     - 親: `ci.yml` + (e)(f) + TRACE
 
-- [ ] T4: `.github/workflows/release.yml` + `.github/scripts/{check-tag-version.sh, release-notes.py}` + `CHANGELOG.md`（C1 / C2 / C4。C3 は CI artifact で verify）
+- [x] T4: `.github/workflows/release.yml` + `.github/scripts/{check-tag-version.sh, release-notes.py}` + `CHANGELOG.md`（C1 / C2 / C4。C3 は CI artifact で verify）
   - 完了基準:
     - (a) `release.yml`（決めた事項 8〜10）: `name: Release`、`on: push: tags: ["v*"]` + `workflow_dispatch:`（入力なし。**dispatch = build までの dry run**。既定ブランチにマージ後しか起動できない: P13）、
       先頭 `permissions: contents: read`、ジョブ 3 つ:
