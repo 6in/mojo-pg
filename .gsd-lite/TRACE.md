@@ -376,10 +376,113 @@ README は `check` の 6 工程いずれの入力でもない（`mojo format` �
 | `workflow_dispatch` は既定ブランチ必須 | P13（RESEARCH。GitHub の仕様。実測はしていない = 仕様の引用と明記） |
 | `gh api … /branches/main/protection --input protection.json` | **未実行**（D15 / REQ §6「impl はリポジトリ設定を変えない」）。README にも「無人ターンは設定しません」と明記。verify / 人間が実行する |
 
+## チェックリスト（turn 8）
+
+生出力は `.gsd-lite/logs/phase6-packaging-ci/scratch/turn-008-checklist.log`（T6 = 全行の確認）。
+turn 7 のログとの差分は **`trace_checklist_section` の 4 → 5 だけ**（turn 7 が checklist を回した後に
+TRACE の turn 7 節を書いたため。他 100 key は 1 つも動いていない）。
+
+**全行が PLAN:66-101 の期待値に到達**（T1 10 key / T2 11 key / T3 31 key / T4 23 key / T5 22 key / 全体 9 key）。
+`≥` 行の実測値は T1 `test_notify_tests=25` / `readme_sigpipe=2`、T3 `ci_retry_sh=4` / `blackhole_held=5` /
+`macos_pg_scram=4`、T4 `release_timeout_minutes=3` / `release_ref_type_tag=3` / `changelog_phase_lines=5`、
+T5 `readme_h2=11`（= の行）など。`= N`（不変・0）の行も全部一致:
+`pixi_lock_changed_vs_main=0` / `pixi_version_literal=1` / `tests_sh_bash4_only=0` / `ci_secrets_refs=0` /
+`release_secrets_refs=0` / `all_secrets_refs=0` / `all_contents_write=1` / `src_def_ref_return=0` /
+`test_file_count=24` / `examples_mojo_count=7` / `final_check_examples=5` / `readme_six_stages=1` /
+`readme_compose_three=2` / `workflows_files=2`。
+
+**PLAN 訂正（turn 8）: なし**（turn 4 の `pixi_pkg_name_pq` 1 → 2 が唯一の訂正で、以降は発生せず）。
+
+## `check` の所要（turn 8。T6 = クリーン状態からの最終判定）
+
+| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
+|---|---|---|---|---|---|
+| 8 | T6 | `pixi run db-reset` → `pixi run check` | 2026-10-18T11:17:19+09:00 → 2026-10-18T11:20:19+09:00 | **`check` 170 s**（db-reset 含め 180 s） | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
+
+`db-reset` は compose 3 台を `-v` で落として再作成（`--wait-timeout 180` 付き、3 台とも `Healthy`）→
+フィクスチャ再適用。turn 3（189 s）/ 4（183 s）/ 5（173 s）/ 6（170 s）/ 7（176 s）と同じ範囲で、
+**クリーンな DB からでも 165〜215 s の見積もり内**（REQ F1）。生出力は `scratch/turn-008-check-stdout.log`。
+
+6 工程の内訳と `skipped` の実測（verify が CI ログと見比べるための基線）:
+
+| 工程 | 結果 |
+|---|---|
+| 1/6 fmt | 差分なし（`mojo format` = REQ F2） |
+| 2/6 precompile `src/pq` | 警告なし |
+| 3/6 docstring diagnostics | 警告なし |
+| 4/6 examples | 5 本（`final_check_examples=5` のまま） |
+| 5/6 tests 両サーバー | 54317 = 全 PASS + `skipped 1`、54314 = 全 PASS + `skipped 1` + `test_leak.mojo` はファイルごと skip（`PQ_TEST_LEAK_SERVERS=1`） |
+| 6/6 zero warnings | `matched lines in build/final_check.log: 0` |
+
+**`skipped 1` の正体を特定した**（これまでの PROGRESS は 54314 の 1 件を「leak」と書いていたが実際は別物）:
+54317 は `SKIP test_interval_infinity_rejected_before_pg17: server 17+`、
+54314 は `SKIP test_interval_infinity_on_pg17_and_later: server < 17`。
+どちらもサーバー版差による対称な 1 件で、`test_leak.mojo` の skip は `run_tests.sh:117` の
+カウンタ（`^SKIP ` 行のみ）に入らない別行（`-- 127.0.0.1:54314 tests/test_leak.mojo skipped`）。
+
+## パッケージング再確認（turn 8）
+
+| 項目 | コマンド | 結果 |
+|---|---|---|
+| `.conda` 再生成 | `rm dist/pq-0.1.0-he8cfe8b_0.conda` → `pixi build -o dist` | rc 0。`dist/` に `pq-0.1.0-he8cfe8b_0.conda` **1 個**（ビルド ID も turn 4 と同一 = `he8cfe8b_0`） |
+| lock 不変 | `pixi install --locked` → `git diff --quiet main -- pixi.lock` | 両方 rc 0（P3） |
+| 作業ツリー | `git status --short` | 空（`dist/` `build/` は gitignore 済み） |
+| YAML 静的検査 | `pixi exec --spec actionlint actionlint .github/workflows/{ci,release}.yml` | 指摘 **0**（2 本とも） |
+
+初回の `pixi build` は既存ファイルを `Skipping 'pq-0.1.0-he8cfe8b_0.conda' (already exists)` で再利用したため、
+**現在の木からのビルドを確かめるのに一度消してから回し直した**（deprecated 警告は turn 5 の判断どおり無視。rc 0）。
+
 ## 受け入れ基準対応表
 
-T6 で記入（REQ §4 の A1〜F2）。
+REQ §4 の A1〜F2。「静的に確認（impl）」= このマイルストーン中にローカルで実測・grep した分、
+「**verify の PR で確認**」= GitHub Actions の run を見るまで埋まらない分（REQ §2.2c / B6）。
+
+| 基準 | 担ったタスク | 証跡（impl が確認した分） | verify に残る分 |
+|---|---|---|---|
+| A1 `pixi build` 成功 + `.conda` 生成 | T2 / T6 | turn 4（17 s で `pq-0.1.0-he8cfe8b_0.conda`）+ turn 8（dist を消して再生成、1 個、rc 0） | なし（完了） |
+| A2 別プロジェクトから git / ローカルチャンネル依存で `mojo run` | T2 | turn 4 の 2 経路（`scratch/turn-004-consumer-git.log` / `turn-004-consumer-dl.log`。両方 `pq import OK` + `PgError(kind=Connection` で `LibpqLoad` 無し） | git 経路を `https://github.com/6in/mojo-pg.git` + `branch` で再実測（RESEARCH §6。PR 後） |
+| A3 `.conda` に `examples/` `tests/` `hello.mojo` が無い | T2 | turn 4（`pkg-*.tar.zst` の中身は `lib/mojo/pq.mojoc` + `share/max/firstActivation` だけ） | なし（完了） |
+| A4 `pixi run check` が従来どおり PASS | T2〜T6 | turn 4（183 s）/ 5（173 s）/ 6（170 s）/ 7（176 s）/ 8（170 s）すべて 6/6 PASS | なし（完了） |
+| B1 `ci.yml` が PR(main) / push(main) で 3 OS | T3 | `wf_ci_exists` / `ci_pull_request=1` / `ci_branches_main=2` / `ci_os_*` 3 key / `ci_fail_fast_false=1` + actionlint 0 | **verify の PR で確認**（3 ジョブが実際に起動すること） |
+| B2 Linux 2 ジョブが compose を立てて `final_check: PASS` | T3 | `ci.yml` の `db-up` / `docker compose pull` / `pixi run check` ステップ（`ci_pixi_run_check=3`）。ローカルでは同じ `pixi run check` が 6/6 PASS | **verify の PR で確認**（CI 上の緑） |
+| B3 macOS が brew PG17 + `PQ_TEST_CONNINFO` で緑 / blackhole 代替が無ければ SKIP 件数がログに出る | T3 | `macos-postgres.sh` の `bash -n` rc 0 と grep 5 key（`scram` / `pg_ctl -w -t 60` / `WRONG` 対照 / `schema.sql` / `reload`）、`blackhole.py` のローカル陽性対照（`recv` が `TimeoutError`）、`ci_conninfo_5432=1`。**brew / macOS 自体は開発機（linux-aarch64）で実行不能** | **verify の PR で確認**（`macos-postgres.sh` の初実行。skipped の見込みは下の申し送り 3 を参照） |
+| B4 各ジョブで `pixi build` 成功 + `.conda` を artifact 保存 | T3 | `ci_pixi_build=1` / `ci_upload_artifact=2` / `ci_artifact_pq_conda=1`（`pq-conda-${{ matrix.os }}`）+ ローカルの `pixi build` rc 0 | **verify の PR で確認**（3 artifact の実体とファイル名） |
+| B5 全ジョブに `timeout-minutes` / DB 待ちに上限 / secrets 参照なし / `permissions` 最小 | T3 / T4 | `all_timeout_minutes=4` / `all_permissions=3` / `all_secrets_refs=0` / `all_contents_write=1`、待ち上限 = `--wait-timeout 180`（`pixi.toml:32`）と `pg_ctl -w -t 60` と ジョブ 45 分 | なし（静的に確定） |
+| B6 PR 上で 3 ジョブが緑 | — | （impl は PR を作らない: D15 / 決めた事項 14） | **verify の PR で確認**（`gh pr checks --watch`） |
+| B7 Windows ジョブ不在の理由が YAML と README に | T3 / T5 | `ci_windows_reason=1`（`ci.yml` 先頭コメント）+ `readme_windows_toolchain=2` | なし（完了） |
+| C1 `release.yml` が `v*` タグ push で 3 プラットフォーム `.conda` + tarball を添付する構成 | T4 | `wf_release_exists` / `release_tags_v=1` / `release_pixi_build=1` / `release_git_archive=1` / `release_gh_release_create=1` / `release_gh_token=1` / `release_dup_check=1` + actionlint 0 | タグ push と Release 作成は **マイルストーン内で行わない**（REQ C3 の明示）。構成レビューのみ |
+| C2 タグと `version` の不一致で落ちるステップ | T4 | `check-tag-version.sh` のローカル陽性対照 3 値（`v0.1.0` rc 0 / `v0.2.0` rc 1 / `0.1.0` rc 1。turn 6）+ `release_version_check_sh=1` / `release_ref_type_tag=3` | なし（完了。CI 上の実行は `verify-version` ジョブで PR 外） |
+| C3 タグを使わない経路でビルド部分が確認済み | T3 / T4 | ローカル `pixi build` rc 0（turn 4 / 8）。`workflow_dispatch` は既定ブランチに無いと起動不可（P13） | **verify の PR で確認**（CI の `pq-conda-*` artifact が C3 の経路。REQ C3 の「CI 側の `pixi build` artifact」） |
+| C4 `CHANGELOG.md` に `0.1.0` 節 + Release 本文に使う | T4 | `changelog_010_heading=1` / `changelog_unreleased_heading=1` / `changelog_phase_lines=5` + `release-notes.py` の陽性対照 3 値（`0.1.0` 非空 / `9.9.9` rc 1 / 空節 rc 1。turn 6）+ `release.yml` の `--notes-file` | なし（完了。実際の Release 本文はタグ push 時） |
+| D1 英語の概要 + インストール節 | T5 | `readme_en_heading=1`（`## English summary and install`）+ `readme_git_dep` / `readme_rattler_index` が英語節にも | なし（完了） |
+| D2 日本語インストール節に git / `.conda` の依存指定 | T5 | `readme_git_dep=2` / `readme_tag_v010=3` / `readme_preview_pixi_build=4` / `readme_rattler_index=2` / `readme_dash_I_src=2` | なし（完了） |
+| D3 「テストの回し方」に CI の説明 | T5 | `readme_ci_heading=1` + `readme_job_name_{ubuntu,arm,macos}=2` 各 + `readme_wait_timeout_180` / `readme_pg_ctl_60` / `readme_fork` / `readme_windows_toolchain` | なし（完了） |
+| D4 ブランチ保護の手順（job 名を含む） | T5 | `readme_branch_protection=1` / `readme_required_status_checks=1`（`protection.json` の `contexts` にジョブ名 3 つ） | 設定自体は**人間 / verify**（impl はリポジトリ設定を変えない: D15） |
+| E1 SIGPIPE は README 明記（案 A）+ `check` PASS | T1 | `readme_sigpipe=2` / `readme_rc_141=1`、コード変更 0、`check` 6/6 PASS | なし（完了） |
+| E2 `wait_readable` の非 TIMEOUT 経路でも `out` を復元 + テスト 1 件 | T1 | `async_restore_collected_def=1` / `_sites=3`（def + 2 呼び出し）/ `test_notify_tests=25`（24 → 25）/ `test_notify_restore_collected=2` | なし（完了。経路自体は単一スレッドで到達不能なのでテストはヘルパ直叩き + `notifications()` 観測） |
+| F1 `check` PASS（247 s 以内） | T6 | turn 8 = **170 s**（クリーンな DB から。閾値 247 s、見積もり 170〜220 s の下端） | CI の所要は **verify の PR で確認**（3 OS、見込み 8〜13 分 + macOS brew 2〜4 分） |
+| F2 警告ゼロ / `mojo format` 差分なし | T6 | `check` 1/6 段で差分なし、6/6 段で `matched lines: 0`、`pixi run package` 警告ゼロ | なし（完了。CI も同じ `pixi run check` を回す） |
 
 ## verify への申し送り
 
-T6 で記入。
+1. **PR を作って CI を待つ**（impl は作っていない）。`gh pr create` → `gh pr checks <PR> --watch`（上限 **40 分**。
+   ジョブ `timeout-minutes: 45` + macOS brew 2〜4 分を見込む）。必須の 3 ジョブ名は
+   `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`
+2. **artifact 名を VERIFICATION に写す**（P5 = release の `uniq -d` 重複検査の根拠）: `pq-conda-ubuntu-latest` /
+   `pq-conda-ubuntu-24.04-arm` / `pq-conda-macos-latest` の 3 つと、中の `.conda` の**ファイル名**
+   （linux-aarch64 は `pq-0.1.0-he8cfe8b_0.conda`。x86_64 / osx-arm64 のハッシュが互いに違えば flat な `dist/` で衝突しない）。
+   `final-check-log-<os>` の 3 artifact は `build/final_check.log` で、6 工程と `skipped` 行を読む用
+3. **macOS ジョブの `skipped` の見込みは 15 件**（turn 8 で内訳を特定した）: `test_leak.mojo` の
+   `_skip_on_macos` が **14 箇所**（`SKIP <name>: RSS sampling is Linux-only`）+ PG17 なので
+   `SKIP test_interval_infinity_rejected_before_pg17` **1 件**。`test_connect_blocking_times_out` は
+   blackhole が立てば **PASS が正**（立たなければ `SKIP … port 54399 refused` が 1 件増えて 16）。
+   PG14 は Linux だけなので `test_interval_infinity_on_pg17_and_later` の SKIP は macOS には出ない。
+   Linux 2 ジョブは 54317 / 54314 とも `skipped 1`（上の基線と同じ）
+4. **A2 の git 経路を再実測**（RESEARCH §6）: 別ディレクトリの最小 pixi プロジェクトから
+   `pq = { git = "https://github.com/6in/mojo-pg.git", branch = "gsd-lite/phase6-packaging-ci" }`
+   （`preview = ["pixi-build"]` + channels `https://conda.modular.com/max` と `conda-forge`）で
+   `pq import OK` + `PgError(kind=Connection` を確認する。turn 4 は `file://` の local path で実測済み
+5. **2 回目の run で setup-pixi のキャッシュ**（P12）: PR に 2 回目の push をしたら
+   `Cache restored` のログ行を確認する（1 回目は `Cache not found` が正）
+6. 任意: Phase 5 の堅牢性格子 `scratch/turn-012-robust-regress.sh` は期待値不変
+   （E1 が案 A = コード変更なしのため。`> >(exit 0)` 軸の rc 141 もそのまま）

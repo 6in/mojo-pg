@@ -234,7 +234,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T4（CHANGELOG / release.yml / ジョブ名が確定してから）
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（1 ファイル）
 
-- [ ] T6: 統合（クリーン状態からの最終判定 + lock 不変 + チェックリスト全行 + TRACE 受け入れ基準対応表 + branch push）
+- [x] T6: 統合（クリーン状態からの最終判定 + lock 不変 + チェックリスト全行 + TRACE 受け入れ基準対応表 + branch push）
   - 完了基準:
     - (a) `pixi run db-reset` → `pixi run check` **6/6 PASS**（所要 ≤ 247 s。`date -Iseconds` で挟む。P21）、`pixi run package` 警告ゼロ、`pixi build -o dist` rc 0（`.conda` 1 個）、`pixi install --locked` rc 0、
       `git diff --quiet main -- pixi.lock` rc 0（P3）、`mojo format` 差分なし（`check` 1/6 段）

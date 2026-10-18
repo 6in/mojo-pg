@@ -101,3 +101,20 @@
   impl が静的に確認できた分と分ける）、(d) PROGRESS の最新ターン節 ≤ 40 行（`python3 -c` のワンライナー。**この turn 7 の節は 16 行**なので T6 も同程度に収める）、(e) `git status` clean → `git push -u origin gsd-lite/phase6-packaging-ci` → `git status -sb` に `ahead` なし →
   `gh run list --branch gsd-lite/phase6-packaging-ci --limit 5` が **0 件**（P15 の陽性対照。走っていたら `on:` を見直す）、**PR は作らない**（verify の仕事）。(f) TRACE「verify への申し送り」も T6 で記入（PLAN T6 (f) の 5 項目）。
   `pixi build -o dist` は T2 以降 `dist/` へ出すので `git status` を汚さない（`.gitignore` 済み）が、`build/` と同様コミット前に `git status --short` を必ず見る
+
+## turn 8 — impl — T6 統合（クリーン状態からの最終判定 + チェックリスト全行 + TRACE 対応表 + branch push）
+- やったこと: コード変更 0。(a) `pixi run db-reset`（compose 3 台を `-v` で作り直し、3 台 `Healthy`）→ **`pixi run check` 6/6 PASS = 170 s**（11:17:29 → 11:20:19。閾値 247 s）、
+  `pixi run package` 警告ゼロ、`pixi build -o dist` は初回が `Skipping (already exists)` だったので **`.conda` を消して再生成**（rc 0 / `pq-0.1.0-he8cfe8b_0.conda` 1 個）、`pixi install --locked` rc 0、
+  `git diff --quiet main -- pixi.lock` rc 0（P3）、`mojo format` 差分なし（`check` 1/6 段）。(b) `actionlint` 2 本とも指摘 0、チェックリスト **全 101 key が期待値**（turn 7 との差分は
+  `trace_checklist_section` 4 → 5 のみ = turn 7 が checklist 後に TRACE を書いたため。**PLAN 訂正は 0 件**）。(c) TRACE に「受け入れ基準対応表」（REQ §4 の A1〜F2 を 1 行ずつ、
+  impl が確認した証跡と **verify の PR で確認**する分を列で分離 = CI 依存は B1〜B4 / B6 / C3 / F1 の CI 側）と「verify への申し送り」6 項目、「`check` の所要（turn 8）」「パッケージング再確認」「チェックリスト（turn 8）」を追記。
+  (e) commit → `git push -u origin gsd-lite/phase6-packaging-ci` → `git status -sb` に `ahead` なし、`gh run list --branch gsd-lite/phase6-packaging-ci --limit 5` が **0 件**（P15 の陽性対照 = push では CI が走らない）。PR は作っていない（verify の仕事）
+- 想定外: (1) **`skipped 1` の正体がこれまでの申し送りと違った**。turn 4〜7 の PROGRESS は 54314 の 1 件を「PG14 側の leak」と書いていたが、実測は 54317 = `SKIP test_interval_infinity_rejected_before_pg17`、
+  54314 = `SKIP test_interval_infinity_on_pg17_and_later` の**サーバー版差による対称な 1 件ずつ**で、`test_leak.mojo` のファイル skip は `run_tests.sh:117` のカウンタ（`^SKIP ` 行だけ）に入らない別行だった。
+  これを基に macOS ジョブの skipped 見込みを **15 件**（`_skip_on_macos` 14 箇所 + interval 1）と確定して申し送りに書いた（PLAN T6 (f) の「leak のみが正」は不正確だったので TRACE で訂正）。
+  (2) `pixi build -o dist` は同じビルド ID の `.conda` が残っていると再ビルドせず `Skipping` で rc 0 を返す → 現在の木からのビルドを確かめるには一度消す必要がある
+- やり直し: 0 回（既存テストの期待値変更も 0 件）
+- 次への注意: **全タスク完了 → 次は `/gsd-lite-verify`**。verify の入口は TRACE の「verify への申し送り」6 項目（PR 作成 → `gh pr checks <PR> --watch` 上限 40 分 / artifact 名 3 + 3 の記録 /
+  macOS の skipped **15 件**見込み / A2 git 経路を `https://github.com/6in/mojo-pg.git` + `branch` で再実測 / 2 回目 push で `Cache restored` / 堅牢性格子は任意）。
+  **CI の初見は PR なので、落ちたら差し戻しの F タスク**（REQ §6）。ローカルで固定された基線は `check` 170 s・6/6 PASS・Linux 両サーバー `skipped 1`・`.conda` 1 個（`he8cfe8b_0`）・lock 不変。
+  `pixi build` の再生成は `dist/*.conda` を消してから回す（上の想定外 (2)）
