@@ -160,3 +160,18 @@
   完了基準は「汎用メッセージが src から消える（grep 0）+ 既存テスト全 PASS + 3 呼び出し側の busy loop 否定をレビューで書く」。macOS の PASS は verify round 3 が CI で判定する。
   push は **turn 10 / 11 の未 push コミット 2 つ + F2** を一緒に（`ahead 2` の状態。run `39091056281` は完了済みなので cancel の心配なし）。push 後は全ジョブの完了を待たない（F1 と同じ）。
   verify round 3 の確認項目は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名 / F2 回帰 grep / F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）
+
+## turn 12 — impl — F2 macOS の poll セマンティクス（POLLHUP と POLLOUT の排他）に追従
+- やったこと: 設計 **A** を実装。`async_conn.mojo` の `wait_readable` / `wait_writable` から「要求方向のビット無し + hangup / error → 汎用 `CONNECTION`」の分岐（各 5 行）を削除し、
+  **hangup / error だけでも return** するようにした（残る raise は `fd < 0` の `CONNECTION "no socket"` と `TIMEOUT`、`poll_socket` の `USAGE` のみ）。両 docstring の本文と `Raises:` を実態に書き換え、
+  汎用メッセージは src から消えた（`grep -c 'POLLHUP/POLLERR'` = **0**）。`src/pq/__init__.mojo:290` の表は 3 種とも残るので不変。呼び出し側 3 箇所はコード変更なしで、
+  次の libpq 呼び出しが必ず失敗を報告する（busy loop なし）ことを TRACE「F2」(b) の表に各 1 行で記録。`tests/test_poll.mojo` は `writable.writable` の 1 assert だけ `CompilationTarget.is_linux()` 下に移動（hangup 3 assert は両 OS 共通、テスト数 11 不変）。
+  検証: test_poll **11 PASS** / test_async **31 PASS**（`test_connect_failures_name_their_cause` 含む）、`db-reset` → **`check` 6/6 PASS = 190 s**（12:02:54 → 12:06:04、閾値 247 s、6/6 段 `matched lines: 0`、`final_check: PASS`、
+  両サーバー `SKIP` 1 件ずつ = `test_interval_infinity_*` の PG 版差）、`package` 警告 0、`is_linux` grep = 1、チェックリスト 101 key は turn 11 と **`trace_checklist_section` +1 の 1 行だけ**差分（`src_def_ref_return` 0 / `test_file_count` 24 / `async_*` 1・3・3 不変）。
+  PLAN 訂正 0 件。commit `4d9deed`。サブエージェント 0 本
+- 想定外: `trace_checklist_section` の +1 は turn 11（verify）が自分の見出しを足した分で、turn 12 の採取時点ではまだ自分の節を書いていなかった（TRACE に注記した）。F2 自体の実装は PLAN の表どおりで想定外なし
+- やり直し: 0 回（既存テストの期待値変更 0 件 = 削除した assert はなく Linux 限定に移しただけ）
+- 次への注意: 次は **`/gsd-lite-verify`（round 3）**。**push は未実施**（この申し送り / state のコミットと一緒に行う。turn 10 / 11 / 12 の 3 コミットがまとめて PR #1 に載る。run `39091056281` は完了済みなので `concurrency` の cancel の心配はない）。
+  **F2 (a) の受け入れはローカル（Linux）では観測できない**: 判定は CI の macOS ジョブで `test_connect_failures_name_their_cause` と `test_socketpair_peer_close_sets_hangup_both_ways` が PASS すること。
+  round 3 の確認は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しないこと = P5 / F2 回帰 grep（`POLLHUP/POLLERR` 0・`is_linux` ≥ 1）/ F1 grep 不変（`cache: false` 1 + 3、旧 2 入力 0）/ 合格時 `gh pr edit 1 --body-file`）。
+  macOS が **別の** 赤になった場合は、`wait_*` が return した後にどの libpq 呼び出しがどのメッセージを出したかを `final-check-log-macos-latest` で確かめる（TRACE「F2」(b) の表が予測値）

@@ -281,7 +281,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T6
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（YAML 4 箇所 + コメント + 文書）
 
-- [ ] F2: macOS の poll セマンティクス（`POLLHUP` と `POLLOUT` が排他）に合わせる — `wait_readable` / `wait_writable` のハングアップ分岐を「libpq に原因を言わせる」形にし、`test_poll` の socketpair 期待値を Linux 限定にする（verify round 2 / VERIFICATION §0）
+- [x] F2: macOS の poll セマンティクス（`POLLHUP` と `POLLOUT` が排他）に合わせる — `wait_readable` / `wait_writable` のハングアップ分岐を「libpq に原因を言わせる」形にし、`test_poll` の socketpair 期待値を Linux 限定にする（verify round 2 / VERIFICATION §0）
   - 背景: PR #1 の run `39091056281` で Linux 2 ジョブは緑、**macOS だけ `pixi run check` 5/6 段で 2 テスト赤**（`final-check-log-macos-latest`。`scratch/turn-011-macos-artifact/final_check.log`）:
     ① `tests/test_async.mojo:1613` `test_connect_failures_name_their_cause` — 127.0.0.1:1 への接続拒否で `wait_writable` が **`connection socket closed (POLLHUP/POLLERR)`** を投げ、libpq の `Connection refused` が出ない。
     macOS の poll(2) は接続拒否を `POLLHUP`（`POLLOUT` 無し）で報告するので `async_conn.mojo:787-793` の「要求方向のビット無し + hangup」分岐に入る（Linux は `POLLOUT` を伴うので `:787` で return し、次の `PQconnectPoll` が原因を名乗る）。
