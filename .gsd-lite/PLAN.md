@@ -250,6 +250,37 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T5
   - 並列サブ作業: サブエージェント **0 本（親が全部）**
 
+- [ ] F1: setup-pixi の入力を `run-install: false` と両立する形に直す（`cache: false` を明示し `locked: true` を外す。ci.yml 1 箇所 + release.yml 3 箇所）+ コメント + PLAN 訂正（verify round 1 / VERIFICATION §1）
+  - 背景: PR #1 の CI run `39090199560` で 3 ジョブとも `prefix-dev/setup-pixi@v0.11.2` が 5〜9 s で `##[error]Cannot cache without running install`。setup-pixi v0.11.2 `src/options.ts:207-217` は
+    `runInstall === false` のとき **`cache === true` と `locked === true` の両方**を拒否する。`cache` の既定は true（`action.yml`）なので省略では直らず、`cache` だけ直すと次は
+    `Cannot use \`locked: true\` when not running install` で落ちる。設計は **A = 手動 install 維持**（REQ §2.5 のリトライを `retry.sh 3 15 pixi install --locked` で満たす）。
+    B（action に install させて `locked` / `cache` を残す）は install にリトライが付かないので採らない（VERIFICATION §1 に理由）
+  - 完了基準:
+    - (a) `.github/workflows/ci.yml` と `.github/workflows/release.yml` の **4 箇所**の `prefix-dev/setup-pixi@v0.11.2` の `with:` を `pixi-version: v0.82.0` / `cache: false` / `run-install: false` の 3 行にする
+      （`locked: true` と `cache: true` の行を削除。lock の強制は既存の `bash .github/scripts/retry.sh 3 15 pixi install --locked` ステップが担う。`verify-version` / `release` ジョブは install を呼ばないので入力だけ揃える）
+    - (b) `ci.yml:50-53` のコメント（"`cache: true` still keys off pixi.lock, and the locked input makes a stale lock fail here"）を実態に書き換える: 「setup-pixi は run-install を切ると cache / locked を受け付けない（v0.11.2 `options.ts`）。
+      lock の強制は次の retry.sh ステップの `--locked`、環境キャッシュは使わない（毎 run で取得。+1〜3 分の見込み）」の趣旨。**key のパターン文字列（`locked: true` / `run-install: false` / `cache: true` / `cache: false`）をコメント・見出しに書かない**（turn 5 / 6 の再発防止）
+    - (c) TRACE「PLAN 訂正（turn 10）」に 2 行: ① チェックリスト `ci_locked_true` の期待値 **1 → 0**（PLAN:82 の表・決めた事項 5・T3 (a) の `locked: true` / `cache: true` は F1 で無効）、
+      ② TRACE「verify への申し送り」5（2 回目の run で `Cache restored`）は無効 = キャッシュを使わない。PLAN 決めた事項 5 の `locked: true`、`cache: true` の語を `cache: false`（`locked` なし）に直す
+    - (d) 期待結果（**この表だけが正**。本文・テストはこれを参照する）:
+
+      | 条件 | 結果 |
+      |---|---|
+      | `pixi exec --spec actionlint actionlint .github/workflows/ci.yml .github/workflows/release.yml` | 指摘 0 |
+      | `grep -c 'cache: false' .github/workflows/ci.yml` / `… release.yml` | 1 / 3 |
+      | `grep -c 'cache: true'` と `grep -c 'locked: true'`（2 本とも） | 0（grep の rc 1 が正） |
+      | checklist `ci_run_install_false` / `ci_setup_pixi_pinned` / `ci_pixi_version` | 1 / 1 / 1（不変） |
+      | checklist `ci_locked_true` | **0**（PLAN 訂正 ①） |
+      | checklist の他の全行 | turn 9 のログ（`scratch/turn-009-checklist.log`）と同値（`trace_checklist_section` は +1 可） |
+      | `pixi run check` | 6/6 PASS（Mojo 側不変だが最終判定コマンド。所要 ≤ 247 s） |
+      | push 後 `gh run list --branch gsd-lite/phase6-packaging-ci --limit 3` | PR #1 由来の新しい run が 1 件増える |
+      | その run の `gh run view <run-id>` | 3 ジョブとも `Run prefix-dev/setup-pixi@v0.11.2` が ✓（**全ジョブの完了は待たない**。緑 / 赤の判定は verify round 2） |
+
+    - (e) `git status` clean（`__pycache__` / `dist/` / `build/` は無いか gitignore）→ commit → `git push origin gsd-lite/phase6-packaging-ci`（既存 PR #1 に載る。PR は作らない）→ 上の表の最後の 2 行
+  - 対象: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.gsd-lite/TRACE.md`, `.gsd-lite/PLAN.md`（決めた事項 5 と表 `:82` の語句のみ）
+  - 依存: T6
+  - 並列サブ作業: サブエージェント **0 本（親が全部）**（YAML 4 箇所 + コメント + 文書）
+
 ## 決めた事項
 
 1. **E1 は案 A（README 明記のみ）**（REQ §2.3「plan が選ぶ」/ RESEARCH §2.13）。根拠: rc 141 は stdlib `print` が SIGPIPE 既定のまま write した結果で `cat` / `grep` と同じ Unix 標準挙動。案 B は `SIG_IGN` + 番兵 `write(2)` を

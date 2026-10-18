@@ -118,3 +118,14 @@
   macOS の skipped **15 件**見込み / A2 git 経路を `https://github.com/6in/mojo-pg.git` + `branch` で再実測 / 2 回目 push で `Cache restored` / 堅牢性格子は任意）。
   **CI の初見は PR なので、落ちたら差し戻しの F タスク**（REQ §6）。ローカルで固定された基線は `check` 170 s・6/6 PASS・Linux 両サーバー `skipped 1`・`.conda` 1 個（`he8cfe8b_0`）・lock 不変。
   `pixi build` の再生成は `dist/*.conda` を消してから回す（上の想定外 (2)）
+
+## turn 9 — verify — 差し戻し（指摘 1 件 = F1 setup-pixi 入力）/ PR #1 作成済み（https://github.com/6in/mojo-pg/pull/1）/ CI 3 ジョブとも setup-pixi で赤
+- やったこと: diff 全体（コード・YAML・スクリプト 5 本・README・CHANGELOG）をレビュー + セキュリティ + 堅牢性格子（スクリプト argv / CHANGELOG 内容）。ローカル最終判定: `db-reset` → **`check` 6/6 PASS = 169 s**、
+  `pixi build` 再生成 1 個、`pixi install --locked` rc 0、lock 不変、actionlint 0、チェックリスト 101 key すべて期待値（差分は `trace_checklist_section` 5 → 6 のみ）。**A2 の git 経路を GitHub URL で再実測 → PASS**（`scratch/turn-009-consumer-git.log`）。
+  PR #1 を作成 → CI 起動（B1 のジョブ名 3 つ確認）→ **3 ジョブとも `setup-pixi@v0.11.2` が 5〜9 s で `Cannot cache without running install`**。VERIFICATION.md（判定表 / 指摘表 / 残留リスク 7 / round 2 の確認 6 項目）を書き、PLAN に F1 を追記。サブエージェント 0 本
+- 想定外: (1) setup-pixi は `run-install: false` のとき `cache: true` だけでなく **`locked: true` も拒否する**（v0.11.2 `options.ts:207-217` を `gh api` で読んで確定。`cache` の既定は true なので省略では直らない）。RESEARCH P12 の「未検証」がそのまま赤になった。
+  `cache` だけ直すと次の run が `locked` で落ちるので、F1 は両方を 1 回で直す。(2) ローカル `check` を回しながら PR を作ったため CI とローカルが並行し、所要が短縮できた（CI は 10 s で落ちたので待ち時間ゼロ）
+- やり直し: 0 回（既存テストの期待値変更 0 件）
+- 次への注意: impl は F1 だけ（YAML 4 箇所 + コメント + TRACE / PLAN 訂正）。**`cache: false` を明示し `locked: true` を削る**（省略不可）。コメントに key パターンの文字列を書かない。push 後に `gh run view <run-id>` で setup-pixi ステップの ✓ だけ確認（全ジョブ完了は待たない）。
+  verify round 2 は VERIFICATION §7 の 6 項目（`gh pr checks 1 --watch` 上限 40 分 / `final-check-log-*` の `skipped`（macOS 15 件見込み）/ artifact 3 つの `.conda` 名 / macOS の `LibpqLoad` 有無 = 残留リスク 2 の判定 / F1 の回帰 grep）。
+  macOS が `LibpqLoad` で赤なら修正は `PQ_MOJO_LIBPQ` を macOS ステップの env に足す（VERIFICATION §6-2）。PR 本文の「VERIFICATION の要約」は round 2 の合格時に `gh pr edit 1 --body-file` で更新する
