@@ -1,185 +1,134 @@
-# REQUIREMENTS — phase5-polish-bench-readme
+# REQUIREMENTS — phase6-packaging-ci
 
-HANDOFF §9 の Phase 5「仕上げ」。ベンチマーク（text vs binary、psycopg 3 比較）、README、examples の総点検、
-Windows コードパスのレビュー、Phase 4 からの持ち越し整理。
+マイルストーン: `phase6-packaging-ci`（ブランチ `gsd-lite/phase6-packaging-ci`、base `main`）
+前提: Phase 0〜5 完了。リポジトリは公開 GitHub `6in/mojo-pg`（Actions 有効、`gh` 認証済み、`main` は origin と同期）。
+開発機は linux-aarch64 / Mojo 1.1.0 / pixi 0.82.0。
 
-## 1. 背景（事実。discuss 時点 2026-10-17）
+## 1. 目的（WHAT）
 
-- Phase 0〜4 は完了（`archive/` と `reflect/` 参照）。公開 API は `src/pq/__init__.mojo` の export 一覧
-- README / LICENSE は未作成。`pixi.toml` は `license = "Apache-2.0"`
-- git remote なし、CI なし（Phase 1 D7: 受け入れはローカル `pixi run test` / `pixi run check`）
-- `examples/`: hello_libpq / basic / params / binary / async_query / listen_notify / bench_formats の 7 本。`pixi run check` の 4/6 段が
-  bench 以外を実行する
-- `examples/bench_formats.mojo` は 10 万行 × 5 列の text vs binary を測る（warm-up 1 + 3 回、exec / decode を分けて印字）。psycopg 比較は無い
-- psycopg 3.3.3 はホストの pyenv python3 にある。pixi 環境には python 3.15.0（mojo の依存）が入っているが psycopg は無い（research turn 1 で訂正。RESEARCH §1.2）
-- `tests/docker-compose.yml`: pg17 (54317) / pg14 (54314) / blackhole (54399)。`check` は Phase 4 末で 167〜187 s、`test_leak` 74 s
-- Windows: `_platform/poll.mojo` の `comptime if` の `else` に `WSAPoll` 分岐（未コンパイル・未検証、docstring 明記済み）。
-  `_ffi/loader.mojo` の探索リストは linux / macos のみで `libpq.dll` の行が無い（HANDOFF §5.1 は Windows: `libpq.dll`）
-- Phase 4 VERIFICATION §5 の持ち越し: `fetch_all` が BAD にならない `CONNECTION` エラーで busy-spin し得る（`async_conn.mojo:1453-1461`）／
-  `_after_send` で `PQflush` が -1 のとき pq は `IDLE`、libpq は `BUSY`／`tests/test_notify.mojo` の `SQL_ASCII` テストが `pq_test_ascii` DB を残す／
-  `test_zero_copy` が 1 テスト 3.4〜3.9 **ms**（Phase 4 は TestSuite の `PASS [ n ]` を秒と読み違えていた。research turn 1 実測: 12 件 49〜56 ms、ビルド済みバイナリ 52 ms。RESEARCH §2.5）
-- Phase 4 TRACE 末尾のサブエージェント契約外提案 7 件: `AsyncConnection.wait_notifications(n, timeout_ms)`／`notifications()` の `PQstatus == CONNECTION_BAD` 先行チェック／
-  `UNLISTEN` 後に来ないことのテスト／LISTEN していないチャンネルの無視／`LISTEN "Mixed Case"`／UTF-8 スキャナ単体に `f4 90 80 80` と `f5 80 80 80` の 4 バイト境界／
-  検証失敗に専用の `PgErrorKind.ENCODING`
+1. **配布物を作る**: `pq` を他プロジェクトから `pixi` で依存指定できる conda パッケージにする（`pixi build`）。
+2. **CI を置く**: GitHub Actions で Linux x86_64 / Linux aarch64 / macOS arm64 の 3 プラットフォームを回し、
+   既存の受け入れゲート（`pixi run check` 相当）を自動化する。HANDOFF §2「Linux と macOS は CI 必須」を満たす。
+3. **リリース**: タグから GitHub Release を作り、ソース tarball と各プラットフォームの `.conda` を添付する。
+4. **README**: 「自分のプロジェクトから使う」を pixi 依存指定の書き方（git 依存 / Release 添付の `.conda`）で拡充する。
+5. **持ち越し 2 件**（Phase 5 VERIFICATION §6.3）を同梱する: examples の SIGPIPE rc 141、`_collect_notifications` の `out` 復元。
 
-## 2. スコープ（やること）
+## 2. 要求
 
-1. **ベンチマーク**: `pixi run bench`（既存、text vs binary）に加えて psycopg 3 比較を `pixi run bench-psycopg` として追加し、結果を README に記録する（§4.1）
-2. **README**（§4.2）と **LICENSE**（Apache-2.0）
-3. **examples の総点検**（§4.3）
-4. **Windows コードパスのレビュー**（§4.4）
-5. **持ち越し整理**（§4.5）: テスト DB の後始末 / `fetch_all` busy-spin / `PQflush` -1 / `test_zero_copy` の接続固定費の調査
-6. **契約外提案 7 件の採否**（§4.6。採否は discuss で決める）
-7. **堅牢性**（§5）: examples / bench を含め、どの入力・出力状態でもトレースバックを出さず、既存データを失わない
+### 2.1 パッケージング（conda / pixi build）
+- `pixi.toml` に `[package]` と pixi-build-mojo バックエンドの設定を追加し、`pixi build` が `.conda` を生成する。
+- パッケージは `src/pq`（`__init__.mojo` を持つディレクトリ）を含む。`hello.mojo` / `examples/` / `tests/` は含めない。
+- 利用側の確認: 別ディレクトリの最小 pixi プロジェクトから依存指定（git 依存または生成した `.conda` のローカルチャンネル）で
+  `from pq import Connection` が通ることを検証する（research で手段の実在と Mojo 1.1.0 との相性を確認してから plan）。
+- 既存の `pixi run package`（`.mojoc`）は残してよいが、README の配布手段としては conda パッケージを主にする。
+
+### 2.2 CI（GitHub Actions）
+- マトリクス: `ubuntu-latest`（x86_64）/ `ubuntu-24.04-arm`（aarch64）/ `macos-latest`（arm64）。Windows ジョブは置かない（理由を明記）。
+- 環境構築は `prefix-dev/setup-pixi` + `pixi.lock`（ロック尊重）。
+- Linux: `tests/docker-compose.yml`（PG 17 / PG 14 / blackhole）をそのまま使い、`pixi run check` を回す。
+- macOS: ジョブ内で Homebrew の PostgreSQL（17 系 1 本）を起動し `tests/fixtures/schema.sql` を適用、`PQ_TEST_CONNINFO` でそこを指して
+  テストと examples を実行する。PG 14 は macOS では回さない。blackhole（接続を受けて何も返さない listener）は `socat` か `nc` で
+  ジョブ内に代替を立てる。立てられない場合は接続タイムアウトのテストだけ SKIP（`SKIP` 行として数える）。
+- Linux のゲートは `pixi run check` をそのまま 1 ジョブで回す（ローカルと CI の判定を同じスクリプトに揃える）。
+  macOS も可能な限り `final_check.sh` を流用する（compose を呼ばない形で同じ 6 段を通す。差分は research / plan で決める）。
+- トリガー: `pull_request`（base `main`）と `push`（`main`）。
+- CI ジョブは `pixi build` も実行し、生成した `.conda` をジョブの artifact として保存する（リリース経路のビルド部分を PR ごとに検証するため）。
+- Windows ジョブは置かない。ワークフローのコメントと README に理由（Mojo の Windows ツールチェーン未提供）を書く。
+
+### 2.2b リリースワークフロー
+- `v*` タグの push で動く release ワークフロー: 3 プラットフォームで `pixi build` → GitHub Release を作成し、`.conda` とソース tarball を添付。
+- タグ名（`v0.1.0`）と `pixi.toml` の `version`（`0.1.0`）が一致しないときは失敗させる。
+- **タグは人間が打つ**。マイルストーン内ではワークフローの整備と、タグを使わない経路（CI の artifact / `workflow_dispatch`）での動作確認まで。
+  v0.1.0 の Release 作成はマージ後に人間が行う。
+
+### 2.2c verify と PR
+- verify は `gsd-lite/phase6-packaging-ci` を push して PR を作り、**PR 上の CI が緑になることを合格条件に含める**
+  （`gh pr checks <PR> --watch` 等で完了を待ち、赤なら差し戻す）。マージは人間が行う。
+
+### 2.3 持ち越し 2 件
+- examples の SIGPIPE: 対応方針（README 明記のみ / examples 側で検知して rc 1）は plan が選ぶ。stdlib の挙動は変えない。
+- `_collect_notifications`: `wait_readable` が `CONNECTION` で抜ける経路でも `out` を復元する（1 分岐 + テスト 1 件程度）。
 
 ## 3. スコープ外（やらないこと）
+- modular-community チャンネルへの recipe 提出（外部リポジトリへの PR。採らない）
+- Windows 実機検証・Windows CI ジョブ（ツールチェーン無し。README の「未検証」明記は維持）
+- 新しい型・新しい API の追加、HANDOFF §3 の対象外（プール、COPY、配列型 ほか）
+- ベンチマークの再計測
 
-- HANDOFF §3 の対象外（ワイヤプロトコル自前実装、プール、COPY、パイプラインモード、ORM、Mojo `async` 統合）
-- 配列型・range・その他 §6 に無い型（Phase 6 候補）
-- Windows での実行・コンパイル（ツールチェーン無し。レビューと「未検証」明記まで）
-- psycopg との勝敗を受け入れ条件にすること（HANDOFF §8。記録だけ）
-- CI（D13。remote 無し。README にはローカルの回し方だけ）
-- 新しい型・新しい同期 API の追加。Phase 4 TRACE の契約外提案 7 件（§4.6）以外の API 追加はしない
+### 2.3b ブランチ保護
+- main の保護（PR の CI を required status checks にする）は**設定しない**。README（または `docs/`）に `gh api` / 画面での設定手順を書くだけ。
+  リポジトリ設定の変更は人間が行う。
 
-（以下の節はラウンドの進行に合わせて追記する）
+### 2.4 配布名・ドキュメント・変更履歴
+- conda パッケージ名は **`pq`**（import 名と同じ）。research で conda-forge / modular-community に同名パッケージが無いことを確認し、
+  衝突があれば `mojo-pq` に落とす（その場合 DECISIONS に追記して plan へ）。バージョンは `pixi.toml` の `0.1.0` を単一の出所にする。
+- README は日本語のまま。先頭近くに**英語の短い概要 + インストール（pixi 依存指定）節**を 1 つ置く。全訳はしない。
+- `CHANGELOG.md` を Keep a Changelog 形式で新設し、`0.1.0` の節に Phase 1〜5 の成果の要約を書く。release ワークフローは
+  該当版の節を Release 本文に使う。
 
-## 4. 機能要件
+### 2.5 堅牢性（受け入れ基準に含める）
+- 全ジョブに `timeout-minutes` を置く。DB の起動待ちは上限付きで、超えたら明示的に失敗する（ハングしない）。
+- `setup-pixi` 等のネットワーク依存ステップは失敗時にリトライする（アクションのオプションか再試行ステップ）。
+- ワークフローは **secrets を要求しない**（fork からの PR でも CI が動く。Release 作成は `GITHUB_TOKEN` の既定権限で足りる範囲にし、
+  `permissions` を最小にする）。
+- CI の判定はローカルの `pixi run check` と同じ基準（同じスクリプト）で、CI だけ緩める・厳しくすることをしない。
 
-### 4.1 ベンチマーク
+## 4. 受け入れ基準
 
-- psycopg 3 比較は **pixi に python と psycopg を足し**、`pixi run bench-psycopg` で実行する（D2）。同じ SQL（`bench_formats.mojo` の `SQL`、10 万行 × 5 列）、
-  同じ形式の区別（text = 既定カーソル、binary = `binary=True`）、同じ測り方（warm-up 1 + 3 回、全セルを読む）。スクリプトの置き場所は plan が決める（既定 `examples/bench_psycopg.py`）
+### 4.1 パッケージング
+- A1. `pixi build` がこのリポジトリで成功し、`pq-0.1.0-*.conda` が生成される（開発機 linux-aarch64 で実測）。
+- A2. 別ディレクトリの最小 pixi プロジェクト（`channels` に conda.modular.com/max + conda-forge）から `pq` を依存指定
+  （git 依存、または生成した `.conda` を置いたローカルチャンネル。どちらも検証する）して `pixi install` が通り、
+  `from pq import Connection` を使う 1 ファイルが `mojo run` で動く（DB 接続は不要。`PgErrorKind.LIBPQ_LOAD` 以外で落ちない）。
+- A3. 生成パッケージに `examples/` `tests/` `hello.mojo` が含まれない。
+- A4. `pixi run check` が従来どおり PASS（`[package]` 追加で既存タスクが壊れない）。
 
-- `pixi.toml`: python と psycopg（conda-forge）を足す。常時依存に入れるか feature / 環境に分けるか（`pixi run bench-psycopg` が動く最小の形）は research が確認し plan が決める
-- 測定の記録: README に表（形式 × exec / decode / 合計、psycopg は text / binary の各合計）、計測環境（CPU、OS、Mojo 版、libpq 版、PostgreSQL 版、psycopg 版）、日付。
-  対象サーバーは pg17（54317）のみ。1 行の要約（「バイナリがテキストより速い」が成り立つか）を数値つきで書く
-- HANDOFF §8 の「バイナリ形式がテキスト形式より速いこと」は Phase 3 で確認済みの性質。今回も `pixi run bench` の `decode` 列で成り立つことを受け入れ基準に含める
-  （exec を含む合計での勝敗は記録のみ）
-- 堅牢性（§5）: bench-psycopg も DB 未起動・認証失敗でトレースバックを出さず、メッセージを表示して終了コード 1
+### 4.2 CI
+- B1. `.github/workflows/ci.yml` が `pull_request`（base main）と `push`（main）で動き、Linux x86_64 / Linux aarch64 / macOS arm64 の 3 ジョブを持つ。
+- B2. Linux 2 ジョブは `docker compose`（PG17 / PG14 / blackhole）を立てて `pixi run check` を実行し、`final_check: PASS` で緑になる。
+- B3. macOS ジョブは Homebrew の PostgreSQL（17 系）を起動して fixtures を適用し、`PQ_TEST_CONNINFO` でテストと examples を実行して緑になる。
+  blackhole 代替が立てられない場合は接続タイムアウトのテストだけ SKIP とし、SKIP 件数がログに出る。
+- B4. 各ジョブで `pixi build` が成功し `.conda` が artifact として保存される。
+- B5. 全ジョブに `timeout-minutes` があり、DB 起動待ちに上限がある。ワークフローは secrets を参照しない。`permissions` が最小。
+- B6. **このマイルストーンの PR 上で 3 ジョブが緑**（verify の合格条件。`gh pr checks` で確認）。
+- B7. Windows ジョブが無い理由がワークフローのコメントと README にある。
 
-### 4.2 README（日本語。D7）と LICENSE
+### 4.3 リリース
+- C1. `.github/workflows/release.yml` が `v*` タグの push で動き、3 プラットフォームの `.conda` とソース tarball を Release に添付する構成になっている。
+- C2. タグと `pixi.toml` の `version` の不一致で失敗するステップがある。
+- C3. タグを使わない経路（`workflow_dispatch`、または CI 側の `pixi build` artifact）でビルド部分の動作が確認されている。
+  タグ push と Release 作成はマイルストーン内で**行わない**。
+- C4. `CHANGELOG.md` に `0.1.0` の節があり、release ワークフローがその節を Release 本文に使う。
 
-- `README.md`（日本語）。最低限の節: 概要と対応環境（Mojo 1.1.0 / libpq 14+ / Linux・macOS、Windows は未検証）／インストール（pixi、libpq の探索順と `PQ_MOJO_LIBPQ`）／
-  クイックスタート（同期・パラメータ・トランザクション・バイナリ・非同期・LISTEN/NOTIFY の最小例。`examples/` へのリンク）／型マッピング表（HANDOFF §6 の実装どおり）／
-  エラー（`PgErrorKind` 一覧）／ベンチマーク結果（§4.1。計測環境・版・日付つき）／テストの回し方（`db-up` / `test` / `check`）／Windows の状態（§4.4）／ライセンス
-- `LICENSE`: Apache-2.0 全文。README 末尾に `Copyright 2026 0hya6in`（D11）
+### 4.4 README
+- D1. 英語の概要 + インストール節（pixi 依存指定の例）が README 先頭近くにある。
+- D2. 日本語の「インストール」節に pixi 依存指定（git / Release の `.conda`）の書き方がある。
+- D3. 「テストの回し方」に CI の説明（どこで何が回るか、macOS の差分、Windows が無い理由）が追記されている。
+- D4. main のブランチ保護を人間が設定する手順（required checks にする job 名を含む）が書かれている。
 
-### 4.3 examples の総点検
+### 4.5 持ち越し
+- E1. examples の SIGPIPE: plan が選んだ方針（README 明記のみ / examples で検知して rc 1）が実装され、`check` が PASS。
+- E2. `_collect_notifications` が `wait_readable` の `CONNECTION` 経路でも `out` を復元する。テスト 1 件追加。
 
-- 7 本すべてが単体で実行でき（`pixi run example-*` / `bench`）、DB 未起動・認証失敗で `PgError` を表示して終了コード 1 で終わる（§5 堅牢性）
-- 各ファイル先頭の docstring が「何を見せる例か」「実行方法」「前提（DB）」を持つ。README のクイックスタートと矛盾しない
+### 4.6 共通
+- F1. `pixi run check` が PASS（所要は前回末 165〜215 s + 新テスト分。247 s を大きく超えたら PROGRESS に理由を書く）。
+- F2. 警告ゼロ。`mojo format` 差分なし。
 
-### 4.4 Windows コードパスのレビュー（D6）
+## 5. 用語集
+- **check**: `tests/final_check.sh`（`pixi run check`）。fmt / precompile / docstring / examples / tests / zero-warnings の 6 段
+- **配布物**: `pixi build` が生成する `.conda`（プラットフォーム別）とソース tarball
+- **持ち越し**: Phase 5 VERIFICATION §6.3 の残留リスクのうち本マイルストーンで引き取る 2 件
 
-- `_platform/poll.mojo` の `else` 分岐（`WSAPoll`、`WSAPOLLFD` 16 byte、フラグ値、`SOCKET` 幅、タイムアウト -1 の扱い、戻り値 `SOCKET_ERROR`）を
-  Microsoft Docs と照合し、指摘を直す。照合表（項目 / 根拠 URL / 判定）を TRACE に残す
-- `_ffi/loader.mojo` の探索リストに Windows の行（`libpq.dll`。HANDOFF §5.1）を足す。コンパイル時 OS 判定は poll.mojo と同じ書き方
-- README に「Windows 用コードは存在するが未検証（Mojo の Windows ツールチェーン待ち）」を明記
-
-### 4.5 持ち越し整理
-
-- `fetch_all`: `kind == CONNECTION` なら `PQstatus` に関わらず drain を打ち切る（1 分岐 + テスト 1 件）
-- `_after_send`: `PQflush` が -1 のとき状態を `BUSY` に置く（1 分岐 + テスト 1 件。到達困難なら陽性対照はコードレビュー）
-- `test_zero_copy` の接続固定費（D12）: **research turn 1 で原因特定済み** — TestSuite の `PASS [ n ]` はミリ秒で、1 テスト 3.4〜3.9 ms は `test_result` と同じ接続 1 本ぶん。
-  `mojo run` の壁時計 1.6〜1.8 s はコンパイル、ビルド済みバイナリは 52 ms（RESEARCH §2.5、`scratch/turn-001-zerocopy-time.log`）。直すものは無い。
-  impl は計測表を TRACE に転記するだけ（D12 の「テスト側 / src 側」のどちらにも該当しない）
-
-### 4.6 契約外提案 7 件（D5。すべて採用）
-
-- `notifications()`: 先頭で `PQstatus == CONNECTION_BAD` なら `CONNECTION` を投げる（空リストを返さない）。テスト 1 件
-- `AsyncConnection.wait_notifications(n: Int, timeout_ms: Int) raises PgError -> List[Notification]`: 詳細は §4.6.1
-- `PgErrorKind.ENCODING` 新設: 詳細は §4.6.2
-- テスト 4 件: UTF-8 スキャナ単体に `f4 90 80 80`（U+110000、不正）と `f5 80 80 80`（不正先頭バイト）／`UNLISTEN` 後に `NOTIFY` しても `wait_notification` が None／
-  LISTEN していないチャンネルへの `NOTIFY` は届かない／`LISTEN "Mixed Case"` の `Notification.channel` が `Mixed Case` のまま
-
-#### 4.6.1 `wait_notifications(n, timeout_ms)`（D8）
-
-- `n >= 1`、`timeout_ms` は `wait_notification` と同じ範囲（`-1 .. TIMEOUT_MS_MAX`、それ以外は `USAGE`）。`n < 1` は `USAGE`
-- n 件集まるか予算が尽きるまで待ち、集まった分（0〜n 件）を返す。予算切れはエラーにしない。`wait_notification` と同じ保留バッファを共有する
-  （1 往復で余った通知は次の呼び出しが待たずに返す）
-- `Connecting` 中の呼び出しは `USAGE`、切断は `CONNECTION`、UTF-8 でない通知は `ENCODING`（§4.6.2）
-- テスト: n 件ちょうど／予算切れで部分／`n=1` が `wait_notification` と同じ結果／`n < 1` が `USAGE`／上限 `c_int` 境界は既存 `wait_notification` の格子を流用
-
-#### 4.6.2 `PgErrorKind.ENCODING`（D9）
-
-- 新しい値（既存 6 値の次。番号は plan）。`result.mojo` / `decode_binary.mojo` の `_validated_utf8` と `async_conn.mojo` の `_reject_bad_notification_text` の
-  失敗がすべて `ENCODING` になる。メッセージ文言は変えない
-- 既存テストの期待値 `TYPE_MISMATCH` を `ENCODING` に直す（該当箇所は plan が `grep -rn 'invalid UTF-8'` で列挙）。`TYPE_MISMATCH` が残るのは OID と型の不一致・パース失敗だけ
-- docstring の `Raises:` と README のエラー一覧を更新
-
-### 4.7 テスト DB の後始末（D10）
-
-- `tests/test_notify.mojo` の `SQL_ASCII` テストは先頭で `DROP DATABASE IF EXISTS pq_test_ascii`、末尾（成功・失敗とも）で `DROP DATABASE`。
-  末尾の DROP が失敗しても元のテスト結果を隠さない
-- `pixi.toml` に `db-reset`（`db-down` → `db-up`。フィクスチャ再適用）を足し、README のテストの節に書く。`check` は変えない
-
-## 5. 受け入れ基準
-
-- HANDOFF §10 Phase 5: ベンチマーク結果が README にある／`examples/` が全部実行できる／Windows 用コード（`WSAPoll`、DLL 名）が存在し、未検証であることが README に明記されている
-- 共通: `pixi run check` が PASS（fmt / precompile / docstring / examples / tests 両サーバー / 警告ゼロ）
-- 堅牢性（D4）: `src/pq` と `examples/` と bench スクリプトは、どの入力・出力状態（DB 未起動、認証失敗、切断、不正な引数）でもトレースバックを出さず、
-  既存データを失わない。examples / bench は `PgError` を表示して終了コード 1 で終わる
-
-- 持ち越し（§4.5）: `fetch_all` の新テストが `kind == CONNECTION` で打ち切ること／`PQflush` -1 の分岐がコードにあること（到達困難ならレビューで担保し TRACE に記載）／
-  `test_notify` 実行後に `pq_test_ascii` が残らない（`psql -l` 相当で確認）／`test_zero_copy` の原因が TRACE に記録されている
-- 契約外提案（§4.6）: 新テストがすべて PASS、`ENCODING` への期待値変更で `TYPE_MISMATCH` の既存テストに取りこぼしが無い（`grep -rn 'invalid UTF-8' tests/` の全件が `ENCODING`）
-- Windows（§4.4）: 照合表が TRACE にあり、`loader.mojo` に `libpq.dll` の行がある。Linux / macOS の挙動は変わらない（`check` PASS で担保）
-- README（§4.2）: コード片は `examples/` から抜粋し、`examples/` の実行で検証済みであること。型マッピング表と `PgErrorKind` 一覧が実装と一致（verify が照合）
-- 所要: `check` が Phase 4 末（167〜187 s）+ 60 s を超えない（超えるなら PROGRESS に理由を書く）
-
-## 6. 用語集
-
-- **check**: `pixi run check`（`tests/final_check.sh`、6 段）
-- **bench**: `pixi run bench`（Mojo、text vs binary）。**bench-psycopg**: 同じ測定を psycopg 3 で行う新タスク
-- **持ち越し**: 前フェーズの VERIFICATION §5 / reflect が「Phase 5 が引き取る」と書いた項目
-
-## 7. research への「要実測」
-
-- pixi で python + psycopg を足す最小の形（常時依存 / feature / 別環境）と、conda-forge の psycopg 3 のパッケージ名（`psycopg` と `psycopg-c` / `psycopg-binary`）
-- psycopg 3 でバイナリ形式の結果を取る書き方（`cursor(binary=True)` / `row_factory`）と、Mojo 側 `bench_formats.mojo` と同じ「全セルを読む」測り方
-- `WSAPoll` の仕様（`WSAPOLLFD` レイアウト、`POLLRDNORM` 等の値、timeout -1、`SOCKET_ERROR`、`POLLERR`/`POLLHUP`/`POLLNVAL` を events に指定したときの `WSAEINVAL`）の一次資料 URL
-- `_ffi/loader.mojo` の `platform_map` 相当に Windows の行を足す書き方（Mojo 1.1.0 に `is_windows()` が無い前提。poll.mojo の `else` と同じ判定）
-- `test_zero_copy` の所要の計測手順（`mojo run` 単体 vs `check` 内、`_connect` 回数、`perf_counter_ns` での内訳）
-- `DROP DATABASE` を発行する接続が対象 DB に繋いでいないこと（`pq_test` 側から発行）と、PG14 / PG17 での `DROP DATABASE ... WITH (FORCE)` の可否
-- Apache-2.0 全文の取得元（https://www.apache.org/licenses/LICENSE-2.0.txt）
-
-## 8. 用語の補足
-
-- **ENCODING**: `PgErrorKind.ENCODING`。UTF-8 検証失敗（列の text / 通知の channel・payload）
-- **契約外提案**: Phase 4 のサブエージェントが挙げ、Phase 4 では実装しなかった 7 件（§4.6）
-
-## 9. 後続フェーズへの申し送り（Phase 4 reflect より。スキル本文は変えないのでここに書く）
-
-- **research**:
-  - RESEARCH §0.5「Mojo 1.1.0 既知の落とし穴」に Phase 1〜3 分に加えて Phase 4 の 9 件を足す: `PgError` を値で返すとき `return e^`／`except e: return e^` の `try` 本体から
-    `Error` を投げるヘルパを呼べない（判定は `try` の外へ）／`var x: Optional[T] = None` は `except` が必ず脱出すると「assignment never used」警告／
-    `FileDescriptor(fd).write()` は一時値への mutating 呼び出しで不可（`var` に受ける）／`prefix^ + chr(0)` は `^` 演算子と解釈される／`self._field^` でフィールドから
-    move out 不可（`copy()` + `clear()`）／`print("SKIP ...")` は 80 桁を超えると `mojo format` が割る／`len(StringSlice)` は `byte_length()`／`__origin_of` は `origin_of`。
-    加えて「Mojo → C の型幅」（`c_int(x)` / `Int32(x)` の縮小変換）の節を 1 つ設ける
-  - 期待値表は `...` で桁を省略しない。原本を取った SQL と出力ログのパス（`scratch/turn-001-*.log`）を同じ行に書く
-  - §7 の「要実測」はすべて最初のプローブ対象。矛盾を見つけたら REQ 本文を直してよい
-- **plan**:
-  - 追従先チェックリストは最初から実行可能なスクリプト（`.gsd-lite/logs/<slug>/scratch/turn-002-checklist.sh`）。表は「key / 直す場所 / 期待値」の 3 列だけ、
-    現在値は `scratch/turn-002-checklist.log` へ。impl の PLAN 訂正は `TRACE.md` の「PLAN 訂正（turn N）」節に 1 件 1 行
-  - 「境界値」の観点に縮小変換の行を常設: `c_int(x)` / `Int32(x)` / `Int16(x)` / `UInt32(x)` と書いた引数は上限ちょうど・上限 +1・`Int.MAX`・`-1` を完了基準のテストに列挙
-    （今回は `wait_notifications` の `n` と `timeout_ms`）
-  - 所要見積もり: `check` = Phase 4 末実測 167〜187 s + 新テストファイル数 × 5 s + 新テストの明示的な `pg_sleep` / タイムアウト秒の合計 + bench は `check` 外。
-    接続は 1 本 0.3 s。`check` が前回末 +60 s を超えるなら書く
-  - 「サブエージェント N 本（親を除く）」と書き、サブ作業が 1 本だけのタスクは「0 本（親が全部）」。テストのみ 2 ファイル型は 1 本を既定
-  - 陽性対照を完了基準に書く（`ENCODING` の期待値変更は `grep -c TYPE_MISMATCH` の増減で、`DROP DATABASE` は `psql -l` で）
-  - 持ち越し整理（§4.5 / §4.7）は T1 に 1 コミットでまとめる
-- **impl**:
-  - PROGRESS 1 ターン 40 行上限。「検証（所要つき）」は 2 行、チェックリストは 1 行、生の値は TRACE へ
-  - PROGRESS「未確認」で「誤った値が黙って返る経路」「状態機械が壊れる経路」を述べる行は、同ターンでテスト 1 件にするか PLAN の該当タスクに「(x) この行を処分する」を追記
-  - 最終タスクの完了基準に「PROGRESS の全『未確認』行を テスト追加 / 契約外と明記 / verify 申し送り のいずれか 1 つに振り分けた表」
-  - PROGRESS「やったこと」に「推奨 N 本 / 実 M 本」
-  - サブエージェント依頼文に (a) 型パラメータを持つ型はフルに書く、(b) `fmt` は親が統合後に 1 回、(c) scratch は `.gsd-lite/logs/<slug>/scratch/turn-NNN-<name>` 固定
-  - README のベンチ結果は実測の生ログ（`scratch/turn-NNN-bench.log`）から転記し、ログのパスを PROGRESS に書く
-- **verify**:
-  - 字句の指摘はクラスで名指しする（`grep -rn` でリポジトリ全体を列挙して F 項目に同梱）
-  - 差し戻しの「期待される変化」は集計値を「どの数がいくつからいくつへ」で書く。round 2 以降は round 1 の格子の再確認 + 差し戻し分の回帰に限定してよい
-  - サブエージェントの完了は出力ファイルの mtime で待たず、`sleep <見込み秒>` の Bash 1 本（または完了通知）で待つ
-  - 「読み取り専用」はテスト DB も含む。検証のために DB を作るなら名前を `pq_verify_<turn>` にして同ターンで消し、PROGRESS に書く
-  - 差し戻しに「ついで」を同梱するときは F 項目に「見込み行数 / 新しいテスト資源の有無」を 1 行書く
-  - README の型マッピング表・`PgErrorKind` 一覧・examples の実行手順を実装と照合する（本マイルストーン固有）
-- **reflect**: 「テスト 2 ファイル型を 1 本」の USD を Phase 3 T6（2 本・USD 10.77）/ Phase 4 T5 と比べる
+## 6. フェーズ横断の注意（plan / impl / verify 向け）
+- **外向きの操作の線引き**: 無人ターンが行ってよいのは `gsd-lite/phase6-packaging-ci` の push と PR 作成・更新だけ。
+  タグ push、Release 作成、リポジトリ設定（ブランチ保護・Actions 設定）の変更、main への push はしない。
+- **verify の CI 待ち**: PR 作成後 `gh pr checks <PR> --watch`（または `gh run watch`）で 3 ジョブの完了を待つ。上限はおおよそ 40 分。
+  赤なら失敗ジョブのログ（`gh run view --log-failed`）の要点を VERIFICATION に写して差し戻す。CI の再実行は `gh run rerun --failed` を 1 回まで。
+- **PR 上で CI が走る前提**: ワークフローは PR のブランチ側にあれば `pull_request` で動く（default branch に無くてもよい）。
+  `workflow_dispatch` は default branch にファイルが無いと起動できない場合があるので、タグ無し経路の確認は CI 側の `pixi build` artifact を主にする（research で確認）。
+- **research のプローブ**: 採る前に実在を確かめる（Phase 5 reflect）。最低限 (1) `pixi build` を実際に 1 回通す（pixi-build-mojo + Mojo 1.1.0）、
+  (2) conda-forge / modular-community に `pq` が無いことを確認、(3) `ubuntu-24.04-arm` で docker compose が使えること、(4) macOS ランナーでの PostgreSQL 起動手順の前例。
+- **ローカルの開発機は linux-aarch64**。x86_64 と macOS は CI でしか検証できないので、impl は PR 作成前にローカルで `pixi run check` と `pixi build` を通し、
+  CI 固有の失敗は verify の差し戻しで直す（impl が CI を待つ必要はない。ただし impl が push して CI を先に見ることは妨げない）。
+- **Phase 5 reflect の運用提案を引き継ぐ**: チェックリスト期待値は `≥` で書く／VERIFICATION の指摘表に grep パターン・件数・ファイルの 3 列／
+  TRACE.md に「チェックリスト（turn N）」節／PROGRESS の最新ターン節は 40 行以内／サブエージェント完了待ちは `sleep` か完了通知で（mtime ループ禁止）。
