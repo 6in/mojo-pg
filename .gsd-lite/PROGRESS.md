@@ -189,3 +189,18 @@
   新テスト `…_even_when_refused` は Linux で旧コードが `CONNECTION` を raise する陽性対照なので、実装前に 1 回走らせて赤を見てから直すと確実。`test_leak` 単体はローカル 70〜80 s。push は turn 13 のコミットと一緒に（run 完了済み、cancel の心配なし）。
   **verify round 4 は verify_round 上限**: 赤なら BLOCKED になる。round 4 の確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS `.conda` 名 = P5 / F3 grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
   macOS の multi-host がなお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）
+
+## turn 14 — impl — F3 poll_connect の初回 NEED_WRITE 固定 + is_leaking の一度きりの段除外
+- やったこと: ① `AsyncConnection` に `_connect_polled: Bool`（docstring 付き、`__init__` で False）を足し、`poll_connect` は `_setup_pending` 分岐の直後に **初回だけ `PQconnectPoll` を呼ばず `NEED_WRITE` を返す**（3 行）。
+  docstring を libpq の契約（`PQconnectStart` 直後は `PGRES_POLLING_WRITING` とみなす / 先に呼ぶと拒否記録前の `SO_ERROR` を読み macOS で multi-host の乗り換えを失う）に書き換え。`wait_*` / `_poll_to_ready` / `connect_blocking` / `__init__.mojo` は不変。
+  ② `is_leaking` に第 3 の規則: 総成長が許容超えでも **上昇ちょうど 1 回 + その後 2 サンプル以上**なら段としてリークでない（tail が段を超えないことは「上昇 1 回」が含意するので別ループは置かず、コメントで明記）。`TOLERANCE_PAGES` の説明を「大きさでなく形で除外。x86_64 で 513 ページの段を実測（run 39092567451）、aarch64 84 / 開発機 1」に更新。
+  テスト: `test_manual_connect_polling` の初回 assert を `NEED_WRITE` に締め（**既存テストの期待値の変更 1 件 = これだけ**）、新 `test_first_poll_connect_is_need_write_even_when_refused`（31 → 32）、`is_leaking` 単体 2 件（18 → 20）。既存 4 件は不変で PASS。
+  陽性対照: 新テストを**先に**足して旧コードで走らせ `FAIL … PgError(kind=Connection, Connection refused)` を観測（Linux でも契約違反が見える）→ 実装後 32 PASS。
+  検証: test_async **32 PASS** / test_leak **20 PASS**（72.9 s、`connect/query/close RSS pages: [47947, 47948 ×8]`）/ `db-reset` → **`check` 6/6 PASS = 188 s**（12:32:49 → 12:35:57、閾値 247 s、6/6 段 `matched lines: 0`、`final_check: PASS`、両サーバー `skipped 1`）/ `package` 警告 0。
+  grep は PLAN F3 (d) の表どおり（`PGRES_POLLING_WRITING` 4 / `^def test_` 32・20・11 / F2・F1 回帰 `POLLHUP/POLLERR` 0・`is_linux` 1・`cache: false` 1+3・旧 2 入力 0）。チェックリスト 101 key は **turn 13 と差分 0 行**（`src_def_ref_return` 0 / `test_file_count` 24 / `async_*` 1・3・3）。
+  TRACE「F3」節（変更表 / テスト表 / 陽性対照 / (d) 実測表）+「チェックリスト（turn 14）」。PLAN 訂正 0 件。commit `30d7a79`。サブエージェント 0 本
+- 想定外: `test_manual_connect_polling` の締めた assert は**実装前から Linux では PASS**（Linux の初回は元から `NEED_WRITE` が返っていた）ので、期待値変更 1 件のローカル陽性対照にはならなかった。代わりに新テストが旧コードで赤になることで契約違反を押さえた
+- やり直し: 0 回
+- 次への注意: 次は **`/gsd-lite-verify`（round 4 = verify_round 上限。赤なら BLOCKED）**。push 済み（turn 13 の verify コミット + turn 14 の 2 コミットが PR #1 に載る）。確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しない = P5 / F3 の grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
+  **F3 ① の判定は CI の macOS の `test_multi_host_conninfo_reaches_the_second_host` だけ**（ローカル Linux では経路差が出ない）。なお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）。
+  **② は非決定的**: x86_64 が緑でも「段が出なかっただけ」の可能性があるので、3 ジョブの `connect/query/close RSS pages:` 行を VERIFICATION に写して段の有無を記録する（段が出て緑なら新規則が効いた証跡になる）
