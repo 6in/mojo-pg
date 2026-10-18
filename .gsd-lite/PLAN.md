@@ -314,7 +314,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: F1
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（src 2 メソッド + テスト 1 件）
 
-- [ ] F3: `poll_connect` の最初の答えを `NEED_WRITE` に固定（libpq の「`PQconnectStart` 直後は `PGRES_POLLING_WRITING` とみなす」契約に揃える）+ `is_leaking` の一度きりの RSS ステップを形で除外（verify round 3 / VERIFICATION §R3。**verify_round 上限 = 次の verify で赤なら BLOCKED**）
+- [x] F3: `poll_connect` の最初の答えを `NEED_WRITE` に固定（libpq の「`PQconnectStart` 直後は `PGRES_POLLING_WRITING` とみなす」契約に揃える）+ `is_leaking` の一度きりの RSS ステップを形で除外（verify round 3 / VERIFICATION §R3。**verify_round 上限 = 次の verify で赤なら BLOCKED**）
   - 背景: PR #1 の run `39092567451`（コミット `f4bb693`）。F2 は効いた（macOS で round 2 の 2 テストは PASS、`test_poll` 11/11、aarch64 Linux 緑）が、別の 2 件:
     ① **macOS** `tests/test_async.mojo:1568` `test_multi_host_conninfo_reaches_the_second_host` — `could not receive data from server: Connection refused`（1.55 ms）。libpq は最初のホスト（port 1）の拒否を `CONNECTION_STARTED` の `getsockopt(SO_ERROR)` で見たときだけ次ホストへ乗り換える。
     `_poll_to_ready`（`async_conn.mojo:813`）もテスト補助（`test_async.mojo:660,683`）も **`start` 直後に待たずに `poll_connect` → `PQconnectPoll`** を呼ぶので、macOS（loopback の RST を別スレッドで処理）ではカーネルが拒否を記録する前に `SO_ERROR = 0` を読み、libpq は接続成功とみなして

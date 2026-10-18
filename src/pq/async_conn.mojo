@@ -329,6 +329,16 @@ struct AsyncConnection(Movable):
     that overtakes the `SET`.
     """
 
+    var _connect_polled: Bool
+    """Whether `PQconnectPoll` has been called on this handle yet.
+
+    libpq asks a caller to behave as if the poll just after `PQconnectStart`
+    had returned `PGRES_POLLING_WRITING`, so the first `poll_connect` answers
+    `NEED_WRITE` from this flag instead of asking. Calling `PQconnectPoll`
+    first reads `SO_ERROR` before the kernel has recorded a refusal, which
+    costs libpq its walk to the next host in a multi-host conninfo.
+    """
+
     var _single_row_allowed: Bool
     """Whether `set_single_row_mode` is still in its window.
 
@@ -366,6 +376,7 @@ struct AsyncConnection(Movable):
         self._pq = pq
         self._state = AsyncState.CONNECTING
         self._setup_pending = False
+        self._connect_polled = False
         self._single_row_allowed = False
         self._pending = List[Notification]()
 
@@ -666,10 +677,13 @@ struct AsyncConnection(Movable):
         """Advance the handshake by one step and report what to wait for.
 
         Call this after `start`, wait for the direction it asks for, then call
-        it again, until it answers `READY`. The first answer is not fixed --
-        libpq may want either direction depending on how far the kernel got
-        with the connect -- so act on the returned value rather than assuming
-        one.
+        it again, until it answers `READY`. The first answer is always
+        `NEED_WRITE`: libpq defines the state just after `PQconnectStart` as
+        if the last poll had returned `PGRES_POLLING_WRITING`, and asking
+        `PQconnectPoll` before that wait reads `SO_ERROR` before the kernel
+        has recorded a refusal -- measured on macOS, where the refusal then
+        arrives as a failed read instead of libpq walking on to the next host
+        of a multi-host conninfo.
 
         `READY` covers more than libpq's own `CONNECTION_OK`: once the socket
         is up, `_SESSION_SETUP_SQL` is sent as the session's first command and
@@ -695,6 +709,9 @@ struct AsyncConnection(Movable):
             return PollState.READY
         if self._setup_pending:
             return self._drain_setup()
+        if not self._connect_polled:
+            self._connect_polled = True
+            return PollState.NEED_WRITE
         var polling = self._pq[].PQconnectPoll(self._conn)
         if polling == PGRES_POLLING_READING:
             return PollState.NEED_READ

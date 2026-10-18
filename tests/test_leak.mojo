@@ -155,12 +155,16 @@ produces (the only way `tests/run_tests.sh` runs it): a non-leaking loop is
 stable to within 2 pages, except for a *single* one-off step of 83-85 pages
 (~332 KiB) that lands at an arbitrary iteration of an arbitrary loop, not
 per-iteration growth. The cause is **unidentified**; an expansion of a glibc
-arena is the guess, and nothing has been measured that confirms it. 256 pages
-(1 MiB) clears two such steps.
+arena is the guess, and nothing has been measured that confirms it.
 
-The step is why the tolerance is not tightened to 16 pages: over 16 built-binary
-series (4 loops x 2 servers x 2 runs) 14 came in at 0-2 pages of total growth
-and 2 showed the step, once at the 4th sample and once at the 9th.
+The step is excluded by its *shape* -- one rise with a flat tail behind it,
+see `is_leaking` -- and not by its size, because its size is not bounded by
+anything that was measured: the x86_64 GitHub runner produced a step of 513
+pages (run `39092567451`), twice what this tolerance clears, where the aarch64
+runner showed 84 and the development machine 1. The tolerance stays at 256 for
+the series that have no step at all: over 16 built-binary series (4 loops x
+2 servers x 2 runs) 14 came in at 0-2 pages of total growth and 2 showed the
+step, once at the 4th sample and once at the 9th.
 
 Total growth, not monotonicity, is the signal that actually fires here: a real
 leak moves thousands of pages per sampling interval, far past this tolerance.
@@ -256,6 +260,13 @@ def is_leaking(samples: List[Int], tolerance_pages: Int) -> Bool:
       allocator serving several iterations from one new region), where some
       adjacent steps are flat.
 
+    Total growth has one exception, and it is a shape rather than a size: a
+    series that rises exactly once and then stays flat for two or more samples
+    is the one-off step described under `TOLERANCE_PAGES`, not a leak. A leak
+    that grows in bursts keeps bursting, so it rises more than once over nine
+    samples; a step that has stopped growing cannot be made to look like one
+    by being large.
+
     Args:
         samples: RSS readings in pages, in the order they were taken.
         tolerance_pages: Total growth, in pages, that is still acceptable.
@@ -272,7 +283,18 @@ def is_leaking(samples: List[Int], tolerance_pages: Int) -> Bool:
             break
     if monotonic:
         return True
-    return samples[len(samples) - 1] - samples[0] > tolerance_pages
+    if samples[len(samples) - 1] - samples[0] <= tolerance_pages:
+        return False
+    # A single one-off step: exactly one rise, with a tail of at least two
+    # samples behind it. One rise is also what keeps that tail from climbing
+    # back above the step -- it could not do so without rising again.
+    var rises = 0
+    var step_at = 0
+    for i in range(1, len(samples)):
+        if samples[i] > samples[i - 1]:
+            rises += 1
+            step_at = i
+    return rises != 1 or len(samples) - step_at < 2
 
 
 # --- helpers -----------------------------------------------------------------
@@ -923,6 +945,20 @@ def test_is_leaking_detects_growth_beyond_tolerance() raises:
 def test_is_leaking_accepts_flat_samples() raises:
     var samples: List[Int] = [100, 100, 100, 100]
     assert_false(is_leaking(samples, 16))
+
+
+def test_is_leaking_accepts_a_single_step_plateau() raises:
+    # The one-off step of `TOLERANCE_PAGES`, in the shape the x86_64 runner
+    # produced it: far past the tolerance, but it rises once and stops.
+    var samples: List[Int] = [100, 100, 100, 100, 613, 613, 613, 613, 613]
+    assert_false(is_leaking(samples, 16))
+
+
+def test_is_leaking_detects_two_steps_beyond_tolerance() raises:
+    # A leak served out of regions the allocator takes in bursts: flat
+    # stretches, but it rises more than once.
+    var samples: List[Int] = [100, 100, 300, 300, 300, 520, 520, 520, 520]
+    assert_true(is_leaking(samples, 16))
 
 
 # --- the loops ---------------------------------------------------------------

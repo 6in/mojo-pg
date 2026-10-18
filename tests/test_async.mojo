@@ -1111,10 +1111,12 @@ def test_manual_connect_polling() raises:
     var conn = _start(_conninfo())
     assert_true(conn.state() == AsyncState.CONNECTING)
     var step = _poll_connect(conn)
-    # Which direction libpq wants first depends on how far the kernel got
-    # with the connect, so only "not ready yet" is asserted.
+    # The first answer is fixed by libpq's own contract: just after
+    # `PQconnectStart`, a caller must behave as if the last poll had returned
+    # `PGRES_POLLING_WRITING`, so `poll_connect` answers NEED_WRITE without
+    # asking libpq.
     assert_true(
-        step == PollState.NEED_READ or step == PollState.NEED_WRITE,
+        step == PollState.NEED_WRITE,
         "first poll_connect answered " + String(step),
     )
     while step != PollState.READY:
@@ -1589,6 +1591,22 @@ def test_multi_host_conninfo_reaches_the_second_host() raises:
     var results = _fetch_all(conn, 5000)
     assert_equal(len(results), 1)
     assert_equal(_int32_at(results[0], 0, 0), Int32(1))
+
+
+def test_first_poll_connect_is_need_write_even_when_refused() raises:
+    # The first poll must not reach `PQconnectPoll`, so a port that is already
+    # known to be refused still answers NEED_WRITE rather than raising. On
+    # Linux the kernel has the refusal ready by then, which makes this the
+    # positive control for the fixed first answer; macOS is where skipping the
+    # call also keeps libpq's `SO_ERROR` path -- and with it the walk to the
+    # next host -- intact.
+    var conn = _start(String("host=127.0.0.1 port=1 user=pq dbname=pq_test"))
+    assert_true(_poll_connect(conn) == PollState.NEED_WRITE)
+    var refused = _poll_connect_to_failure(conn)
+    assert_true(refused.kind == PgErrorKind.CONNECTION, String(refused))
+    assert_true(
+        refused.message.find("Connection refused") >= 0, refused.message
+    )
 
 
 def test_connect_failures_name_their_cause() raises:

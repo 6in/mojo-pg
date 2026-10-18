@@ -629,3 +629,57 @@ CI の macOS ジョブでの判定は verify round 3。
 ```
 
 PLAN 訂正は **0 件**（F2 の期待結果は表のとおり実測と一致）。
+
+## F3 `poll_connect` の初回 `NEED_WRITE` + `is_leaking` の段除外（turn 14）
+
+### (a) src の変更（`src/pq/async_conn.mojo` フィールド 1 + `poll_connect` のみ）
+
+| 箇所 | 変更 |
+|---|---|
+| フィールド（`_single_row_allowed` の手前） | `var _connect_polled: Bool` を追加（docstring 付き。libpq の「`PQconnectStart` 直後は `PGRES_POLLING_WRITING` が返ったものとして扱え」の契約と、先に `PQconnectPoll` を呼ぶと拒否記録前の `SO_ERROR` を読んで multi-host の乗り換えを失うことを書いた） |
+| `__init__` | `self._connect_polled = False`（`_setup_pending` の次の行） |
+| `poll_connect` 本体 | `_setup_pending` の分岐の直後に `if not self._connect_polled: self._connect_polled = True; return PollState.NEED_WRITE`（3 行）。`PQconnectPoll` 以降は不変 |
+| `poll_connect` docstring | 「The first answer is not fixed -- libpq may want either direction…」を「最初の答えは常に `NEED_WRITE`。libpq は `PQconnectStart` 直後を `PGRES_POLLING_WRITING` として定義しており、その待ちの前に `PQconnectPoll` を呼ぶとカーネルが拒否を記録する前に `SO_ERROR` を読む（macOS で実測。拒否が次ホストへの乗り換えでなく read の失敗として出る）」に書き換え |
+
+`wait_readable` / `wait_writable` / `_poll_to_ready` / `connect_blocking` / `src/pq/__init__.mojo` は**触っていない**（`__init__.mojo:205` の「`start` then `poll_connect` until it answers READY」は依然正しい）。
+
+### (b) テストの変更（`tests/test_async.mojo` 2 件 / `tests/test_leak.mojo` 3 件）
+
+| ファイル | 変更 | 種類 |
+|---|---|---|
+| `test_async.mojo` `test_manual_connect_polling` | 最初の assert を `step == PollState.NEED_WRITE` に締め、コメントを契約の説明に差し替え | **既存テストの期待値の変更 1 件** |
+| `test_async.mojo` | 新 `test_first_poll_connect_is_need_write_even_when_refused`（port 1 → 初回 `NEED_WRITE` で raise せず、続く `_poll_connect_to_failure` が `CONNECTION` + `Connection refused`）。31 → **32** | 追加 |
+| `test_leak.mojo` `is_leaking` | 総成長が許容超えのとき、**上昇がちょうど 1 回 + その後 2 サンプル以上**なら False（段の形で除外）。単調増加の規則は不変。tail が段を超えないことは「上昇 1 回」が含意するので別ループは置かない（コメントに明記） | 規則追加 |
+| `test_leak.mojo` docstring 2 箇所 | `is_leaking` に 3 つ目の説明、`TOLERANCE_PAGES` の「256 pages (1 MiB) clears two such steps」を「段は大きさでなく形で除外。x86_64 ランナーで 513 ページの段を実測（run `39092567451`）。aarch64 は 84、開発機は 1」に更新 | 文書 |
+| `test_leak.mojo` | 単体 2 件（`test_is_leaking_accepts_a_single_step_plateau` = `[100 ×4, 613 ×5]` tol 16 → False / `test_is_leaking_detects_two_steps_beyond_tolerance` = `[100, 100, 300 ×3, 520 ×4]` tol 16 → True）。18 → **20** | 追加 |
+
+既存 4 件の `is_leaking` 単体は**不変で PASS**（`[100, 100, 100, 120]` は段の後のサンプルが 0 なので従来どおり True）。
+
+### 陽性対照（実装前に 1 回走らせた）
+
+新テストを**先に**足して旧コードで `pixi run mojo run -I src tests/test_async.mojo` を実行 → `FAIL [ 0.080 ] test_first_poll_connect_is_need_write_even_when_refused` /
+`PgError(kind=Connection, message=Connection refused …)`（**Linux では初回 `poll_connect` が既に `SO_ERROR` を読んで raise していた** = 契約違反がローカルでも観測できる）。
+同じ run で `test_manual_connect_polling` は締めた assert のまま PASS 済み（Linux の初回は元から `NEED_WRITE`）。(a) 実装後は 32 PASS。
+
+### (d) 期待結果の実測（PLAN F3 (d) の表）
+
+| 条件 | 結果 |
+|---|---|
+| `grep -c 'PGRES_POLLING_WRITING' src/pq/async_conn.mojo` | **4**（≥ 1。定数 3 + docstring 1） |
+| `grep -c '^def test_' test_async / test_leak / test_poll` | **32 / 20 / 11** |
+| `pixi run mojo run -I src tests/test_async.mojo`（54317） | **32 tests run: 32 passed, 0 failed** |
+| `pixi run mojo run -I src tests/test_leak.mojo`（54317） | **20 tests run: 20 passed, 0 failed**（72.9 s）。`connect/query/close RSS pages: [47947, 47948, 47948, 47948, 47948, 47948, 47948, 47948, 47948]`（開発機は 1 ページの上昇 1 回 = 許容内で段の規則に届かない） |
+| `pixi run check`（`db-reset` の後） | **6/6 PASS = 188 s**（12:32:49 → 12:35:57、閾値 247 s）、6/6 段 `matched lines in build/final_check.log: 0`、`final_check: PASS`、両サーバー `skipped 1` |
+| `pixi run package` | 警告 0（出力は pixi のタスク行のみ） |
+| F2 / F1 の回帰 grep | `POLLHUP/POLLERR` **0** / `is_linux` **1** / `cache: false` **1 + 3** / `locked: true`・`cache: true` **0 + 0**（すべて不変） |
+| checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | **0 / 24 / 1・3・3（不変）** |
+
+**F3 ① の受け入れはローカル（Linux）では完結しない**: multi-host の乗り換えが競合で壊れるのは macOS だけなので、`test_multi_host_conninfo_reaches_the_second_host` の判定は CI の macOS ジョブ（verify round 4）。
+② は x86_64 ランナーの非決定的な段なので、**round 4 で赤が出なくても「段が出なかっただけ」の可能性がある**（段が出た系列は CI ログの `connect/query/close RSS pages:` 行で判別できる）。
+
+## チェックリスト（turn 14）
+
+`scratch/turn-014-checklist.log`（全 101 key。この節を書く前に採取）。**turn 13 のログとの差分は 0 行**
+（`trace_checklist_section=10`。この節と「F3」節を足した後は 12 になる）。
+
+PLAN 訂正は **0 件**（F3 の期待結果は表のとおり実測と一致）。
