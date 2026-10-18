@@ -19,8 +19,8 @@
     "path": "."
   },
   "milestone": "phase6-packaging-ci",
-  "phase": "verify",
-  "next_command": "/gsd-lite-verify",
+  "phase": "impl",
+  "next_command": "/gsd-lite-impl",
   "branch": {
     "name": "gsd-lite/phase6-packaging-ci",
     "base": "main"
@@ -34,10 +34,10 @@
       "~/workspaces"
     ]
   },
-  "turn": 12,
+  "turn": 13,
   "max_turns": 60,
   "retry_max": 2,
-  "verify_round": 2,
+  "verify_round": 3,
   "verify_round_max": 3,
   "model": {
     "research": "claude-fable-5-1",
@@ -46,5 +46,5 @@
     "verify": "claude-fable-5-1",
     "reflect": "claude-fable-5-1"
   },
-  "updated_at": "2026-10-18T12:08:03+09:00"
+  "updated_at": "2026-10-18T12:25:16+09:00"
 }

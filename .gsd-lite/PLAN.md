@@ -314,6 +314,46 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: F1
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（src 2 メソッド + テスト 1 件）
 
+- [ ] F3: `poll_connect` の最初の答えを `NEED_WRITE` に固定（libpq の「`PQconnectStart` 直後は `PGRES_POLLING_WRITING` とみなす」契約に揃える）+ `is_leaking` の一度きりの RSS ステップを形で除外（verify round 3 / VERIFICATION §R3。**verify_round 上限 = 次の verify で赤なら BLOCKED**）
+  - 背景: PR #1 の run `39092567451`（コミット `f4bb693`）。F2 は効いた（macOS で round 2 の 2 テストは PASS、`test_poll` 11/11、aarch64 Linux 緑）が、別の 2 件:
+    ① **macOS** `tests/test_async.mojo:1568` `test_multi_host_conninfo_reaches_the_second_host` — `could not receive data from server: Connection refused`（1.55 ms）。libpq は最初のホスト（port 1）の拒否を `CONNECTION_STARTED` の `getsockopt(SO_ERROR)` で見たときだけ次ホストへ乗り換える。
+    `_poll_to_ready`（`async_conn.mojo:813`）もテスト補助（`test_async.mojo:660,683`）も **`start` 直後に待たずに `poll_connect` → `PQconnectPoll`** を呼ぶので、macOS（loopback の RST を別スレッドで処理）ではカーネルが拒否を記録する前に `SO_ERROR = 0` を読み、libpq は接続成功とみなして
+    `CONNECTION_MADE` → 次の read で拒否が出て全体失敗（乗り換えなし）。round 2 は競合に勝って PASS（7.3 ms）。Linux は `connect()` 内で RST まで処理し終えるので常に `SO_ERROR` 経路。libpq 公式 docs: *If you have yet to call PQconnectPoll, i.e., just after the call to PQconnectStart, behave as if it last returned PGRES_POLLING_WRITING.*
+    ② **x86_64 Linux** `tests/test_leak.mojo:931` `test_connect_query_close_does_not_leak` — `connect/query/close RSS pages: [6205, 6205, 6205, 6205, 6718, 6718, 6718, 6718, 6718]`。513 ページの**一度きりの段** + 平坦な尾 = `test_leak.mojo:148-170` が自ら書いている「任意の反復で出る一度きりのステップ」で、
+    x86_64 GitHub ランナーではそれが 256 の許容を超えた（aarch64 ランナーは round 2 に 84 ページ、開発機は 1 ページ）。反復ごとの成長ではないのでリークではない
+    採る設計: ① = **A: 公開 API `poll_connect` の最初の答えを常に `NEED_WRITE` にする**（`PQconnectPoll` を呼ばずに返す。`_poll_to_ready` / テスト補助 / 利用者コードは変更なしで libpq の順序に揃う）。B = `_poll_to_ready` だけ直す（利用者の手回しとテスト補助が残る）、C = テストを macOS で緩める（REQ §2.5）は採らない。
+    ② = **A: `is_leaking` が「上昇 1 回だけ + その後 2 サンプル以上が段の値を超えない」系列を総成長の判定から外す**（大きさでなく形）。B = `TOLERANCE_PAGES` を上げる（`:151`「256 は恒久仕様」に反し、次の段で再発）、C = warmup を増やす（段は任意の反復で出る）は採らない（VERIFICATION §R3.1 に理由）
+  - 完了基準:
+    - (a) `src/pq/async_conn.mojo`: `AsyncConnection` に private フィールド 1 つ（例 `_connect_polled: Bool`、docstring 付き。`__init__` `:365-370` で `False`）。`poll_connect`（`:665`）は `_state == CONNECTING` かつ `not _setup_pending` で**初回**なら、フィールドを `True` にして `PQconnectPoll` を呼ばずに `PollState.NEED_WRITE` を返す。
+      2 回目以降は従来どおり。docstring の「The first answer is not fixed -- libpq may want either direction…」（`:669-672`）を「最初の答えは常に `NEED_WRITE`: libpq は `PQconnectStart` の直後を `PGRES_POLLING_WRITING` が返ったものとして扱えと定める。先に `PQconnectPoll` を呼ぶと `SO_ERROR` をカーネルが拒否を記録する前に読み、
+      拒否が次ホストへの乗り換えでなく次の read の失敗として出る（macOS で実測）」の趣旨に書き換える。`start` の docstring（`:429-431`）の「Drive it with `poll_connect`」はそのままで可。`src/pq/__init__.mojo:205` の説明は変更不要（「`start` then `poll_connect` until it answers READY」は依然正しい）。
+      `wait_readable` / `wait_writable` / `_poll_to_ready` / `connect_blocking` は**触らない**
+    - (b) `tests/test_async.mojo`: 既存 `test_manual_connect_polling`（`:1110-1130`）の最初の assert を **`step == PollState.NEED_WRITE`** に締め、コメント（`:1114-1115`「Which direction libpq wants first depends on…」）を契約の説明に直す（**既存テストの期待値の変更 1 件** — PROGRESS に列挙）。
+      新テスト 1 件 `test_first_poll_connect_is_need_write_even_when_refused`: `_start("host=127.0.0.1 port=1 user=pq dbname=pq_test")` → `_poll_connect(conn) == PollState.NEED_WRITE`（**raise しない**。旧コードは Linux ではここで `SO_ERROR` 済みのため `CONNECTION` を raise する = Linux で観測できる陽性対照）→
+      続けて `_poll_connect_to_failure(conn)` が `CONNECTION` で `Connection refused` を含む。テスト数 31 → **32**
+    - (c) `tests/test_leak.mojo`: `is_leaking`（`:246-275`）に第 3 の規則を足す — 単調増加なら従来どおりリーク。総成長が許容を超えても、**上昇（`samples[i] > samples[i-1]`）がちょうど 1 回で、その後に 2 サンプル以上あり、いずれも `samples[i]` を超えない**なら「一度きりの段」としてリークでない。それ以外は従来どおり。
+      docstring の 2 signals の説明に 3 つ目を追記し、`TOLERANCE_PAGES` の説明（`:148-170`）の「256 pages (1 MiB) clears two such steps」の段落を「段は大きさでなく形（1 段 + 平坦な尾）で除外する。x86_64 ランナーで 513 ページの段を実測（run `39092567451`）」の趣旨に更新。
+      単体テスト 2 件追加（DB 不要）: `test_is_leaking_accepts_a_single_step_plateau`（`[100, 100, 100, 100, 613, 613, 613, 613, 613]`, tol 16 → False）、`test_is_leaking_detects_two_steps_beyond_tolerance`（`[100, 100, 300, 300, 300, 520, 520, 520, 520]`, tol 16 → True）。
+      既存 4 件は**不変**（`[100, 100, 100, 120]` は段の後に 0 サンプルなので従来どおり True）。テスト数 18 → **20**。`ABORT_PAGES` / `_sample` / 各ループ本体は触らない
+    - (d) 期待結果（**この表だけが正**。本文・テストはこれを参照する）:
+
+      | 条件 | 結果 |
+      |---|---|
+      | `grep -c 'PGRES_POLLING_WRITING' src/pq/async_conn.mojo`（`poll_connect` docstring） | ≥ 1 |
+      | `grep -c '^def test_' tests/test_async.mojo` / `tests/test_leak.mojo` / `tests/test_poll.mojo` | 32 / 20 / 11 |
+      | `pixi run mojo run -I src tests/test_async.mojo`（54317） | 32 PASS（`test_manual_connect_polling` の締めた assert と新テストを含む） |
+      | `pixi run mojo run -I src tests/test_leak.mojo`（54317。約 70〜80 s） | 20 PASS、`connect/query/close RSS pages:` の系列を TRACE「F3」節に写す |
+      | `pixi run check`（`db-reset` の後） | 6/6 PASS、所要 ≤ 247 s、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1` |
+      | `pixi run package` | 警告 0 |
+      | F2 / F1 の grep（VERIFICATION §R3.2 の表） | 数値不変（`POLLHUP/POLLERR` 0 / `is_linux` 1 / `cache: false` 1 + 3 / 旧 2 入力 0） |
+      | checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | 0 / 24 / 不変（`trace_checklist_section` は +1 可、他の全行は `scratch/turn-013-checklist.log` と同値） |
+      | push 後 `gh run list --branch gsd-lite/phase6-packaging-ci --limit 3` | PR #1 由来の run が 1 件増える（**全ジョブの完了は待たない**。緑 / 赤の判定は verify round 4） |
+    - (e) TRACE「F3」節: (a) の変更表、(b)(c) のテスト表、`test_leak` のローカル系列、「既存テストの期待値の変更 1 件」の明記。チェックリスト（turn 14）
+    - (f) `git status` clean → commit → `git push origin gsd-lite/phase6-packaging-ci`（turn 13 の verify コミットも一緒に載る。run `39092567451` は完了済みなので `concurrency` の cancel の心配はない）。PR は作らない
+  - 対象: `src/pq/async_conn.mojo`（フィールド 1 + `poll_connect` のみ）, `tests/test_async.mojo`（既存 1 件の締め + 新 1 件）, `tests/test_leak.mojo`（`is_leaking` + 設計説明 + 単体テスト 2 件）, `.gsd-lite/TRACE.md`
+  - 依存: F2
+  - 並列サブ作業: サブエージェント **0 本（親が全部）**（src 1 メソッド + テスト 3 件）
+
 ## 決めた事項
 
 1. **E1 は案 A（README 明記のみ）**（REQ §2.3「plan が選ぶ」/ RESEARCH §2.13）。根拠: rc 141 は stdlib `print` が SIGPIPE 既定のまま write した結果で `cat` / `grep` と同じ Unix 標準挙動。案 B は `SIG_IGN` + 番兵 `write(2)` を

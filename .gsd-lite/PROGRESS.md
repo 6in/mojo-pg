@@ -175,3 +175,17 @@
   **F2 (a) の受け入れはローカル（Linux）では観測できない**: 判定は CI の macOS ジョブで `test_connect_failures_name_their_cause` と `test_socketpair_peer_close_sets_hangup_both_ways` が PASS すること。
   round 3 の確認は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しないこと = P5 / F2 回帰 grep（`POLLHUP/POLLERR` 0・`is_linux` ≥ 1）/ F1 grep 不変（`cache: false` 1 + 3、旧 2 入力 0）/ 合格時 `gh pr edit 1 --body-file`）。
   macOS が **別の** 赤になった場合は、`wait_*` が return した後にどの libpq 呼び出しがどのメッセージを出したかを `final-check-log-macos-latest` で確かめる（TRACE「F2」(b) の表が予測値）
+
+## turn 13 — verify（round 3）— 差し戻し（指摘 2 件 = F3）/ PR #1 の run 39092567451 は aarch64 緑・x86_64 1 テスト赤・macOS 1 テスト赤（round 2 の 2 件は PASS）
+- やったこと: F2 の回帰（`POLLHUP/POLLERR` 0 / `is_linux` 1 / F1 grep 1+3・0 / actionlint 0 / チェックリスト 101 key は `trace_checklist_section` +2 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 177 s**。
+  turn 12 の state コミットは開始時点で既に origin と一致し、その push で起動した run `39092567451` を `gh run watch` で待った（自分では push していない）。F2 は効いた: macOS で round 2 の 2 テスト PASS、`test_poll` 11/11、`skipped 15`、aarch64 Linux 緑（`.conda` `he8cfe8b_0`）。
+  新しい赤 2 件を artifact（`scratch/turn-013-{macos,x64,arm}-artifact/`）と `--log-failed` から特定: ① macOS `test_multi_host_conninfo_reaches_the_second_host`（`could not receive data from server: Connection refused`、1.55 ms。round 2 は 7.3 ms で PASS）=
+  `start` 直後に待たず `PQconnectPoll` を呼ぶ libpq 契約違反が macOS の競合で表面化し、拒否が `SO_ERROR` 経路（次ホストへ乗り換え）でなく read 失敗（全体失敗）として出た。② x86_64 `test_connect_query_close_does_not_leak` の RSS 系列 `[6205 ×4, 6718 ×5]` = 513 ページの一度きりの段 + 平坦な尾
+  （`test_leak.mojo:148-170` が自ら書いている現象で、x86_64 ランナーでは許容 256 を超えた。リークではない偽陽性）。VERIFICATION §R3（指摘表 / 根拠 / 回帰表 / CI 表 / 残留リスク 10〜12 / round 4 の 5 項目）と PLAN F3（`poll_connect` 初回 `NEED_WRITE` + `is_leaking` の形による除外）を書いた。サブエージェント 0 本
+- 想定外: (1) **x86_64 Linux が round 2 の緑から赤に転じた**（非決定的な RSS の段。`wait_*` の変更とは無関係 = 同期 `Connection` のループ）。(2) macOS の赤が F2 の対象と別テストで、しかも round 2 では PASS していた = 競合依存。round 2 で「同じクラスを一括で洗う」対象にできなかった種類（結果が確率的）。
+  (3) ローカル HEAD が既に origin と一致していた（turn 12 の申し送りは「push 未実施」だったが、ループ側が push した模様）。CI 待ちを push 無しで始められた
+- やり直し: 0 回（既存テストの期待値変更 0 件 — F3 で 1 件（`test_manual_connect_polling`）を変える予定として PLAN に明記）
+- 次への注意: impl は **F3 だけ**（`async_conn.mojo` フィールド 1 + `poll_connect` / `test_async.mojo` 既存 1 件の締め + 新 1 件 / `test_leak.mojo` `is_leaking` + 設計説明 + 単体 2 件 / TRACE「F3」）。期待結果は PLAN F3 (d) の表が正。**既存テストの期待値変更 1 件を PROGRESS に列挙する**。
+  新テスト `…_even_when_refused` は Linux で旧コードが `CONNECTION` を raise する陽性対照なので、実装前に 1 回走らせて赤を見てから直すと確実。`test_leak` 単体はローカル 70〜80 s。push は turn 13 のコミットと一緒に（run 完了済み、cancel の心配なし）。
+  **verify round 4 は verify_round 上限**: 赤なら BLOCKED になる。round 4 の確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS `.conda` 名 = P5 / F3 grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
+  macOS の multi-host がなお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）
