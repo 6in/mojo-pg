@@ -84,3 +84,20 @@
   T5 は README 1 ファイル（サブエージェント 0 本）。`readme_h2` は **10 → 11**（English 節 +1）が唯一の増加で、`readme_dash_I_src` / `readme_six_stages=1` / `readme_compose_three=2` / `readme_unverified_windows≥3` は不変に保つ。
   ジョブ名は `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`（D4 の required checks もこの 3 つ）。待ち上限の 2 値は compose `--wait-timeout 180` と `pg_ctl -w -t 60`。
   リリース手順には「タグは `v<version>`（`v` 無しは `verify-version` で落ちる）」「`workflow_dispatch` は main にマージ後しか起動できない」を入れる。`py_compile` の `__pycache__` はコミット前に `rm -rf`（今回も発生）
+
+## turn 7 — impl — T5 README（English 節 + インストール 3 経路 + CI / ブランチ保護 / リリース手順）
+- やったこと: `README.md` 1 ファイル（サブエージェント 0 本、PLAN どおり）。(a) `## English summary and install` を先頭段落の直後に新設（英語 4 文の概要 + 実測した 2 経路の TOML + `from pq import Connection` の 3 行）。
+  (b) 日本語「インストール」に `### 自分のプロジェクトから使う` を起こし、git 依存（`preview = ["pixi-build"]` + 2 チャンネル + ビルドに数十秒〜数分）→ Release の `.conda`（`rattler-index fs` + `file://` チャンネル、ビルド無し）→ `-I src`（開発時）の
+  3 経路に拡充し、`pixi run package`（`.mojoc`）は配布手段でないと 1 文。(c) 「テストの回し方」に `### CI`（トリガー = PR → main / push main、ジョブ 3 つの表 = Linux は compose 3 台で PG17/PG14 両方・macOS は brew `postgresql@17` 1 台 + Python blackhole で PG14 なし・leak の RSS 検査は
+  Linux 専用で SKIP、待ち上限 3 値 = ジョブ 45 分 / `--wait-timeout 180` / `pg_ctl -w -t` 60 秒、artifact `pq-conda-<os>` と `final-check-log-<os>`、Windows ジョブ不在の理由、fork PR は未検証）。(d) `### ブランチ保護（人間が設定）`（画面手順 + `protection.json` の
+  `required_status_checks.contexts` にジョブ名 3 つ + `gh api -X PUT`。「無人ターンは設定しません」を明記 = D15）。(e) `### リリース手順（人間が行う）` 5 手順（CHANGELOG → `version` → main マージ → `v` 付きタグ push → `release.yml` の 3 ジョブ。modular-community は「将来の経路」1 行）。
+  (f) 「概要と対応環境」に CI 行。検証: **`pixi run check` 6/6 PASS = 176 s**（rc 0 / `final_check: PASS`。閾値 247 s）。チェックリストの T5 行 22 key すべて期待値（`readme_h2` = 10 → **11**、`readme_en_heading` = 1、`readme_git_dep` = 2、`readme_tag_v010` = 3、
+  `readme_preview_pixi_build` = 4、`readme_windows_toolchain` = 1 → 2、`readme_fork` = 1 ほか）。turn 6 のログとの差分は **`readme_*` だけ**（`trace_checklist_section` 3 → 4 は turn 6 が checklist 後に TRACE を書いたため）。生出力と根拠表は TRACE の turn 7 の 3 節へ
+- 想定外: なし（turn 6 の「次への注意」どおり、key と衝突する文字列を**書く前に**避けた: CI 小節では「6 段」を使わず「`tests/final_check.sh`」「1 工程」、待ち上限は「3 段階」、経路は「3 つあり」と表記して `readme_six_stages` = 1 / `readme_compose_three` = 2 を保った。
+  turn 5 / 6 で 2 回続いたコメント混入の再発は 0 回）。`py_compile` を回していないので `__pycache__` も発生せず
+- やり直し: 0 回（既存テストの期待値変更も 0 件）
+- 次への注意: 残りは **T6（統合 + push）のみ**で、コード変更は無い見込み。手順は (a) `pixi run db-reset` → `pixi run check` を `date -Iseconds` で挟んで ≤ 247 s を確認 → `pixi run package` 警告ゼロ → `pixi build -o dist`（`.conda` 1 個）→ `pixi install --locked` →
+  `git diff --quiet main -- pixi.lock`、(b) `actionlint` 2 本 + チェックリスト**全行**（差分が出た行は TRACE に PLAN 訂正として）、(c) TRACE「受け入れ基準対応表」= REQ §4 の A1〜F2 を 1 行ずつ（**CI 依存の B2 / B3 / B4 / B6 / C3 / F の CI 側は「verify の PR で確認」と明記**し、
+  impl が静的に確認できた分と分ける）、(d) PROGRESS の最新ターン節 ≤ 40 行（`python3 -c` のワンライナー。**この turn 7 の節は 16 行**なので T6 も同程度に収める）、(e) `git status` clean → `git push -u origin gsd-lite/phase6-packaging-ci` → `git status -sb` に `ahead` なし →
+  `gh run list --branch gsd-lite/phase6-packaging-ci --limit 5` が **0 件**（P15 の陽性対照。走っていたら `on:` を見直す）、**PR は作らない**（verify の仕事）。(f) TRACE「verify への申し送り」も T6 で記入（PLAN T6 (f) の 5 項目）。
+  `pixi build -o dist` は T2 以降 `dist/` へ出すので `git status` を汚さない（`.gitignore` 済み）が、`build/` と同様コミット前に `git status --short` を必ず見る
