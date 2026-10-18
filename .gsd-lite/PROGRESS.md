@@ -215,3 +215,11 @@
 - やり直し: 0 回
 - 次への注意: 次は **`/gsd-lite-reflect`**。マージは人間（PR #1 の 3 チェック緑 → README「ブランチ保護」→ マージ → 「リリース手順」）。reflect の材料: F1〜F3 の 3 round はすべて開発機で観測できない CI 固有の赤（setup-pixi 入力 / macOS poll / libpq 初回 poll 契約 + RSS の段）で、
   verify_round 上限 3 ちょうどで合格。「round 2 以降は回帰確認だけ」の規則は守れたが、macOS 固有・非決定的なクラスは round 1 の格子では立てようがなかった（研究段階で macOS 実機が無い制約）。ブランチはマイルストーンブランチのまま終了する（checkout しない）
+
+## turn 16 — reflect — phase6-packaging-ci
+- やったこと: 振り返りを .gsd-lite/reflect/20261018-1252-phase6-packaging-ci.md に作成（提案 8 件）。15 ターン / 178.5 分 / USD 86.65、差し戻し 3 round（F1〜F3）= 74 分 / USD 33.2 がすべて CI 固有の赤、
+  前回提案 10 件は守られた 6 / 部分 2 / 守られなかった 2（ツール側の `result` 合計は 4 回目の未反映）。state を `done` / `DONE` に更新
+- 想定外: 生ログ turn 5 に Bash 権限拒否 1 件（`nohup … &`）があるが turns.jsonl / loop.log に出ていない（最後の `result` だけを記録するため）。run `39090682281` は「人間の re-run」でなく verify round 1 の state コミット push が起動した run だった（`gh run view --json`）。
+  turn 15 の push で run `39095015138` が進行中で、本ターンの push が `concurrency` で cancel する
+- やり直し: 0 回
+- 次への注意: マージ・ブランチ保護・タグは人間（VERIFICATION §R4.7）。次マイルストーンの前に CHANGELOG 0.1.0 への Phase 6 追記と `.gsd-lite/` を main に残すかを決める。research は採用アクションの入力検証ソースを読む、plan は複数 OS CI のとき verify_round_max 4
