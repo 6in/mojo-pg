@@ -527,3 +527,45 @@ setup-pixi 周辺の現在値: `ci_setup_pixi_pinned=1` / `ci_pixi_version=1` / 
 
 - 途中経過: 最初のコメント案が `retry.sh` に 2 回触れて `ci_retry_sh` が 4 → 5 になったため、
   「the install step below」に言い換えて 4 に戻した（turn 5 / 6 と同じ型の混入。検出はチェックリストの diff）
+
+## CI 実測（turn 11 / verify round 2 / run 39091056281）
+
+生ログ: `scratch/turn-011-macos-artifact/final_check.log`（872 行）/ `turn-011-arm-artifact/` / `turn-011-x64-artifact/` /
+`turn-011-macos-job.log`（ジョブ全体、`gh api .../jobs/<id>/logs`）。`.conda` は `turn-011-conda-arm/` / `turn-011-conda-x64/`
+
+| ジョブ | 結果 | 所要 | 5/6 段 | skipped | `.conda` |
+|---|---|---|---|---|---|
+| `check (ubuntu-latest)` | ✅ | 9m52s | FAIL 0 | 1 / 1 | `pq-0.1.0-hb0f4dca_0.conda` 461,664 B |
+| `check (ubuntu-24.04-arm)` | ✅ | 8m26s | FAIL 0 | 1 / 1 | `pq-0.1.0-he8cfe8b_0.conda` 461,660 B |
+| `check (macos-latest)` | ❌ | 4m41s | FAIL 2（test_async 30/31、test_poll 10/11） | 15 | 未到達 |
+
+macOS の段ごとの時刻（UTC）: setup-pixi 02:42:49 → install 02:42:50〜53（3 s）→ `macos-postgres.sh` 02:42:53〜05（12 s。brew bottle 17.11_1、initdb スキップ、
+scram 切替 + reload、陽性対照 2 つ OK）→ blackhole 02:43:05〜07（accepting）→ `pixi run check` 02:43:07〜02:47:14（247 s、5/6 で `--- FAIL`）。
+`LibpqLoad` 0 件。`test_connect_blocking_times_out` PASS 560 ms
+
+macOS の赤 2 件（verify の読み）:
+
+```
+FAIL [ 17.769 ] test_connect_failures_name_their_cause
+  At tests/test_async.mojo:1613:16: AssertionError: connection socket closed (POLLHUP/POLLERR)
+FAIL [ 0.033 ] test_socketpair_peer_close_sets_hangup_both_ways
+  At tests/test_poll.mojo:215:16: AssertionError: condition was unexpectedly False
+```
+
+- 共通の原因: macOS の poll(2) は POSIX どおり `POLLHUP` と `POLLOUT` を同時に立てない。Linux は socket で両方立てる（Phase 4 RESEARCH §2.3 の `20 = POLLOUT|POLLHUP`）
+- ① は `async_conn.mojo:787-793`（`wait_writable` の「要求方向ビット無し + hangup」→ 汎用 CONNECTION）に入る。Linux は `POLLOUT` があるので `:787` で return → `PQconnectPoll` が `Connection refused` を名乗る
+- ② は `poll_socket` の flags そのまま。`:213-214`（読み側 `POLLIN|POLLHUP`）は通過、`:215`（書き側 `POLLOUT`）が False
+- → PLAN **F2**（設計 A: hangup / error だけでも return して libpq に言わせる + test_poll の `writable` assert を Linux 限定）
+
+## チェックリスト（turn 11）
+
+`scratch/turn-011-checklist.log`（全 101 key）。**turn 10 のログとの差分は 1 行だけ**（単調増加の性質）:
+
+```
+11c11
+< trace_checklist_section=6
+---
+> trace_checklist_section=7
+```
+
+F1 の回帰 grep: `cache: false` = 1 / 3、`cache: true` + `locked: true` = 0 / 0、actionlint 指摘 0。ローカル `check` 6/6 PASS = 170 s（11:46:32 → 11:49:22）

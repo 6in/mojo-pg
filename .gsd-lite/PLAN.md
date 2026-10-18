@@ -281,6 +281,39 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T6
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（YAML 4 箇所 + コメント + 文書）
 
+- [ ] F2: macOS の poll セマンティクス（`POLLHUP` と `POLLOUT` が排他）に合わせる — `wait_readable` / `wait_writable` のハングアップ分岐を「libpq に原因を言わせる」形にし、`test_poll` の socketpair 期待値を Linux 限定にする（verify round 2 / VERIFICATION §0）
+  - 背景: PR #1 の run `39091056281` で Linux 2 ジョブは緑、**macOS だけ `pixi run check` 5/6 段で 2 テスト赤**（`final-check-log-macos-latest`。`scratch/turn-011-macos-artifact/final_check.log`）:
+    ① `tests/test_async.mojo:1613` `test_connect_failures_name_their_cause` — 127.0.0.1:1 への接続拒否で `wait_writable` が **`connection socket closed (POLLHUP/POLLERR)`** を投げ、libpq の `Connection refused` が出ない。
+    macOS の poll(2) は接続拒否を `POLLHUP`（`POLLOUT` 無し）で報告するので `async_conn.mojo:787-793` の「要求方向のビット無し + hangup」分岐に入る（Linux は `POLLOUT` を伴うので `:787` で return し、次の `PQconnectPoll` が原因を名乗る）。
+    ② `tests/test_poll.mojo:215` `test_socketpair_peer_close_sets_hangup_both_ways` — ピア close 後の書き側 poll で `writable` が False。POSIX は `POLLHUP` と `POLLOUT` を排他と定め、macOS はそれに従う（Linux は socket で両方立てる: Phase 4 RESEARCH §2.3 の実測 `20 = POLLOUT|POLLHUP`）。
+    `poll_socket` 自体は flags をそのまま返しているので正しく、**テストの期待値が Linux 固有**。
+    採る設計は **A = ライブラリ側で「hangup / error だけ」を ready として返し、次の libpq 呼び出し（`PQconnectPoll` / `PQconsumeInput` / `PQflush`）に本当の原因を言わせる**（Phase 4 RESEARCH §4 P5「libpq の切断メッセージの方が親切」と同じ方針。
+    `POLLHUP` 単独は全 OS で正当な報告なので OS 分岐にしない）。B = ライブラリに `CompilationTarget.is_macos()` 分岐（同じ状態を OS で違う種類に分けるだけ）、C = `test_async` の期待値を macOS で緩める（REQ §2.5「CI だけ緩めない」に反し、テスト名「原因を名乗る」の意図も失う）は採らない（VERIFICATION §0 に理由）
+  - 完了基準:
+    - (a) `src/pq/async_conn.mojo` の `wait_readable`（`:748-760`）/ `wait_writable`（`:781-793`）: poll が `hangup` / `error` を報告し要求方向のビットが無いとき、**raise せず return する**（`timeout` → `TIMEOUT`、`fd < 0` → `CONNECTION "no socket"`、`USAGE` は不変）。
+      汎用メッセージ `connection socket closed (POLLHUP/POLLERR)` は **src から消える**（grep 0）。両 docstring の本文と `Raises:` を実態に直す（「hangup / error だけでも返る。切断の理由は次の libpq 呼び出しが名乗る（`PQconnectPoll` の `Connection refused`、`PQconsumeInput` の
+      `server closed the connection unexpectedly`）」の趣旨。`CONNECTION` は「socket が無い」のときだけ）。`src/pq/__init__.mojo:290` の表（`TIMEOUT`, `CONNECTION`, `USAGE`）は**そのまま正しい**ので触らない
+    - (b) 呼び出し側 3 箇所（`_poll_to_ready` `:834-838` / `_wait_for` `:1473-1477` / `_collect_notifications` `:1665-1671`）が、return 後の次の libpq 呼び出しで失敗を報告し busy loop にならないことをコードレビューで確認し、根拠を TRACE「F2」節に各 1 行
+      （`PQconnectPoll` は `SO_ERROR` を読んで `PGRES_POLLING_FAILED`、`PQconsumeInput` は `recv` 0 / -1 で 0 を返す、`PQflush` は send 失敗で -1）。コード変更はしない見込み
+    - (c) `tests/test_poll.mojo:207-216`: `hangup` の 2 つの assert は両 OS 共通のまま、**`assert_true(writable.writable)` は Linux だけ**（`test_leak.mojo:77,787` と同じ `from std.sys.info import CompilationTarget` + `CompilationTarget.is_linux()`。
+      コメントに「POSIX は POLLHUP と POLLOUT を排他と定義、Linux は socket で両方立てる」の趣旨）。macOS 側では `writable` を assert しない（将来の変更に追従させない）。テスト数 11 不変、`readable.readable` / `readable.hangup` は不変
+    - (d) 新しいテストファイル / 新しい型・API は足さない。(a) の受け入れは **CI の macOS で `test_connect_failures_name_their_cause` が PASS すること**（Linux では `POLLOUT` を伴うため経路差なし）。ローカル（Linux）では既存テストの期待値変更 **0 件**で全 PASS
+    - (e) 期待結果（**この表だけが正**。本文・テストはこれを参照する）:
+
+      | 条件 | 結果 |
+      |---|---|
+      | `grep -c 'POLLHUP/POLLERR' src/pq/async_conn.mojo` | 0（grep の rc 1 が正） |
+      | `grep -c 'is_linux' tests/test_poll.mojo` | ≥ 1 |
+      | `pixi run mojo run -I src tests/test_poll.mojo` / `tests/test_async.mojo`（54317） | 11 PASS / 31 PASS（既存の期待値変更 0 件） |
+      | `pixi run check`（`db-reset` の後） | 6/6 PASS、所要 ≤ 247 s、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1` |
+      | `pixi run package` | 警告 0 |
+      | checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | 0 / 24 / 不変（`trace_checklist_section` は +1 可、他の全行は `scratch/turn-011-checklist.log` と同値） |
+      | push 後 `gh run list --branch gsd-lite/phase6-packaging-ci --limit 3` | PR #1 由来の run が 1 件増える（**全ジョブの完了は待たない**。緑 / 赤の判定は verify round 3） |
+    - (f) `git status` clean → commit → `git push origin gsd-lite/phase6-packaging-ci`（**turn 10 / 11 の未 push コミット 2 つも一緒に載る**。run `39091056281` は完了済みなので cancel の心配はない）。PR は作らない
+  - 対象: `src/pq/async_conn.mojo`（`wait_readable` / `wait_writable` の 2 メソッドのみ）, `tests/test_poll.mojo`（1 テスト）, `.gsd-lite/TRACE.md`
+  - 依存: F1
+  - 並列サブ作業: サブエージェント **0 本（親が全部）**（src 2 メソッド + テスト 1 件）
+
 ## 決めた事項
 
 1. **E1 は案 A（README 明記のみ）**（REQ §2.3「plan が選ぶ」/ RESEARCH §2.13）。根拠: rc 141 は stdlib `print` が SIGPIPE 既定のまま write した結果で `cat` / `grep` と同じ Unix 標準挙動。案 B は `SIG_IGN` + 番兵 `write(2)` を

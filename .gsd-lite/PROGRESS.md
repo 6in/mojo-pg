@@ -144,3 +144,19 @@
   F1 の回帰 grep（cache 明示オフ 1 + 3、旧 2 入力 0）。環境キャッシュ無しで毎 run の取得が +1〜3 分増える見込み。PR 本文の更新は round 2 合格時に `gh pr edit 1 --body-file`。
   **この申し送り / state のコミットは push していない（`ahead 1`）**: `ci.yml` の `concurrency` は `cancel-in-progress` なので、いま走っている run `39091056281` の最中に push すると**その run が cancel される**。
   verify は run `39091056281` の結果を取り切ってから push すること
+
+## turn 11 — verify（round 2）— 差し戻し（指摘 1 件 = F2 macOS の poll セマンティクス）/ PR #1 の run 39091056281 は Linux 2 ジョブ緑・macOS 赤（2 テスト）
+- やったこと: F1 の回帰（`cache: false` 1 / 3、旧 2 入力 0 / 0、actionlint 0、チェックリスト 101 key は `trace_checklist_section` +1 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 170 s**。
+  CI を `gh pr checks 1 --watch` で待ち、3 ジョブとも setup-pixi / install 通過（F1 は効いた）。**Linux x86_64 9m52s / aarch64 8m26s とも緑**、`.conda` は `hb0f4dca_0` / `he8cfe8b_0`（名前は異なる = P5 OK）。
+  **macOS は `check` 5/6 段で 2 テスト赤**（`test_connect_failures_name_their_cause` が `connection socket closed (POLLHUP/POLLERR)`、`test_socketpair_peer_close_sets_hangup_both_ways:215` の `writable`）。
+  artifact 5 つとジョブログを `scratch/turn-011-*` に落として原因を特定: macOS の poll は POSIX どおり `POLLHUP` と `POLLOUT` を排他にする（Linux は両方立てる）。`wait_writable` の hangup 分岐が libpq より先に落とし、`test_poll` の期待値は Linux 固有。
+  VERIFICATION §0（round 2）と PLAN F2（設計 A = hangup / error だけでも return して libpq に原因を言わせる + test_poll の `writable` assert を Linux 限定）を書いた。
+  macOS の良い知らせ: `LibpqLoad` 0（残留リスク 2 解消）、blackhole accepting で timeout テスト PASS（3 解消）、skipped 15 = 申し送りどおり、brew PG 12 s、install 3 s（キャッシュ無しの代償は無視できる）。サブエージェント 0 本
+- 想定外: (1) **macOS の赤はワークフローではなくライブラリの OS 差**（Phase 4 で Linux だけで実測した poll の flags 組み合わせ）。REQ §6「CI 固有の失敗は verify の差し戻しで直す」の想定内だが、F タスクが src に触る初めてのケース。
+  (2) `gh run view --log-failed` は run 全体が完了するまで使えない（macOS だけ先に落ちた状態では `still in progress`）→ `if: always()` の `final-check-log-*` artifact と `gh api .../jobs/<id>/logs --allow-escape-sequences` で代替できた（T3 の設計が効いた）。
+  (3) ローカルの `final_check.log` には `final_check: PASS` 行が入らない（stdout のみ）。合否は 6/6 段の見出しとバックグラウンドタスクの rc 0 で判定
+- やり直し: 0 回（既存テストの期待値変更 0 件。差し戻しのため PR 本文の更新・push はしていない）
+- 次への注意: impl は **F2 だけ**（`async_conn.mojo` の `wait_readable` / `wait_writable` 2 メソッド + `tests/test_poll.mojo` 1 テスト + TRACE「F2」節）。期待結果は PLAN F2 (e) の表が正。**ローカル（Linux）では F2 の (a) は観測できない**ので、
+  完了基準は「汎用メッセージが src から消える（grep 0）+ 既存テスト全 PASS + 3 呼び出し側の busy loop 否定をレビューで書く」。macOS の PASS は verify round 3 が CI で判定する。
+  push は **turn 10 / 11 の未 push コミット 2 つ + F2** を一緒に（`ahead 2` の状態。run `39091056281` は完了済みなので cancel の心配なし）。push 後は全ジョブの完了を待たない（F1 と同じ）。
+  verify round 3 の確認項目は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名 / F2 回帰 grep / F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）
