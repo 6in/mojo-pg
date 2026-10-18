@@ -27,3 +27,16 @@
 - 次への注意: impl は `/home/parallels/.pixi/bin/pixi` 絶対パス。T1 の E2 は `_restore_collected(` が 3 箇所（def + 2 呼び出し）になるまで。T2 は `[package]` を足したら **`git diff --quiet main -- pixi.lock` が rc 0** のまま
   であることを先に確かめ、変わっていたら feature / environments を疑う。lock はコミットしない。T2 の git 経路 smoke はコミット後に `file:///…/pgcon` + `branch =` で。T3 の blackhole 陽性対照は docker の 54399 を避けて 54398。
   T6 は PR を作らない（verify が作る）。`gh run list --branch gsd-lite/phase6-packaging-ci` が 0 件なら P15 どおり
+
+## turn 3 — impl — T1 持ち越し 2 件（E1 README / E2 `_restore_collected`）+ `db-up` 待ち上限 + TRACE 新設
+- やったこと: `async_conn.mojo` に `_restore_collected(collected)` を切り出して `_collect_notifications` の 2 つの `except` から呼び（`wait_readable` 側は `TIMEOUT` 以外すべて）、
+  docstring の `Raises:` に 1 文。`tests/test_notify.mojo` にテスト 1 件（24 → 25 件。1 tx の NOTIFY 3 件 → `wait_notifications(1,5000)` → ヘルパ直叩きで `_pending` と公開 API の両方で順序確認 + 空リスト境界値）。
+  README「既知の制限」に SIGPIPE / rc 141 の 2 項目（案 A。コード変更なし）。`pixi.toml` の `db-up` に `--wait-timeout 180`。`.gsd-lite/TRACE.md` 新設（PLAN 訂正 / チェックリスト（turn 3）/ `check` の所要）。
+  検証: test_notify 25 PASS、test_async 31 PASS、`pixi run test` 両サーバー PASS（54314 は従来どおり skipped 1）、`pixi run package` 警告ゼロ、**`pixi run check` 6/6 PASS = 189 s**（閾値 247 s、見積もり 170〜220 s の内側）、
+  `pixi run db-reset` rc 0。チェックリストの T1 行 10 key すべて期待値（`async_restore_collected_def=1` / `_sites=3` / `test_notify_tests=25` / `readme_sigpipe=2` / `readme_rc_141=1` / `pixi_db_up_wait_timeout=1` / `trace_*`）、不変行も変化なし。サブエージェント 0 本（PLAN どおり）
+- 想定外: **`out` は Mojo 1.1.0 の引数規約キーワードで引数名に使えない**（`error: expected argument name`）。`collected` に改名 → PLAN 訂正（TRACE の「PLAN 訂正（turn 3）」節 + PLAN 本文 3 箇所）。
+  チェックリストの key は `def _restore_collected` / `_restore_collected(` の 2 つなので影響なし
+- やり直し: 1 回（上の引数名でパース不能 → 改名して再実行。既存テストの期待値変更は 0 件）
+- 次への注意: T2 は `[package]` を足したら **先に `git diff --quiet main -- pixi.lock` が rc 0** であることを確かめる（変わっていたら feature `bench` / `[environments]` を落としていないか疑う。lock はコミットしない）。
+  **Mojo の引数名に `out` / `in` 等の規約キーワードを使わない**（今回の原因。残りのタスクはコード変更が少ないが同種の字句エラーに注意）。git 経路 smoke は T2 のコミット後に `file:///home/parallels/workspaces/mojo-apps/pgcon` + `branch = "gsd-lite/phase6-packaging-ci"` で。
+  `pixi build` 初回は backend 取得で < 60 s かかる。生の値は PROGRESS ではなく TRACE へ（この節は 40 行以内を維持）
