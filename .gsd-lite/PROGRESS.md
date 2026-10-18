@@ -129,3 +129,18 @@
 - 次への注意: impl は F1 だけ（YAML 4 箇所 + コメント + TRACE / PLAN 訂正）。**`cache: false` を明示し `locked: true` を削る**（省略不可）。コメントに key パターンの文字列を書かない。push 後に `gh run view <run-id>` で setup-pixi ステップの ✓ だけ確認（全ジョブ完了は待たない）。
   verify round 2 は VERIFICATION §7 の 6 項目（`gh pr checks 1 --watch` 上限 40 分 / `final-check-log-*` の `skipped`（macOS 15 件見込み）/ artifact 3 つの `.conda` 名 / macOS の `LibpqLoad` 有無 = 残留リスク 2 の判定 / F1 の回帰 grep）。
   macOS が `LibpqLoad` で赤なら修正は `PQ_MOJO_LIBPQ` を macOS ステップの env に足す（VERIFICATION §6-2）。PR 本文の「VERIFICATION の要約」は round 2 の合格時に `gh pr edit 1 --body-file` で更新する
+
+## turn 10 — impl — F1 setup-pixi の入力を run-install 無効と両立する形に直す
+- やったこと: `ci.yml` 1 箇所 + `release.yml` 3 箇所の `prefix-dev/setup-pixi@v0.11.2` の入力を `pixi-version` / cache 明示オフ / install 無効の 3 行に統一（旧 2 入力を削除）。
+  設計は **A = 手動 install 維持**（lock の強制は既存の `retry.sh 3 15 pixi install --locked` が担うので REQ §2.5 のリトライ要件はそのまま）。`ci.yml:50-53` のコメントを実態に書き換え、
+  PLAN の表 `:82` と決めた事項 5 を訂正、TRACE に turn 10 の 3 節（PLAN 訂正 2 件 / F1 の変更と検査表 / チェックリスト）。検証: `actionlint` 2 本とも指摘 0、cache 明示オフ **1 / 3**、旧 2 入力 **0 / 0**（grep rc 1）、
+  **`pixi run check` 6/6 PASS = 175 s**（11:38:33 → 11:41:28、閾値 247 s、`final_check: PASS`、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1`）、チェックリスト 101 key は turn 9 と **`ci_locked_true` 1 → 0 の 1 行だけ**差分。
+  commit `2c89fb9` → push → PR #1 由来の run **39091056281** が 1 件増え、**3 ジョブとも `Run prefix-dev/setup-pixi@v0.11.2` が success**（F1 の期待結果どおり。全ジョブの完了は待たない = 緑 / 赤の判定は verify round 2）
+- 想定外: (1) push 前の時点で **PR #1 に知らない run `39090682281`（02:36 UTC・`ce34301`・failure 20 s）が 1 件増えていた**（turn 9 が作った `39090199560` とは別。再実行と思われる）。F1 の判定は自分の push で増えた `39091056281` だけを見た。
+  (2) コメント初稿が `retry.sh` に触れて `ci_retry_sh` が 1 増えた（やり直し参照）
+- やり直し: 1 回（`ci.yml` のコメント初稿が `retry.sh` に 2 回触れて `ci_retry_sh` が 4 → 5 になった → 「the install step below」に言い換えて 4 に戻した。turn 5 / 6 と同型のコメント混入。既存テストの期待値変更は 0 件）
+- 次への注意: 次は **`/gsd-lite-verify`（round 2）**。VERIFICATION §7 の 6 項目のうち **「2 回目の run で `Cache restored`」は無効**（F1 でキャッシュを使わない設計にした = TRACE「PLAN 訂正（turn 10）」②）。
+  残る確認は `gh pr checks 1 --watch`（上限 40 分）/ `final-check-log-*` の `skipped`（macOS 15 件見込み・Linux 1 件）/ artifact `pq-conda-*` 3 つの `.conda` 名 / macOS の `LibpqLoad` 有無（残留リスク 2。赤なら `PQ_MOJO_LIBPQ` を macOS ステップの env に）/
+  F1 の回帰 grep（cache 明示オフ 1 + 3、旧 2 入力 0）。環境キャッシュ無しで毎 run の取得が +1〜3 分増える見込み。PR 本文の更新は round 2 合格時に `gh pr edit 1 --body-file`。
+  **この申し送り / state のコミットは push していない（`ahead 1`）**: `ci.yml` の `concurrency` は `cancel-in-progress` なので、いま走っている run `39091056281` の最中に push すると**その run が cancel される**。
+  verify は run `39091056281` の結果を取り切ってから push すること
