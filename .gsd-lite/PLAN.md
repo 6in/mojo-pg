@@ -79,7 +79,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
 | `wf_ci_exists` / `ci_os_ubuntu_latest` / `ci_os_ubuntu_arm` / `ci_os_macos_latest` / `ci_fail_fast_false` | T3: `.github/workflows/ci.yml` の matrix 3 OS | **exists / ≥ 1 / ≥ 1 / ≥ 1 / 1**（T3） |
 | `ci_timeout_minutes` / `ci_permissions` / `ci_secrets_refs` | D9: ジョブに `timeout-minutes: 45`、先頭 `permissions: contents: read`、`secrets.` 参照なし | **≥ 1 / ≥ 1 / 0**（T3。P14） |
 | `ci_branches_main` / `ci_pull_request` | `on.pull_request.branches: [main]` + `on.push.branches: [main]`（P15） | **2 / 1**（T3） |
-| `ci_setup_pixi_pinned` / `ci_pixi_version` / `ci_run_install_false` / `ci_locked_true` | `prefix-dev/setup-pixi@v0.11.2`（`pixi-version: v0.82.0`, `locked: true`, `cache: true`, `run-install: false`）+ `retry.sh` で `pixi install --locked`（P12） | **1 / 1 / 1 / 1**（T3） |
+| `ci_setup_pixi_pinned` / `ci_pixi_version` / `ci_run_install_false` / `ci_locked_true` | `prefix-dev/setup-pixi@v0.11.2`（`pixi-version: v0.82.0`, `cache: false`, `run-install: false`）+ `retry.sh` で `pixi install --locked`（P12） | **1 / 1 / 1 / 0**（T3。`ci_locked_true` は F1 で 1 → 0） |
 | `ci_pixi_run_check` / `ci_pixi_build` / `ci_upload_artifact` / `ci_artifact_pq_conda` | 3 ジョブとも `pixi run check` → `pixi build -o dist` → `upload-artifact@v7`（名前 `pq-conda-${{ matrix.os }}`） | **≥ 1 / ≥ 1 / ≥ 2 / ≥ 1**（T3。B2 / B4。2 つ目の upload は `final_check.log`） |
 | `ci_windows_reason` / `ci_conninfo_5432` / `ci_retry_sh` | Windows ジョブ無しの理由コメント（B7）/ macOS の `PQ_TEST_CONNINFO`（RESEARCH §2.8）/ リトライ呼び出し | **≥ 1 / ≥ 1 / ≥ 3**（T3） |
 | `scripts_retry` / `scripts_macos_pg` / `scripts_blackhole` | `.github/scripts/retry.sh` / `macos-postgres.sh` / `blackhole.py` | **exists ×3**（T3） |
@@ -250,7 +250,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: T5
   - 並列サブ作業: サブエージェント **0 本（親が全部）**
 
-- [ ] F1: setup-pixi の入力を `run-install: false` と両立する形に直す（`cache: false` を明示し `locked: true` を外す。ci.yml 1 箇所 + release.yml 3 箇所）+ コメント + PLAN 訂正（verify round 1 / VERIFICATION §1）
+- [x] F1: setup-pixi の入力を `run-install: false` と両立する形に直す（`cache: false` を明示し `locked: true` を外す。ci.yml 1 箇所 + release.yml 3 箇所）+ コメント + PLAN 訂正（verify round 1 / VERIFICATION §1）
   - 背景: PR #1 の CI run `39090199560` で 3 ジョブとも `prefix-dev/setup-pixi@v0.11.2` が 5〜9 s で `##[error]Cannot cache without running install`。setup-pixi v0.11.2 `src/options.ts:207-217` は
     `runInstall === false` のとき **`cache === true` と `locked === true` の両方**を拒否する。`cache` の既定は true（`action.yml`）なので省略では直らず、`cache` だけ直すと次は
     `Cannot use \`locked: true\` when not running install` で落ちる。設計は **A = 手動 install 維持**（REQ §2.5 のリトライを `retry.sh 3 15 pixi install --locked` で満たす）。
@@ -294,7 +294,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
    出力先 `pixi build -o dist`（`dist/` は gitignore）。`pixi.lock` は**不変**（RESEARCH §2.2）
 4. **CI は 1 ワークフロー `ci.yml`、1 ジョブ `check` × matrix 3 OS、OS 差は `if: runner.os == ...` のステップ条件で**（ジョブを Linux / macOS に分けない）。ジョブ名は `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`
    （matrix の既定命名と同じだが `name:` で固定。D4 の required checks の名前がこれ）。`fail-fast: false`（ExtraMojo）。`concurrency` で同一 ref の古い run を cancel（PR の連続 push で 3 ジョブ × 複数が走るのを防ぐ）
-5. **アクションのバージョン**（RESEARCH §2.5、2026-10-18 時点の最新）: `actions/checkout@v7`、`prefix-dev/setup-pixi@v0.11.2`（`pixi-version: v0.82.0` = 開発機と同じ、`locked: true`、`cache: true`、`run-install: false`）、
+5. **アクションのバージョン**（RESEARCH §2.5、2026-10-18 時点の最新）: `actions/checkout@v7`、`prefix-dev/setup-pixi@v0.11.2`（`pixi-version: v0.82.0` = 開発機と同じ、`cache: false`、`run-install: false`。F1 の訂正: install を切ると action が cache / lock の入力を拒否する）、
    `actions/upload-artifact@v7`、`actions/download-artifact@v7`。第三者アクションはこの 4 つだけ（`softprops/action-gh-release` / `nick-fields/retry` / `ikalnytskyi/action-setup-postgres` は採らない: RESEARCH §3）
 6. **リトライは `.github/scripts/retry.sh <tries> <sleep_sec> <cmd...>`**（bash の `for`。`uses:` は包めないので `run:` のネットワーク依存ステップ = `pixi install --locked` / `docker compose pull` / `brew install` / `pixi build` に当てる）。
    ジョブ `timeout-minutes: 45`（見込み 8〜13 分 + macOS brew 2〜4 分）、release の `verify-version` 10 分 / `release` 15 分

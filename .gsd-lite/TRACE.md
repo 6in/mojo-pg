@@ -486,3 +486,44 @@ REQ §4 の A1〜F2。「静的に確認（impl）」= このマイルストー�
    `Cache restored` のログ行を確認する（1 回目は `Cache not found` が正）
 6. 任意: Phase 5 の堅牢性格子 `scratch/turn-012-robust-regress.sh` は期待値不変
    （E1 が案 A = コード変更なしのため。`> >(exit 0)` 軸の rc 141 もそのまま）
+
+## PLAN 訂正（turn 10）
+
+1. チェックリスト `ci_locked_true` の期待値 **1 → 0**。`prefix-dev/setup-pixi@v0.11.2` は install を切った状態では
+   cache と lock の 2 入力を受け付けない（`src/options.ts:207-217`）ため、F1 で `ci.yml` から当該行を削除した。
+   PLAN:82 の表と「決めた事項 5」の記述も `cache: false`（lock 入力なし）に直した
+2. TRACE「verify への申し送り」の **5（2 回目の run で `Cache restored`）は無効**。setup-pixi のキャッシュは使わない
+   （毎 run で環境を取得。+1〜3 分の見込み）。verify round 2 はこの項目を確認対象から外す
+
+## F1 setup-pixi 入力の修正（turn 10）
+
+- 変更箇所 **4 つ**（いずれも `with:` を `pixi-version: v0.82.0` / `cache: false` / `run-install: false` の 3 行に）:
+  `ci.yml` の `check` ジョブ 1 箇所、`release.yml` の `verify-version` / `build` / `release` の 3 箇所
+- 採った設計は **A（手動 install 維持）**: lock の強制は既存の `bash .github/scripts/retry.sh 3 15 pixi install --locked`
+  ステップが担う（REQ §2.5 のリトライ要件を満たしたまま）。B（action に install させる）は install にリトライが付かない
+- `verify-version` / `release` ジョブは install を呼ばない（`pixi workspace version get` のみ / `gh` のみ）が、入力は 3 ジョブで揃えた
+- コメントは key のパターン文字列（`locked: true` / `run-install: false` / `cache: true` / `cache: false`）を含まない言い回しに統一
+
+| 検査 | 結果 |
+|---|---|
+| `pixi exec --spec actionlint actionlint .github/workflows/ci.yml .github/workflows/release.yml` | 指摘 0 |
+| `grep -c 'cache: false'`（ci / release） | **1 / 3** |
+| `grep -c 'cache: true'` / `grep -c 'locked: true'`（2 本とも） | **0 / 0**（grep rc 1） |
+| `pixi run check` | **6/6 PASS = 175 s**（11:38:33 → 11:41:28。閾値 247 s）。`final_check: PASS`、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1` |
+
+## チェックリスト（turn 10）
+
+`scratch/turn-010-checklist.log`（全 101 key）。**turn 9 のログとの差分は 1 行だけ**:
+
+```
+38c38
+< ci_locked_true=1
+---
+> ci_locked_true=0
+```
+
+setup-pixi 周辺の現在値: `ci_setup_pixi_pinned=1` / `ci_pixi_version=1` / `ci_run_install_false=1` /
+`ci_locked_true=0` / `ci_retry_sh=4`（不変）。他の全行は turn 9 と同値。
+
+- 途中経過: 最初のコメント案が `retry.sh` に 2 回触れて `ci_retry_sh` が 4 → 5 になったため、
+  「the install step below」に言い換えて 4 に戻した（turn 5 / 6 と同じ型の混入。検出はチェックリストの diff）

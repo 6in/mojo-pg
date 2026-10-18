@@ -29,13 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Same inputs as ci.yml: a stale lock fails here rather than silently
-      # resolving something else.
+      # Same inputs as ci.yml: with the install turned off the action refuses
+      # both its caching and its lock inputs (v0.11.2 src/options.ts). This
+      # job only reads the version, so it never installs the environment.
       - uses: prefix-dev/setup-pixi@v0.11.2
         with:
           pixi-version: v0.82.0
-          locked: true
-          cache: true
+          cache: false
           run-install: false
 
       # Tag pushes only. On a dispatch there is no tag to compare against.
@@ -67,8 +67,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.11.2
         with:
           pixi-version: v0.82.0
-          locked: true
-          cache: true
+          cache: false
           run-install: false
 
       - name: pixi install
@@ -101,8 +100,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.11.2
         with:
           pixi-version: v0.82.0
-          locked: true
-          cache: true
+          cache: false
           run-install: false
 
       - uses: actions/download-artifact@v7
