@@ -71,7 +71,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
 | `readme_sigpipe` / `readme_rc_141` | E1（案 A）: README「既知の制限」に SIGPIPE / rc 141 の 2 行 | **≥ 1 / ≥ 1**（T1。P19） |
 | `pixi_db_up_wait_timeout` | `pixi.toml:27` の `db-up` に `--wait-timeout 180`（P11） | **1**（T1） |
 | `trace_exists` / `trace_checklist_section` | `.gsd-lite/TRACE.md` 新設（Phase 5 reflect: 「チェックリスト（turn N）」節を T1 で作る） | **exists / ≥ 1**（T1） |
-| `pixi_preview` / `pixi_package_section` / `pixi_version_workspace` / `pixi_pkg_name_pq` / `pixi_pkg_path` / `pixi_backend_mojo` / `pixi_mojo_compiler` | T2: RESEARCH §2.1 の差分（`[workspace] preview`、`[package]`、`[package.build]`、`[package.build.config.pkg]`、host / build / run の `mojo-compiler`） | **1 / 1 / 1 / 1 / 1 / 1 / 3**（T2。P1 / P2） |
+| `pixi_preview` / `pixi_package_section` / `pixi_version_workspace` / `pixi_pkg_name_pq` / `pixi_pkg_path` / `pixi_backend_mojo` / `pixi_mojo_compiler` | T2: RESEARCH §2.1 の差分（`[workspace] preview`、`[package]`、`[package.build]`、`[package.build.config.pkg]`、host / build / run の `mojo-compiler`） | **1 / 1 / 1 / 2 / 1 / 1 / 3**（T2。P1 / P2。`pixi_pkg_name_pq` は `^name = "pq"` なので `[package]` と `[package.build.config.pkg]` の 2 行に当たる = 2） |
 | `pixi_version_literal` | `version = "0.1.0"` は `[workspace]` の 1 行だけ（P4。`[package]` は `{ workspace = true }`） | **1**（不変） |
 | `pixi_run_dep_libpq` | `[dependencies]` の `libpq = ">=14"` + `[package.run-dependencies]` の同じ行 | **2**（T2） |
 | `gitignore_dist` | `.gitignore` に `dist/`（`pixi build -o dist` の出力） | **1**（T2） |
@@ -126,7 +126,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
   - 依存: なし
   - 並列サブ作業: サブエージェント **0 本（親が全部）**（src 10 行 + テスト 1 件 + 文書 2 行）
 
-- [ ] T2: `pixi.toml` の `[package]`（pixi-build-mojo）+ `pixi build` + 利用側 smoke 2 経路（A1〜A4）
+- [x] T2: `pixi.toml` の `[package]`（pixi-build-mojo）+ `pixi build` + 利用側 smoke 2 経路（A1〜A4）
   - 完了基準:
     - (a) `pixi.toml` に RESEARCH §2.1 の差分（決めた事項 3）: `[workspace]` に `preview = ["pixi-build"]`（`platforms` の次の行）、末尾に `[package]`（`name = "pq"`, `version = { workspace = true }`）、
       `[package.build]`（backend `pixi-build-mojo` `0.2.*` + channels 2 つ）、`[package.build.config.pkg]`（`name = "pq"`, `path = "src/pq"`）、
