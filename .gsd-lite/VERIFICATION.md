@@ -1,16 +1,88 @@
 # VERIFICATION — phase6-packaging-ci
 
-- **round 3 / turn 13 / 2026-10-18（Claude Code）** — 直近の節は §R3。round 2（turn 11）は §0、round 1（turn 9）は §1 以降にそのまま残す
+- **round 4 / turn 15 / 2026-10-18（Claude Code）** — 直近の節は §R4。round 3（turn 13）は §R3、round 2（turn 11）は §0、round 1（turn 9）は §1 以降にそのまま残す
 - 対象: `git diff main...HEAD`（コード側 = `pixi.toml` / `.gitignore` / `.github/**` / `CHANGELOG.md` / `README.md` / `src/pq/async_conn.mojo` / `tests/test_notify.mojo` / `tests/test_poll.mojo`。
   `.claude/settings.json` の allowlist 追記も diff に含まれる = 無人ターンの許可リスト。挙動に影響なし）
-- PR: **https://github.com/6in/mojo-pg/pull/1**（verify が round 1 で作成。round 1 = run `39090199560`、round 2 = run `39091056281`、round 3 = run `39092567451`）
-- **判定（round 3）: 差し戻し（指摘 2 件 → F3。verify_round 3 = 上限。round 4 で指摘が残れば BLOCKED）**。F2 は効いた（macOS で round 2 の 2 テストは PASS、`test_poll` 11/11、Linux 既存テストに回帰なし）が、
+- PR: **https://github.com/6in/mojo-pg/pull/1**（verify が round 1 で作成。round 1 = run `39090199560`、round 2 = run `39091056281`、round 3 = run `39092567451`、round 4 = run `39094332643`）
+- **判定（round 4）: 合格（指摘 0 件）**。PR #1 の run `39094332643`（コミット `b0b4ea6`）は **3 ジョブとも緑**（B6 ✅）。F3 は効いた: macOS で `test_multi_host_conninfo_reaches_the_second_host` PASS（6.3 ms）+ round 2 の 2 件も PASS のまま、
+  3 OS とも `pixi build` の `.conda` が生成され名前が互いに異なる（P5 ✅）。x86_64 の `test_leak` は段が出ず緑（偽陽性の再現なし。形による除外の CI 実測は得られていない = 残留リスク 13）。ローカル `check` 6/6 PASS = 170 s。
+  リモートありなので **ローカルマージはせず**、PR 本文を更新して `reflect` へ。マージは人間（README「ブランチ保護」「リリース手順」）
+- 判定（round 3）: 差し戻し（指摘 2 件 → F3。verify_round 3 = 上限。round 4 で指摘が残れば BLOCKED）**。F2 は効いた（macOS で round 2 の 2 テストは PASS、`test_poll` 11/11、Linux 既存テストに回帰なし）が、
   **macOS が別の 1 テスト赤**（`test_multi_host_conninfo_reaches_the_second_host`: 最初の `PQconnectPoll` を書き込み可能になる前に呼ぶ libpq 契約違反が macOS で表面化 = 指摘 3）、
   **x86_64 Linux も 1 テスト赤**（`test_connect_query_close_does_not_leak`: 一度きりの RSS ステップ 513 ページが許容 256 を超えた = リークではない偽陽性 = 指摘 4）。aarch64 Linux は緑
 - 判定（round 2）: 差し戻し（指摘 1 件 → F2）。F1 は効いて 3 ジョブとも setup-pixi / install を通過、**Linux 2 ジョブは緑**（B2 / B4 / C3 の Linux 側 ✅）。
   **macOS だけ `pixi run check` の 5/6 段で 2 テスト赤**（B3 / B6 ❌）。原因は macOS の poll(2) が `POLLHUP` と `POLLOUT` を同時に立てないこと（POSIX どおり）で、
   ライブラリの `wait_writable` が libpq より先に汎用メッセージで落とす + `test_poll` の期待値が Linux 固有。F1 の差分自体に回帰なし
 - 判定（round 1）: 差し戻し（指摘 1 件 → F1）。3 ジョブとも setup-pixi で `Cannot cache without running install`（§1）
+
+## R4. round 4（turn 15）— F3 の回帰確認 + CI 実測（最終）
+
+### R4.1 指摘（round 4）
+
+なし（verify_round 3 = 上限のまま。差し戻し 0 件、BLOCKED にならず合格）。
+
+### R4.2 F3 の回帰（§R3.7 の 5 項目）
+
+| # | 検査 | 期待 | 結果 |
+|---|---|---|---|
+| 1 | `gh run watch 39094332643 --exit-status`（PR #1、`pull_request`、2026-10-18T03:38:27Z、コミット `b0b4ea6`） | 3 ジョブ緑 | **✅ 3 / 3**（下表）。失敗ステップ 0、`--- FAIL` 行は 3 ログとも 0 |
+| 1 | macOS `final-check-log-macos-latest`（`scratch/turn-015-macos-artifact/final_check.log:70-72,536,864`） | multi-host PASS + round 2 の 2 件 PASS + `skipped 15` | **✅** `test_multi_host_conninfo_reaches_the_second_host` PASS **6.346 ms**（round 3 は 1.55 ms で FAIL）/ `test_first_poll_connect_is_need_write_even_when_refused` PASS / `test_connect_failures_name_their_cause` PASS / `test_socketpair_peer_close_sets_hangup_both_ways` PASS / `skipped 15` / 24 ファイル **633 / 633 PASS** |
+| 1 | `connect/query/close RSS pages` の 3 系列 | 写す | x86_64 **`[6237 ×9]`**（段なし。round 3 は `[6205 ×4, 6718 ×5]`）/ aarch64 **`[4129, 4130 ×8]`**（1 ページ）/ 開発機 **`[4213, 4214 ×8]`**。`test_connect_query_close_does_not_leak` は 3 環境とも PASS（x86_64 52.0 s / aarch64 60.9 s / ローカル 73.6 s の test_leak 全体） |
+| 2 | `pq-conda-macos-latest` の `.conda` 名 | `hb0f4dca_0` / `he8cfe8b_0` と異なる | **✅ `pq-0.1.0-h60d57d3_0.conda`**（462,581 B）。x86_64 `hb0f4dca_0`（462,606 B）/ aarch64 `he8cfe8b_0`（462,605 B）も再生成。3 つ互いに異なる = release の flat `dist/` で衝突しない（P5、2 round 持ち越し分を解消） |
+| 3 | F3 grep: `PGRES_POLLING_WRITING`（async_conn）/ `^def test_` async・leak・poll / checklist | ≥ 1 / 32・20・11 / `src_def_ref_return=0`・`test_file_count=24` | **4 / 32・20・11 / 0・24**。チェックリスト全 101 key（`scratch/turn-015-checklist.log`）は turn 13 との差分 `trace_checklist_section` 10 → 11 のみ。既存テストの期待値変更は PROGRESS turn 14 に `test_manual_connect_polling` 1 件が列挙され、diff（`tests/test_async.mojo:1114-1121`）と一致 |
+| 4 | F2 / F1 grep | 不変 | `POLLHUP/POLLERR`（src）**0**（rc 1）/ `is_linux`（test_poll）**1** / `cache: false` **1 / 3** / `cache: true`・`locked: true` **0 / 0**（rc 1）。`git diff --quiet main -- pixi.lock` rc 0 |
+| 5 | 合格時の PR 本文更新 | `gh pr edit 1 --body-file` | 実施（`scratch/turn-015-pr-body.md`。§R4.5 の要約 + 実行エンジン名） |
+
+- F3 のコードレビュー（diff `30d7a79`）: `_connect_polled` は `__init__` で `False`、`poll_connect` の `_setup_pending` 分岐の直後に初回だけ `NEED_WRITE` を返す 3 行。`AsyncConnection` に reset / reconnect 経路は無い（`PQresetStart` 不使用、grep 0）ので旗の戻しは不要。
+  `wait_*` / `_poll_to_ready` / `connect_blocking` / `__init__.mojo` は不変（diff に無い）。旧 docstring「either direction」「not fixed」は README / `__init__.mojo` / CHANGELOG に残っていない（grep 0）。
+  `is_leaking` の第 3 規則は「総成長 ≤ 許容 → False」を先に返してから rises を数えるので、既存 4 件の期待値は不変（`[100,100,100,120]` は rises 1 だが尾が 1 サンプル → True のまま）。`[100 ×4, 613 ×5]` → False、`[100,100,300,300,300,520 ×4]` → rises 2 → True。
+  単調増加の判定・`ABORT_PAGES` は不変。新テスト `…_even_when_refused` は port 1 を使い CI の 3 OS とも PASS（x86_64 0.15 ms / aarch64 0.24 ms / macOS 0.93 ms）
+- 文書の主張: VERIFICATION 冒頭の判定行と本節が一致。PLAN「追従先チェックリスト」の照合は checklist スクリプトで再実行（上表 #3）。件数の古い値（31 / 18）は PLAN F3 (d) の表が 32 / 20 に更新済みで本文に残っていない
+
+### R4.3 ローカル最終判定（round 4）
+
+- `pixi run db-reset`（3 台 Healthy）→ **`pixi run check` 6/6 PASS = 170 s**（12:40:07 → 12:42:57。閾値 247 s）。1/6 段 差分なし、両サーバー `skipped 1`（interval 対称 1 件）、6/6 段 `matched lines: 0`、`final_check: PASS`、rc 0（`scratch/turn-015-check.log`）
+
+### R4.4 CI 実測（round 4 / run `39094332643`）
+
+| ジョブ | 結果 | 所要 | `check` 段 | skipped | `.conda`（artifact `pq-conda-<os>`） |
+|---|---|---|---|---|---|
+| `check (ubuntu-latest)` | ✅ | 7m58s | 6/6、FAIL 0（03:38:59 → 03:46:19 = 440 s）、47 ファイル 1246 / 1246 PASS | 1 / 1 | **`pq-0.1.0-hb0f4dca_0.conda`**（462,606 B） |
+| `check (ubuntu-24.04-arm)` | ✅ | 8m28s | 6/6、FAIL 0（03:38:59 → 03:46:48 = 469 s）、1246 / 1246 PASS | 1 / 1 | **`pq-0.1.0-he8cfe8b_0.conda`**（462,605 B） |
+| `check (macos-latest)` | ✅ | 3m46s | 6/6、FAIL 0（6/6 段 03:42:06）、24 ファイル 633 / 633 PASS | **15** | **`pq-0.1.0-h60d57d3_0.conda`**（462,581 B） |
+
+- 3 ジョブとも setup-pixi / `pixi install --locked` / `pixi run check` / `pixi build` / `upload-artifact` ×2 の全ステップ success。`concurrency` の cancel なし。
+  run の注記は round 2〜3 と同じ 2 件（macOS arm64 の待ち時間 / `ubuntu-latest` の Ubuntu 26 移行は 2026-10-19 から = 今回もまだ Ubuntu 24.04 相当の系列 `6237` 台）
+
+### R4.5 受け入れ基準の最終判定（REQ §4。round 1〜3 で ✅ だった行は §2 / §0.5 / §R3.5 のまま）
+
+| 基準 | round 3 | round 4 | 確認したこと |
+|---|---|---|---|
+| A1〜A4 | ✅ | ✅ | round 1 §2 のまま。`pixi.lock` 不変（rc 0）、`check` PASS |
+| B1 / B5 / B7 | ✅ | ✅ | round 1 §2 のまま |
+| B2 | ✅ / ❌ | **✅ / ✅** | Linux 2 ジョブとも compose 3 台 → `pixi run check` 6/6 で緑 |
+| B3 | ❌ | **✅** | macOS: brew PG + fixtures + blackhole + `pixi run check` 6/6、`skipped 15`（`_skip_on_macos` 14 + interval 1） |
+| B4 / C3 | ✅（aarch64） | **✅（3 OS）** | 3 artifact に `.conda` 1 個ずつ、名前が互いに異なる |
+| B6 | ❌ | **✅** | **3 / 3 ジョブ緑**（run `39094332643`） |
+| C1 / C2 / C4 | ✅ | ✅ | round 1 §2 のまま（タグ push / Release 作成はしない = REQ §6） |
+| D1〜D4 | ✅ | ✅ | round 1 §2 のまま |
+| E1 / E2 | ✅ | ✅ | 3 ジョブとも `test_notify` 25/25 PASS |
+| F1 / F2 | ✅（ローカル） | **✅（ローカル + 3 OS）** | ローカル 170 s、CI の `check` は Linux 440〜469 s / macOS < 4 分、45 分の内側。6/6 段 `matched lines: 0`、`fmt` 差分なし |
+
+### R4.6 残留リスクの更新
+
+- §R3.6 新規 10（指摘 3 の機序は推定）→ **修正は効いた**（macOS で multi-host PASS、`could not receive data` 形の失敗は出ていない）。機序の直接観測は依然ないが、libpq の文書上の契約に揃えた変更なので差し戻し要因ではない
+- §R3.6 新規 11（形による除外の盲点）→ 変更なし（下の 13 を参照）
+- §R3.6 新規 12（Ubuntu 26 移行）→ 今回の run は移行前。移行後の最初の `push: main` / PR で `ubuntu-latest` の系列が変わり得る。人間がマージ後の main の run を一度見ること
+- **新規 13**: `is_leaking` の形による除外は **CI では実測されていない**（round 4 の 3 環境とも段が出ず、総成長 0〜1 ページで従来規則の内側）。規則の正しさは単体テスト 2 件（`[100 ×4, 613 ×5]` / `[100,100,300 ×3,520 ×4]`）と既存 4 件で担保。
+  段が次に出たときに緑になるかはそのときの run で分かる（x86_64 で 513 ページの段は round 3 の 1 回だけ）
+- §0.6 新規 9（CHANGELOG `0.1.0` に Phase 6 の成果が無い）→ 変更なし。v0.1.0 のタグを打つ前に人間が判断
+- §6-1（アクションのタグ固定）→ 変更なし
+
+### R4.7 次（reflect）への申し送り
+
+- マージは人間。PR #1 の 3 チェック緑を確認してから README「ブランチ保護（人間が設定）」→ マージ → 「リリース手順（人間が行う）」の順
+- round の履歴: F1（setup-pixi の入力）→ F2（macOS poll セマンティクス）→ F3（libpq の初回 poll 契約 + RSS の段）。3 件とも**開発機（linux-aarch64）では観測できない CI 固有**の赤で、REQ §6 の「CI 固有の失敗は verify の差し戻しで直す」設計どおり。verify_round 3 = 上限ちょうどで合格
 
 ## R3. round 3（turn 13）— F2 の回帰確認 + CI 実測
 

@@ -204,3 +204,14 @@
 - 次への注意: 次は **`/gsd-lite-verify`（round 4 = verify_round 上限。赤なら BLOCKED）**。push 済み（turn 13 の verify コミット + turn 14 の 2 コミットが PR #1 に載る）。確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しない = P5 / F3 の grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
   **F3 ① の判定は CI の macOS の `test_multi_host_conninfo_reaches_the_second_host` だけ**（ローカル Linux では経路差が出ない）。なお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）。
   **② は非決定的**: x86_64 が緑でも「段が出なかっただけ」の可能性があるので、3 ジョブの `connect/query/close RSS pages:` 行を VERIFICATION に写して段の有無を記録する（段が出て緑なら新規則が効いた証跡になる）
+
+## turn 15 — verify（round 4）— 合格（指摘 0 件）/ PR #1 の run 39094332643 は 3 ジョブとも緑 / PR 本文更新・reflect へ
+- やったこと: 開始時点で turn 14 の push による run `39094332643`（コミット `b0b4ea6`）が走行中だったので `gh run watch --exit-status` で待ちつつ、F3 の回帰 grep（`PGRES_POLLING_WRITING` 4 / `^def test_` 32・20・11 / F2 `POLLHUP/POLLERR` 0・`is_linux` 1 / F1 `cache: false` 1+3・旧 2 入力 0 / lock 不変）、
+  チェックリスト 101 key（turn 13 との差分は `trace_checklist_section` 10 → 11 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 170 s**。CI: **3 / 3 ジョブ緑**（x86_64 7m58s / aarch64 8m28s / macOS 3m46s）。
+  artifact 3 本（`scratch/turn-015-{macos,x64,arm}-artifact/`）で macOS の `test_multi_host_conninfo_reaches_the_second_host` PASS（6.3 ms）+ 新テスト + round 2 の 2 件 PASS、`skipped 15`、633/633。Linux 2 本は 1246/1246、`skipped 1` × 2。
+  RSS 系列は x86_64 `[6237 ×9]` / aarch64 `[4129, 4130 ×8]` / ローカル `[4213, 4214 ×8]`（段なし）。`.conda` 3 つ `hb0f4dca_0` / `he8cfe8b_0` / `h60d57d3_0` で互いに異なる（P5 解消）。
+  VERIFICATION §R4（回帰表 / CI 表 / 受け入れ基準の最終判定 / 残留リスク 13 / 申し送り）、`gh pr edit 1 --body-file scratch/turn-015-pr-body.md`。リモートありなのでローカルマージなし、`phase: reflect`。サブエージェント 0 本
+- 想定外: (1) `is_leaking` の形による除外は 3 環境とも段が出ず **CI では実測できなかった**（単体テスト 2 件で担保。残留リスク 13）。(2) F3 ① の効果は macOS の 1 テストが 1 回 PASS した事実のみ（round 2 も偶然 PASS していたクラス）。契約準拠の変更なので合格判定にしたが、確率的な赤が完全に消えた証明ではない
+- やり直し: 0 回
+- 次への注意: 次は **`/gsd-lite-reflect`**。マージは人間（PR #1 の 3 チェック緑 → README「ブランチ保護」→ マージ → 「リリース手順」）。reflect の材料: F1〜F3 の 3 round はすべて開発機で観測できない CI 固有の赤（setup-pixi 入力 / macOS poll / libpq 初回 poll 契約 + RSS の段）で、
+  verify_round 上限 3 ちょうどで合格。「round 2 以降は回帰確認だけ」の規則は守れたが、macOS 固有・非決定的なクラスは round 1 の格子では立てようがなかった（研究段階で macOS 実機が無い制約）。ブランチはマイルストーンブランチのまま終了する（checkout しない）
