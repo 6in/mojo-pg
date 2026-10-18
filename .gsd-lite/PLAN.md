@@ -102,10 +102,10 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
 
 ## Tasks
 
-- [ ] T1: 持ち越し 2 件（E1 = README 明記 / E2 = `_restore_collected` + テスト 1 件）+ `db-up` の待ち上限 + `TRACE.md` 新設 + `check` 基線
+- [x] T1: 持ち越し 2 件（E1 = README 明記 / E2 = `_restore_collected` + テスト 1 件）+ `db-up` の待ち上限 + `TRACE.md` 新設 + `check` 基線
   - 完了基準:
-    - (a) **E2**（REQ §2.3 / RESEARCH §2.14 推奨形 / 決めた事項 2）: `src/pq/async_conn.mojo` に private `def _restore_collected(mut self, out: List[Notification])`
-      （docstring 付き。`out` の要素を先頭に、続けて現在の `_pending` を並べた新しい `List` を `self._pending` に置く = 現状 `:1632-1637` の 5 行そのもの）。
+    - (a) **E2**（REQ §2.3 / RESEARCH §2.14 推奨形 / 決めた事項 2）: `src/pq/async_conn.mojo` に private `def _restore_collected(mut self, collected: List[Notification])`
+      （docstring 付き。`collected` の要素を先頭に、続けて現在の `_pending` を並べた新しい `List` を `self._pending` に置く = 現状 `:1632-1637` の 5 行そのもの）。
       `_collect_notifications`（`:1582`）の **2 つの `except`** から呼ぶ: `notifications()` 側（`:1627-1638`）は 5 行をヘルパ呼び出しに置き換えて `raise e^`、
       `wait_readable` 側（`:1656-1659`）は `TIMEOUT` なら従来どおり `return out^`、**それ以外はすべて**（`CONNECTION` も `USAGE` も）`self._restore_collected(out)` してから `raise e^`。
       `_collect_notifications` の docstring（`:1609-1616` の `Raises:`）に「collected notifications are put back in front of `_pending` on every raise」の趣旨を 1 文。
@@ -255,7 +255,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
 1. **E1 は案 A（README 明記のみ）**（REQ §2.3「plan が選ぶ」/ RESEARCH §2.13）。根拠: rc 141 は stdlib `print` が SIGPIPE 既定のまま write した結果で `cat` / `grep` と同じ Unix 標準挙動。案 B は `SIG_IGN` + 番兵 `write(2)` を
    examples 6 本に複製する必要があり（`_common.mojo` は `-I src` の経路に乗らない）、しかも `external_call["write"]` の署名を誤るとモジュールごとコンパイル不能（RESEARCH §0.5）。REQ §2.3「stdlib の挙動は変えない」にも案 A が近い。
    Phase 5 の格子 `turn-012-robust-regress.sh` の `> >(exit 0)` 軸の期待値 141 は**不変**
-2. **E2 は `_restore_collected(mut self, out: List[Notification])` ヘルパ**（RESEARCH §2.14 推奨形）。本体は現状 `async_conn.mojo:1632-1637` の 5 行（`out` → `_pending` の順の新リスト）。呼び出しは `notifications()` 側 `except`（`:1627`）と
+2. **E2 は `_restore_collected(mut self, collected: List[Notification])` ヘルパ**（RESEARCH §2.14 推奨形）。本体は現状 `async_conn.mojo:1632-1637` の 5 行（`out` → `_pending` の順の新リスト）。呼び出しは `notifications()` 側 `except`（`:1627`）と
    `wait_readable` 側 `except`（`:1656`）の 2 箇所、後者は `TIMEOUT` 以外**すべての kind**（REQ E2 の「`CONNECTION` 経路」は RESEARCH §5 の提案どおり広げて読む。`USAGE` も含む）。テストはヘルパ直叩き + `notifications()` 観測
    （経路は単一スレッドで到達不能: `close(PQsocket)` では `notifications()` 側が先に `CONNECTION` を投げる。`scratch/turn-001-notify-close.mojo`）
 3. **`pixi.toml` の差分は RESEARCH §2.1 の最小 manifest + `version = { workspace = true }`**（`scratch/turn-001-pkg-inherit` で実測済み）。backend `pixi-build-mojo` `0.2.*`（0.2.8.20261014.1408 が 3 プラットフォームにある）、

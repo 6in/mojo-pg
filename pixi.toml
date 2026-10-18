@@ -24,7 +24,9 @@ bench = "mojo run -I src examples/bench_formats.mojo"
 build = "mkdir -p build && mojo build -I src -o build/hello_libpq examples/hello_libpq.mojo"
 test = "bash tests/run_tests.sh"
 fmt = "mojo format src/ tests/ examples/ hello.mojo"
-db-up = "docker compose -f tests/docker-compose.yml up -d --wait"
+# --wait-timeout: without it `--wait` has no upper bound, so a server that
+# never turns healthy hangs the CI job until its own timeout.
+db-up = "docker compose -f tests/docker-compose.yml up -d --wait --wait-timeout 180"
 db-down = "docker compose -f tests/docker-compose.yml down -v"
 # フィクスチャ再適用（pq_test_ascii も消える）。`check` は呼ばない。
 db-reset = { depends-on = ["db-down", "db-up"] }

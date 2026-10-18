@@ -1579,6 +1579,24 @@ struct AsyncConnection(Movable):
             raise first_error.take()
         return results^
 
+    def _restore_collected(mut self, collected: List[Notification]):
+        """Put the notifications of `collected` back in front of `_pending`.
+
+        A rejection on a later round trip must not cost the caller the
+        notifications of the earlier ones: what a collecting wait has in hand
+        goes back ahead of what is already held, so the next call delivers
+        everything in the order it arrived.
+
+        Args:
+            collected: The notifications collected so far, oldest first.
+        """
+        var restored = List[Notification]()
+        for i in range(len(collected)):
+            restored.append(collected[i].copy())
+        for i in range(len(self._pending)):
+            restored.append(self._pending[i].copy())
+        self._pending = restored^
+
     def _collect_notifications(
         mut self, method: StaticString, n: Int, timeout_ms: Int
     ) raises PgError -> List[Notification]:
@@ -1613,7 +1631,9 @@ struct AsyncConnection(Movable):
                 notification whose text is not UTF-8 (see `notifications`),
                 or `PgErrorKind.CONNECTION` when the connection is lost --
                 `<method>() called on a lost connection` once the status has
-                turned `CONNECTION_BAD`.
+                turned `CONNECTION_BAD`. On every raise the notifications
+                collected so far are put back in front of `_pending`, so the
+                next call still delivers them.
         """
         _reject_bad_timeout(timeout_ms)
         self._reject_connecting(method)
@@ -1625,16 +1645,7 @@ struct AsyncConnection(Movable):
             try:
                 found = self.notifications()
             except e:
-                # A rejection on a later round trip must not cost the caller
-                # the notifications of the earlier ones: what this call has
-                # collected goes back in front of `_pending`, so the next
-                # call delivers it in the order it arrived.
-                var restored = List[Notification]()
-                for i in range(len(out)):
-                    restored.append(out[i].copy())
-                for i in range(len(self._pending)):
-                    restored.append(self._pending[i].copy())
-                self._pending = restored^
+                self._restore_collected(out)
                 raise e^
             for i in range(len(found)):
                 if len(out) < n:
@@ -1656,6 +1667,7 @@ struct AsyncConnection(Movable):
             except e:
                 if e.kind == PgErrorKind.TIMEOUT:
                     return out^
+                self._restore_collected(out)
                 raise e^
 
     def wait_notification(

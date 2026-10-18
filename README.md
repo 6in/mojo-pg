@@ -398,6 +398,14 @@ pixi run db-down    # コンテナと volume を破棄
   より幅に厳しく、`param_type_oid(i)` が報告する幅と**同じ**値を要求します
   （`$1::int4` に `Int`（`int8`）を渡すと SQLSTATE `22P03`）。
 - `pq` が `ref` を返すことはありません。オリジンはスライスと一緒に運ばれます。
+- **出力先（パイプ）が先に閉じると終了コードは 141 です。** `examples/` や
+  `bench` の出力を `head` などに繋いだまま読み手が閉じた場合、Mojo の `print`
+  は SIGPIPE の既定動作のまま書き込むため、プロセスはシグナルで終了します
+  （`cat` / `grep` と同じ Unix 標準の挙動で、`pq` 側では抑止しません）。
+- `examples/bench_psycopg.py` だけは Python 公式手順（`signal` モジュールが
+  "Note on SIGPIPE" で示す形。`OSError`（`BrokenPipeError`）を捕まえて fd 1 を
+  `/dev/null` に向け直す）で検知するため、同じ状況で終了コード 1 を返します。
+  この非対称は意図的で、それぞれの言語の既定に合わせています。
 
 ## ライセンス
 
