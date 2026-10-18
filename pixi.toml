@@ -5,6 +5,9 @@ version = "0.1.0"
 license = "Apache-2.0"
 channels = ["https://conda.modular.com/max", "conda-forge"]
 platforms = ["linux-aarch64", "linux-64", "osx-arm64"]
+# pixi-build is a preview feature: the [package] schema below can change
+# before it stabilizes.
+preview = ["pixi-build"]
 
 [dependencies]
 mojo = ">=1.1.0,<2"
@@ -49,3 +52,35 @@ bench-psycopg = "python examples/bench_psycopg.py"
 
 [environments]
 bench = { features = ["bench"], solve-group = "default" }
+
+# Conda package built by `pixi build -o dist`. The workspace is `pgcon`; the
+# distributed package -- and the Mojo package users import -- is `pq`.
+[package]
+name = "pq"
+version = { workspace = true }
+description = { workspace = true }
+license = { workspace = true }
+
+[package.build]
+backend = { name = "pixi-build-mojo", version = "0.2.*", channels = [
+  "https://prefix.dev/pixi-build-backends",
+  "https://prefix.dev/conda-forge",
+] }
+
+# Explicit: auto-derive looks for <root>/pq/__init__.mojo then
+# <root>/src/__init__.mojo, and finds neither -- the sources are in src/pq.
+[package.build.config.pkg]
+name = "pq"
+path = "src/pq"
+
+[package.host-dependencies]
+mojo-compiler = ">=1.1.0,<1.2"
+
+[package.build-dependencies]
+mojo-compiler = ">=1.1.0,<1.2"
+
+# Runtime: the compiled pq.mojoc needs the same Mojo series, and libpq is
+# dlopen'd at run time.
+[package.run-dependencies]
+mojo-compiler = ">=1.1.0,<1.2"
+libpq = ">=14"
