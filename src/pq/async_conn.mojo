@@ -329,6 +329,16 @@ struct AsyncConnection(Movable):
     that overtakes the `SET`.
     """
 
+    var _connect_polled: Bool
+    """Whether `PQconnectPoll` has been called on this handle yet.
+
+    libpq asks a caller to behave as if the poll just after `PQconnectStart`
+    had returned `PGRES_POLLING_WRITING`, so the first `poll_connect` answers
+    `NEED_WRITE` from this flag instead of asking. Calling `PQconnectPoll`
+    first reads `SO_ERROR` before the kernel has recorded a refusal, which
+    costs libpq its walk to the next host in a multi-host conninfo.
+    """
+
     var _single_row_allowed: Bool
     """Whether `set_single_row_mode` is still in its window.
 
@@ -366,6 +376,7 @@ struct AsyncConnection(Movable):
         self._pq = pq
         self._state = AsyncState.CONNECTING
         self._setup_pending = False
+        self._connect_polled = False
         self._single_row_allowed = False
         self._pending = List[Notification]()
 
@@ -666,10 +677,13 @@ struct AsyncConnection(Movable):
         """Advance the handshake by one step and report what to wait for.
 
         Call this after `start`, wait for the direction it asks for, then call
-        it again, until it answers `READY`. The first answer is not fixed --
-        libpq may want either direction depending on how far the kernel got
-        with the connect -- so act on the returned value rather than assuming
-        one.
+        it again, until it answers `READY`. The first answer is always
+        `NEED_WRITE`: libpq defines the state just after `PQconnectStart` as
+        if the last poll had returned `PGRES_POLLING_WRITING`, and asking
+        `PQconnectPoll` before that wait reads `SO_ERROR` before the kernel
+        has recorded a refusal -- measured on macOS, where the refusal then
+        arrives as a failed read instead of libpq walking on to the next host
+        of a multi-host conninfo.
 
         `READY` covers more than libpq's own `CONNECTION_OK`: once the socket
         is up, `_SESSION_SETUP_SQL` is sent as the session's first command and
@@ -695,6 +709,9 @@ struct AsyncConnection(Movable):
             return PollState.READY
         if self._setup_pending:
             return self._drain_setup()
+        if not self._connect_polled:
+            self._connect_polled = True
+            return PollState.NEED_WRITE
         var polling = self._pq[].PQconnectPoll(self._conn)
         if polling == PGRES_POLLING_READING:
             return PollState.NEED_READ
@@ -722,7 +739,12 @@ struct AsyncConnection(Movable):
 
         Returns as soon as a read would not block, even if the peer has also
         hung up: the pending bytes are what carry the server's last word on
-        why, so libpq is left to read them and produce the real message.
+        why, so libpq is left to read them and produce the real message. A
+        socket that reports only hangup / error returns too -- the reason for
+        the disconnect is named by the next libpq call (`PQconsumeInput`'s
+        `server closed the connection unexpectedly`, `PQconnectPoll`'s
+        `Connection refused`), which is kinder than a generic poll message and
+        does not depend on how the platform pairs POLLHUP with POLLIN.
 
         In state `SENDING` this is the wrong thing to wait for -- the server
         cannot answer a command it has not fully received, so waiting for
@@ -736,9 +758,8 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.TIMEOUT` with `wait_readable timed out after
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
-                the connection has no socket or the socket reported only
-                hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                outside `-1 .. TIMEOUT_MS_MAX`.
+                the connection has no socket, or `PgErrorKind.USAGE` when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -751,16 +772,17 @@ struct AsyncConnection(Movable):
                 PgErrorKind.TIMEOUT,
                 String("wait_readable timed out after ", timeout_ms, " ms"),
             )
-        if events.readable:
-            return
-        if events.hangup or events.error:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                "connection socket closed (POLLHUP/POLLERR)",
-            )
 
     def wait_writable(self, timeout_ms: Int) raises PgError:
         """Block until the connection's socket can accept more data.
+
+        A socket that reports only hangup / error returns as well, rather than
+        raising on its own: POSIX makes POLLHUP and POLLOUT exclusive and macOS
+        follows it (Linux raises both on a socket), so a refused connect shows
+        up as a bare hangup there. Letting the call return hands the diagnosis
+        to the next libpq call -- `PQconnectPoll` reads `SO_ERROR` and reports
+        `Connection refused`, `PQflush` fails the send -- so the caller sees the
+        real cause on every platform.
 
         Args:
             timeout_ms: Milliseconds to wait. `0` polls the current state;
@@ -769,9 +791,8 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.TIMEOUT` with `wait_writable timed out after
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
-                the connection has no socket or the socket reported only
-                hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                outside `-1 .. TIMEOUT_MS_MAX`.
+                the connection has no socket, or `PgErrorKind.USAGE` when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -783,13 +804,6 @@ struct AsyncConnection(Movable):
             raise PgError(
                 PgErrorKind.TIMEOUT,
                 String("wait_writable timed out after ", timeout_ms, " ms"),
-            )
-        if events.writable:
-            return
-        if events.hangup or events.error:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                "connection socket closed (POLLHUP/POLLERR)",
             )
 
     @staticmethod
@@ -1579,6 +1593,24 @@ struct AsyncConnection(Movable):
             raise first_error.take()
         return results^
 
+    def _restore_collected(mut self, collected: List[Notification]):
+        """Put the notifications of `collected` back in front of `_pending`.
+
+        A rejection on a later round trip must not cost the caller the
+        notifications of the earlier ones: what a collecting wait has in hand
+        goes back ahead of what is already held, so the next call delivers
+        everything in the order it arrived.
+
+        Args:
+            collected: The notifications collected so far, oldest first.
+        """
+        var restored = List[Notification]()
+        for i in range(len(collected)):
+            restored.append(collected[i].copy())
+        for i in range(len(self._pending)):
+            restored.append(self._pending[i].copy())
+        self._pending = restored^
+
     def _collect_notifications(
         mut self, method: StaticString, n: Int, timeout_ms: Int
     ) raises PgError -> List[Notification]:
@@ -1613,7 +1645,9 @@ struct AsyncConnection(Movable):
                 notification whose text is not UTF-8 (see `notifications`),
                 or `PgErrorKind.CONNECTION` when the connection is lost --
                 `<method>() called on a lost connection` once the status has
-                turned `CONNECTION_BAD`.
+                turned `CONNECTION_BAD`. On every raise the notifications
+                collected so far are put back in front of `_pending`, so the
+                next call still delivers them.
         """
         _reject_bad_timeout(timeout_ms)
         self._reject_connecting(method)
@@ -1625,16 +1659,7 @@ struct AsyncConnection(Movable):
             try:
                 found = self.notifications()
             except e:
-                # A rejection on a later round trip must not cost the caller
-                # the notifications of the earlier ones: what this call has
-                # collected goes back in front of `_pending`, so the next
-                # call delivers it in the order it arrived.
-                var restored = List[Notification]()
-                for i in range(len(out)):
-                    restored.append(out[i].copy())
-                for i in range(len(self._pending)):
-                    restored.append(self._pending[i].copy())
-                self._pending = restored^
+                self._restore_collected(out)
                 raise e^
             for i in range(len(found)):
                 if len(out) < n:
@@ -1656,6 +1681,7 @@ struct AsyncConnection(Movable):
             except e:
                 if e.kind == PgErrorKind.TIMEOUT:
                     return out^
+                self._restore_collected(out)
                 raise e^
 
     def wait_notification(

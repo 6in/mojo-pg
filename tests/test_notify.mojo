@@ -1031,6 +1031,43 @@ def test_wait_notifications_keeps_collected_ones_across_two_round_trips() raises
     _ = _drop_ascii_database()
 
 
+def test_restore_collected_puts_them_back_in_front() raises:
+    var listener = _connect_blocking(_conninfo(), 5000)
+    _listen(listener, "pq_t6_rc")
+    var sender = _open(_conninfo())
+    _ = _execute(sender, "BEGIN")
+    _ = _execute(sender, "NOTIFY pq_t6_rc, 'one'")
+    _ = _execute(sender, "NOTIFY pq_t6_rc, 'two'")
+    _ = _execute(sender, "NOTIFY pq_t6_rc, 'three'")
+    _ = _execute(sender, "COMMIT")
+    var got = _wait_notifications(listener, 1, 5000)
+    assert_equal(len(got), 1)
+    assert_equal(got[0].payload, "one")
+    # The round trip carried all three, so the two beyond the one asked for
+    # are held. `_restore_collected` is what a rejection on a later round trip
+    # runs, and the one already returned has to go back *in front* of them.
+    # The helper is reached directly because no single-threaded caller can
+    # provoke the raise it belongs to: closing the socket makes
+    # `notifications` fail first (see RESEARCH §2.14).
+    assert_equal(len(listener._pending), 2)
+    listener._restore_collected(got)
+    assert_equal(len(listener._pending), 3)
+    assert_equal(listener._pending[0].payload, "one")
+    assert_equal(listener._pending[1].payload, "two")
+    assert_equal(listener._pending[2].payload, "three")
+    # The public API sees the same order.
+    var kept = _notifications(listener)
+    assert_equal(len(kept), 3)
+    assert_equal(kept[0].payload, "one")
+    assert_equal(kept[1].payload, "two")
+    assert_equal(kept[2].payload, "three")
+    # Restoring nothing is not a special case: the queue is left as it is.
+    listener._restore_collected(List[Notification]())
+    assert_equal(len(listener._pending), 0)
+    assert_equal(len(_notifications(listener)), 0)
+    _ = sender^
+
+
 def test_unlisten_stops_delivery() raises:
     var listener = _connect_blocking(_conninfo(), 5000)
     _listen(listener, "pq_t5_un")

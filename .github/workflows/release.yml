@@ -1,0 +1,140 @@
+# Release for pq (mojo-libpq).
+#
+# Triggered by pushing a release tag: the tag is checked against pixi.toml's
+# version, the 3-OS matrix builds a conda package each, and one job attaches all
+# of them plus a source tarball to a GitHub Release whose body is the matching
+# CHANGELOG.md section.
+#
+# `workflow_dispatch` is a dry run that stops after `build`: the `release` job
+# is gated on `github.ref_type == 'tag'`. A manual dispatch can only be started
+# from a file that already exists on the default branch, so it is useful after
+# merging, not for validating this file in a pull request.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Only the `release` job writes anything, and it raises the permission for
+# itself; every other job stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    name: verify-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same inputs as ci.yml: with the install turned off the action refuses
+      # both its caching and its lock inputs (v0.11.2 src/options.ts). This
+      # job only reads the version, so it never installs the environment.
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          pixi-version: v0.82.0
+          cache: false
+          run-install: false
+
+      # Tag pushes only. On a dispatch there is no tag to compare against.
+      - name: tag matches pixi.toml version
+        if: github.ref_type == 'tag'
+        run: bash .github/scripts/check-tag-version.sh "$GITHUB_REF_NAME"
+
+      # Fails the release before anything is built if the version has no
+      # CHANGELOG section yet (the Release body comes from it).
+      - name: CHANGELOG section exists
+        run: |
+          python3 .github/scripts/release-notes.py "$(pixi workspace version get)" > notes.md
+          test -s notes.md
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # One red OS must not cancel the other two; a partial build is still
+      # worth inspecting before retrying the tag.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          pixi-version: v0.82.0
+          cache: false
+          run-install: false
+
+      - name: pixi install
+        run: bash .github/scripts/retry.sh 3 15 pixi install --locked
+
+      - name: pixi build
+        run: bash .github/scripts/retry.sh 3 15 pixi build -o dist
+
+      - name: list dist
+        run: ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-conda-${{ matrix.os }}
+          path: dist/*.conda
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only job that writes to the repository.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          pixi-version: v0.82.0
+          cache: false
+          run-install: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-conda-*
+          path: dist
+          merge-multiple: true
+
+      # The three builds land in one flat directory, so two platforms producing
+      # the same file name would silently overwrite each other.
+      - name: distinct attachment names
+        run: |
+          dups="$(ls dist/*.conda | xargs -n1 basename | sort | uniq -d)"
+          if [ -n "$dups" ]; then
+            echo "duplicate .conda file names across platforms:" >&2
+            echo "$dups" >&2
+            echo "rename them per subdir (e.g. add -<subdir>) before retrying this tag." >&2
+            exit 1
+          fi
+          ls -l dist
+
+      - name: source tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="pq-$VERSION/" -o "pq-$VERSION.tar.gz" HEAD
+          ls -l "pq-$VERSION.tar.gz"
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 .github/scripts/release-notes.py "$VERSION" > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "pq $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            dist/*.conda "pq-$VERSION.tar.gz"

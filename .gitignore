@@ -5,5 +5,8 @@
 # mojo build output
 build/
 *.mojopkg
+
+# `pixi build -o dist` output
+dist/
 .gsd-lite/logs/
 .gsd-lite/loop.pid

@@ -1,0 +1,123 @@
+# CI for pq (mojo-libpq).
+#
+# One job, `check`, across a 3-OS matrix. The OS differences live in step-level
+# `if: runner.os == ...` conditions rather than in separate jobs, so all three
+# runners execute the very same `pixi run check` -- the local acceptance gate
+# (tests/final_check.sh, 6 stages) with no CI-only variant to drift.
+#
+# There is no Windows job: Mojo's native toolchain is not provided for Windows
+# (there is no windows-* platform in pixi.toml, and no mojo-compiler build to
+# install). Revisit when Modular ships one.
+#
+# Pull requests from forks are expected to work as-is: no step reads a secret
+# and the default token only needs `contents: read`. That path is untested --
+# every PR in this milestone comes from a branch of this repository.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Nothing here writes to the repository; artifacts are uploaded with the
+# runtime token, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+# A new push to the same ref cancels the previous run: a PR pushed twice in a
+# row would otherwise keep 3 jobs per push queued on the public runner pool.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Estimate is 8-13 min (plus 2-4 min of brew on macOS); 45 leaves room for
+    # a cold pixi cache without letting a hung server burn the whole hour.
+    timeout-minutes: 45
+    strategy:
+      # One red OS must not cancel the other two: their logs are the only way
+      # to tell an OS-specific failure from a real regression.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The install is skipped here and run through retry.sh below instead,
+      # since setup-pixi has no retry input of its own. With the install
+      # turned off the action refuses both its caching and its lock inputs
+      # (v0.11.2 src/options.ts), so the environment is fetched fresh on
+      # every run (+1-3 min) and the lock is enforced by the --locked flag
+      # on the install step below.
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          pixi-version: v0.82.0
+          cache: false
+          run-install: false
+
+      - name: pixi install
+        run: bash .github/scripts/retry.sh 3 15 pixi install --locked
+
+      # Linux only: tests/docker-compose.yml brings up postgres:17, postgres:14
+      # and the blackhole listener. macOS runners have no Docker.
+      - name: docker compose pull
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/retry.sh 3 15 docker compose -f tests/docker-compose.yml pull
+
+      - name: db-up
+        if: runner.os == 'Linux'
+        run: pixi run db-up
+
+      # macOS only: one brew-installed postgresql@17 on 5432, with scram auth
+      # so the wrong-password tests still fail the way they do against compose.
+      - name: PostgreSQL (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: bash .github/scripts/macos-postgres.sh
+
+      # macOS only: stand in for the compose `blackhole` service on 54399 (a
+      # listener that accepts and never answers) so
+      # test_connect_blocking_times_out runs instead of skipping.
+      # stdout/stderr must go to a file: a background process holding the step's
+      # pipe keeps the step from ever finishing.
+      - name: blackhole listener (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          nohup python3 .github/scripts/blackhole.py 54399 > "$RUNNER_TEMP/blackhole.log" 2>&1 &
+          sleep 1
+          python3 -c "import socket; s=socket.create_connection(('127.0.0.1', 54399), 5); s.close(); print('blackhole 54399 accepting')"
+
+      - name: pixi run check
+        env:
+          # Linux runs both compose servers (the run_tests.sh default); macOS
+          # has the single brew server, so the suite is pinned to it. key=value
+          # form is required -- run_tests.sh appends ` password=...` to build a
+          # deliberately-wrong-password conninfo.
+          PQ_TEST_CONNINFO: ${{ runner.os == 'macOS' && 'host=127.0.0.1 port=5432 user=pq password=pq dbname=pq_test' || '' }}
+        run: pixi run check
+
+      - name: pixi build
+        run: bash .github/scripts/retry.sh 3 15 pixi build -o dist
+
+      - name: list dist
+        run: ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pq-conda-${{ matrix.os }}
+          path: dist/*.conda
+          if-no-files-found: error
+
+      # Always: the 6-stage log is what a failing run is diagnosed from.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: final-check-log-${{ matrix.os }}
+          path: build/final_check.log
+          if-no-files-found: warn
