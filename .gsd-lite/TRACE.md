@@ -306,6 +306,76 @@ PATH を足すだけのラッパ `scratch/turn-006-check-tag.sh` から 3 ケー
 T4 は YAML / Python / shell / Markdown のみで Mojo 側は未変更なので turn 3（189 s）/ 4（183 s）/
 5（173 s）と同じ範囲。`-- 127.0.0.1:54314 skipped 1`（PG14 側の leak 1 件）も従来どおり。
 
+## チェックリスト（turn 7）
+
+生出力は `.gsd-lite/logs/phase6-packaging-ci/scratch/turn-007-checklist.log`。
+turn 6 のログとの差分は **`readme_*` の 19 key + `readme_unverified_windows` + `trace_checklist_section` だけ**
+（後者は turn 6 が checklist を回した後に TRACE 節を書いたため 3 → 4）。
+
+### T5 README（D1〜D4 / B7 の README 側）
+
+| key | 値 | 期待値 | 判定 |
+|---|---|---|---|
+| `readme_en_heading` | 1 | 1 | OK |
+| `readme_git_dep` | 2 | ≥ 2 | OK（英語節 + 日本語節） |
+| `readme_tag_v010` | 3 | ≥ 2 | OK（英語節 1 + 日本語節 2 = TOML と「v0.1.0 リリース後に使える」の注記） |
+| `readme_preview_pixi_build` | 4 | ≥ 2 | OK（両節の TOML + 散文での言及 2） |
+| `readme_rattler_index` | 2 | ≥ 1 | OK（両節の `pixi exec --spec rattler-index rattler-index fs`） |
+| `readme_ci_heading` | 1 | 1 | OK |
+| `readme_job_name_ubuntu` / `_arm` / `_macos` | 2 / 2 / 2 | ≥ 1 ×3 | OK（CI 小節の表 + ブランチ保護の `contexts`） |
+| `readme_required_status_checks` | 1 | ≥ 1 | OK（`protection.json`） |
+| `readme_branch_protection` | 1 | ≥ 1 | OK（`### ブランチ保護（人間が設定）`） |
+| `readme_windows_toolchain` | 2 | ≥ 2 | OK（既存の「Windows の状態」+ CI 小節の不在理由） |
+| `readme_changelog` | 2 | ≥ 1 | OK（リリース手順 1. と 5.） |
+| `readme_release_workflow` | 2 | ≥ 1 | OK（CI 小節の `workflow_dispatch` + リリース手順 5.） |
+| `readme_wait_timeout_180` | 1 | ≥ 1 | OK（CI 小節の待ち上限 3 段階） |
+| `readme_pg_ctl_60` | 1 | ≥ 1 | OK（同上） |
+| `readme_fork` | 1 | ≥ 1 | OK（CI 小節。未検証と明記 = P24） |
+| `readme_h2` | 11 | 11 | OK（10 → 11。English 節 +1 だけ。CI / ブランチ保護 / リリース手順 / 自分のプロジェクトから使う は `###`） |
+
+### T5 の不変行
+
+| key | 値 | 期待値 | 判定 |
+|---|---|---|---|
+| `readme_dash_I_src` | 2 | ≥ 1 | OK（経路 3 の見出し下 + コマンド） |
+| `readme_six_stages` | 1 | 1 | OK（**意図的に増やさなかった**: CI 小節では「6 段」を使わず「`tests/final_check.sh`」「1 工程」と書いた） |
+| `readme_compose_three` | 2 | 2 | OK（新規の「3 つです」を書いていない。待ち上限は「3 段階」、経路は「3 つあり」と表記） |
+| `readme_unverified_windows` | 4 | ≥ 3 | OK（3 → 4。CI 小節の fork 未検証が +1） |
+| `readme_sigpipe` / `readme_rc_141` | 2 / 1 | ≥ 1 ×2 | OK（T1 のまま不変） |
+
+### T1 / T2 / T3 / T4 / 全体（不変）
+
+turn 6 のログと**完全一致**（上の差分のとおり `readme_*` 以外は 1 key も動いていない）。
+`pixi_lock_changed_vs_main=0` / `src_def_ref_return=0` / `test_file_count=24` / `examples_mojo_count=7` /
+`final_check_examples=5` / `tests_sh_bash4_only=0` / `workflows_files=2` / `all_secrets_refs=0` /
+`all_contents_write=1` も不変。
+
+## `check` の所要（turn 7）
+
+| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
+|---|---|---|---|---|---|
+| 7 | T5 | `pixi run check` | 2026-10-18T11:11:22+09:00 → 2026-10-18T11:14:18+09:00 | **176 s** | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
+
+T5 は `README.md` 1 ファイルのみ（Mojo / YAML / スクリプト未変更）なので
+turn 3（189 s）/ 4（183 s）/ 5（173 s）/ 6（170 s）と同じ範囲。
+README は `check` の 6 工程いずれの入力でもない（`mojo format` の対象外、`build/final_check.log` に入らない）ため、
+6/6 工程の `matched lines in build/final_check.log: 0` も不変。
+`-- 127.0.0.1:54314 skipped 1`（PG14 側の leak 1 件）も従来どおり。
+生出力は `scratch/turn-007-check-stdout.log`。
+
+## README に書いたコマンドの実測根拠（turn 7。P18）
+
+| README の記述 | 実測した turn / 証跡 |
+|---|---|
+| git 依存（`preview` + 2 チャンネル + `pq = { git = …, tag = … }`） | turn 4 の A2 git 経路（`scratch/turn-004-consumer-git/pixi.toml` + `turn-004-consumer-git.log`）。**実測は `branch = "gsd-lite/phase6-packaging-ci"`** で、README は `tag = "v0.1.0"` の形。タグは未作成なので「v0.1.0 のリリース後に使える」と注記した（決めた事項 13） |
+| Release `.conda` + `rattler-index fs` + `file://` チャンネル + `pq = "==0.1.0"` | turn 4 の A2 dl 経路（`scratch/turn-004-consumer-dl/pixi.toml` + `turn-004-consumer-dl.log`、`turn-004-dl-channel/`） |
+| `-I src`（開発時） | 既存（Phase 1〜5 から不変） |
+| `pixi run package` は配布手段でない | `pixi.toml:38`（`mojo precompile … -o build/pq.mojoc`）。REQ §2.1 |
+| CI のジョブ名 3 つ / 待ち上限 3 値 / artifact 名 | `.github/workflows/ci.yml:36,40,46,105,112,120` と `pixi.toml:32`、`macos-postgres.sh` の `pg_ctl -w -t 60`（turn 5） |
+| macOS で PG 14 が回らない / leak が SKIP | `run_tests.sh:37-38`（`PQ_TEST_CONNINFO` が 1 台に固定）、`test_leak.mojo:788`（`RSS sampling is Linux-only`） |
+| `workflow_dispatch` は既定ブランチ必須 | P13（RESEARCH。GitHub の仕様。実測はしていない = 仕様の引用と明記） |
+| `gh api … /branches/main/protection --input protection.json` | **未実行**（D15 / REQ §6「impl はリポジトリ設定を変えない」）。README にも「無人ターンは設定しません」と明記。verify / 人間が実行する |
+
 ## 受け入れ基準対応表
 
 T6 で記入（REQ §4 の A1〜F2）。

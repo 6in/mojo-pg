@@ -211,7 +211,7 @@ gh run list --branch gsd-lite/phase6-packaging-ci --limit 5   # T6: push で CI 
     - A: `CHANGELOG.md`（対象: `CHANGELOG.md` のみ。形式と見出しは決めた事項 11 を「必ず満たす 1 行」として渡す。`archive/*/REQUIREMENTS.md` を読んで要約）
     - 親: `release.yml` + 2 スクリプト + (b)(c)(e)(f)
 
-- [ ] T5: README（英語の概要 + インストール節 / 日本語インストール節の pixi 依存指定 / CI 小節 / ブランチ保護手順 / Windows 理由 / リリース手順）（D1〜D4、B7 の README 側）
+- [x] T5: README（英語の概要 + インストール節 / 日本語インストール節の pixi 依存指定 / CI 小節 / ブランチ保護手順 / Windows 理由 / リリース手順）（D1〜D4、B7 の README 側）
   - 完了基準:
     - (a) 先頭の日本語段落（`README.md:1-5`）の直後に **`## English summary and install`** を 1 節（英語。決めた事項 13）: 2〜4 文の概要（libpq FFI、sync / async / binary / LISTEN-NOTIFY、Mojo 1.1.0、Linux + macOS、Windows untested）+
       インストール 2 経路のコード片 — (1) `pixi.toml` の `[dependencies]` に `pq = { git = "https://github.com/6in/mojo-pg.git", tag = "v0.1.0" }`（`[workspace]` に `preview = ["pixi-build"]`、channels `https://conda.modular.com/max` + `conda-forge` が必要と 1 文）、

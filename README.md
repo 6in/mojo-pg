@@ -4,6 +4,58 @@ libpq を C FFI 経由で呼ぶ、Mojo 用の PostgreSQL クライアントで�
 パラメータバインド・トランザクション・バイナリ形式の結果・非同期接続・
 `LISTEN` / `NOTIFY` を扱えます。
 
+## English summary and install
+
+`pq` is a PostgreSQL client for Mojo that calls libpq through the C FFI. It
+covers synchronous connections, `$1` parameter binding, transactions and
+savepoints, text and binary result decoding (19 types), asynchronous
+connections with cancellation, and `LISTEN` / `NOTIFY`. It targets Mojo 1.1.0
+on Linux (x86_64, aarch64) and macOS (arm64); the Windows code paths exist but
+are untested.
+
+Two install routes are supported, both of them measured. First, depend on the
+git repository — this needs `preview = ["pixi-build"]` in your `[workspace]`
+and both the `https://conda.modular.com/max` and `conda-forge` channels,
+because the package is built on your machine by the `pixi-build-mojo` backend:
+
+```toml
+[workspace]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-aarch64"]
+preview = ["pixi-build"]
+
+[dependencies]
+mojo = ">=1.1.0,<2"
+pq = { git = "https://github.com/6in/mojo-pg.git", tag = "v0.1.0" }
+```
+
+Second, take a `.conda` file from a GitHub Release, put it in
+`<dir>/<subdir>/` (for example `my-channel/linux-aarch64/`), index the
+directory, and point pixi at it as a local channel. No build step and no
+`preview` flag:
+
+```bash
+pixi exec --spec rattler-index rattler-index fs my-channel
+```
+
+```toml
+[workspace]
+channels = ["file:///abs/path/to/my-channel", "https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+mojo = ">=1.1.0,<2"
+pq = "==0.1.0"
+```
+
+Either way the import is the same:
+
+```mojo
+from pq import Connection
+
+var conn = Connection.open("host=127.0.0.1 port=5432 user=pq dbname=pq_test")
+```
+
 ## 概要と対応環境
 
 | 項目 | 内容 |
@@ -11,6 +63,7 @@ libpq を C FFI 経由で呼ぶ、Mojo 用の PostgreSQL クライアントで�
 | Mojo | 1.1.0 |
 | libpq | 14 以上（`PQlibVersion()` で確認。それより古ければ候補として捨てる） |
 | OS | Linux / macOS。**Windows は未検証**（コードはあるが実行していません。「Windows の状態」参照） |
+| CI | Linux x86_64 / aarch64 / macOS arm64（「テストの回し方」の `CI` 参照） |
 | PostgreSQL サーバー | 14 / 17 でテスト |
 
 できること: 同期接続（`Connection`）、`$1` 形式のパラメータバインド（`Param`）、
@@ -33,12 +86,59 @@ pixi install
 pixi run hello-libpq   # libpq が読めているかの確認（接続はしない）
 ```
 
-自分のプロジェクトから使うときは `src/` を import パスに加えます
-（`pixi.toml` の各タスクが付けている `-I src` と同じことです）。
+### 自分のプロジェクトから使う
+
+経路は 3 つあり、上から順に試すのが楽です。
+
+**1. git 依存（推奨）** — `pixi` が `pixi-build-mojo` バックエンドで
+リポジトリをその場でビルドします。`[workspace]` に
+`preview = ["pixi-build"]`（pixi-build はプレビュー機能のため）と、
+`https://conda.modular.com/max` + `conda-forge` の 2 チャンネルが必要です。
+利用側でビルドが走るので初回は数十秒〜数分かかり、ネットワークも要ります。
+
+```toml
+[workspace]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-aarch64"]
+preview = ["pixi-build"]
+
+[dependencies]
+mojo = ">=1.1.0,<2"
+pq = { git = "https://github.com/6in/mojo-pg.git", tag = "v0.1.0" }
+```
+
+`tag = "v0.1.0"` が使えるのは v0.1.0 のリリース後です。それ以前は
+`branch = "main"` などを指定してください。
+
+**2. Release の `.conda`** — GitHub Release に添付された `.conda` を
+`<ディレクトリ>/<サブディレクトリ>/`（例 `my-channel/linux-aarch64/`）に置き、
+索引を作ってローカルチャンネルとして渡します。利用側でのビルドは走らず、
+`preview` の指定も要りません。
+
+```bash
+pixi exec --spec rattler-index rattler-index fs my-channel
+```
+
+```toml
+[workspace]
+channels = ["file:///abs/path/to/my-channel", "https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-aarch64"]
+
+[dependencies]
+mojo = ">=1.1.0,<2"
+pq = "==0.1.0"
+```
+
+**3. `-I src`（このリポジトリを開発するとき）** — `src/` を import パスに
+加えるだけです（`pixi.toml` の各タスクが付けている `-I src` と同じことです）。
 
 ```bash
 mojo run -I /path/to/pgcon/src your_app.mojo
 ```
+
+なお `pixi run package`（`build/pq.mojoc` を作る）は配布手段では**ありません**。
+ビルドが通ることの確認と、`check` の 1 工程としてのコンパイル検査用です。
+配布は上の 1 / 2 の経路（`pixi build` が作る `.conda`）で行います。
 
 ### libpq の探索順
 
@@ -366,6 +466,88 @@ pixi run db-down    # コンテナと volume を破棄
 そのまま `PQconnectdb` に渡すので URI でも動きます。
 フィクスチャが汚れたとき（テストが作った一時データベースが残っているなど）は
 `pixi run db-reset` でまるごと作り直します。
+
+### CI
+
+`.github/workflows/ci.yml` が GitHub Actions で回ります。トリガーは
+**`main` への Pull Request** と **`main` への push** の 2 つだけで、
+機能ブランチへの push では走りません。ジョブは `check` 1 つを 3 OS の
+matrix で動かす形で、OS 差はステップの `if: runner.os == ...` だけです
+（3 OS とも**まったく同じ** `pixi run check` = ローカルの最終チェックと
+同じ `tests/final_check.sh` を実行します）。`fail-fast: false` なので
+1 OS が赤でも残り 2 OS のログは残ります。
+
+| ジョブ | サーバー | 備考 |
+|---|---|---|
+| `check (ubuntu-latest)` | `tests/docker-compose.yml`（PG 17 / PG 14 / blackhole） | x86_64。両サーバーでテストが回る |
+| `check (ubuntu-24.04-arm)` | 同上 | aarch64。開発機と同じアーキテクチャ |
+| `check (macos-latest)` | brew の `postgresql@17` 1 台（5432）+ Python の blackhole（54399） | arm64。`PQ_TEST_CONNINFO` でこの 1 台に固定するため **PG 14 は回らない**。`tests/test_leak.mojo` の RSS 検査は Linux 専用なので `SKIP` になる |
+
+待ち上限は 3 段階です。ジョブ全体が `timeout-minutes: 45`、compose の
+起動待ちが `--wait-timeout 180`（秒。`pixi run db-up` がローカルと CI で
+同じコマンド）、macOS の `pg_ctl -w -t` が **60 秒**です。
+
+各ジョブは `pixi run check` のあと `pixi build -o dist` を実行し、
+できた `.conda` を artifact `pq-conda-<os>` として上げます。失敗時の診断用に
+`build/final_check.log` も `final-check-log-<os>` で上がります。
+
+**Windows のジョブはありません。** Mojo のネイティブツールチェーンが
+Windows 向けに提供されておらず（`pixi.toml` に `windows-*` プラットフォームが
+無く、入れられる `mojo-compiler` のビルドも存在しません）、CI でも実機検証は
+できないためです。Modular が提供したら見直します。
+
+**fork からの Pull Request** は、どのステップも secrets を読まず既定トークンの
+`contents: read` で足りるため、そのまま動く想定です。ただしこの経路は
+**未検証**です（このリポジトリのブランチからの PR でしか確認していません）。
+
+`.github/workflows/release.yml` の `workflow_dispatch` は `build` ジョブまでの
+dry run として手で起動できますが、GitHub の仕様上**既定ブランチにマージされた
+あと**でなければ選択肢に出てきません。
+
+### ブランチ保護（人間が設定）
+
+required status checks は手で設定します（**無人ターンは設定しません**）。
+画面からは Settings → Branches → Add branch ruleset（または classic の
+Add rule）→ Require status checks to pass before merging で、上の表の
+ジョブ名 3 つを追加します。CLI からは `protection.json` を書いて
+`gh api` に渡します。
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "check (ubuntu-latest)",
+      "check (ubuntu-24.04-arm)",
+      "check (macos-latest)"
+    ]
+  },
+  "enforce_admins": null,
+  "required_pull_request_reviews": null,
+  "restrictions": null
+}
+```
+
+```bash
+gh api -X PUT repos/6in/mojo-pg/branches/main/protection --input protection.json
+```
+
+### リリース手順（人間が行う）
+
+1. `CHANGELOG.md` に新しい版の節（`## [X.Y.Z] - YYYY-MM-DD`）を書く。
+   日付はタグを打つ日に書き換えてかまいません。
+2. `pixi.toml` の `[workspace] version` を上げる（`[package]` 側は
+   `{ workspace = true }` で継承するので 1 箇所だけです）。
+3. 変更を `main` にマージする。
+4. `git tag vX.Y.Z` → `git push origin vX.Y.Z`。タグは必ず `v` 付きで、
+   `v` 無しのタグは `verify-version` ジョブで落ちます。
+5. `release.yml` が `verify-version` → `build`（3 OS）→ `release` の順に動き、
+   3 OS の `.conda` と `git archive` の `pq-X.Y.Z.tar.gz` を GitHub Release に
+   添付します。Release 本文は `CHANGELOG.md` の該当節から生成されます。
+
+タグと `pixi.toml` の `version` が食い違っていると `verify-version` ジョブが
+失敗し、ビルドもリリースも行われません。将来の経路として
+modular-community への recipe 提出もありますが、まだ行っていません。
 
 ## Windows の状態
 
