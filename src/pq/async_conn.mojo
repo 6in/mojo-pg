@@ -722,7 +722,12 @@ struct AsyncConnection(Movable):
 
         Returns as soon as a read would not block, even if the peer has also
         hung up: the pending bytes are what carry the server's last word on
-        why, so libpq is left to read them and produce the real message.
+        why, so libpq is left to read them and produce the real message. A
+        socket that reports only hangup / error returns too -- the reason for
+        the disconnect is named by the next libpq call (`PQconsumeInput`'s
+        `server closed the connection unexpectedly`, `PQconnectPoll`'s
+        `Connection refused`), which is kinder than a generic poll message and
+        does not depend on how the platform pairs POLLHUP with POLLIN.
 
         In state `SENDING` this is the wrong thing to wait for -- the server
         cannot answer a command it has not fully received, so waiting for
@@ -736,9 +741,8 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.TIMEOUT` with `wait_readable timed out after
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
-                the connection has no socket or the socket reported only
-                hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                outside `-1 .. TIMEOUT_MS_MAX`.
+                the connection has no socket, or `PgErrorKind.USAGE` when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -751,16 +755,17 @@ struct AsyncConnection(Movable):
                 PgErrorKind.TIMEOUT,
                 String("wait_readable timed out after ", timeout_ms, " ms"),
             )
-        if events.readable:
-            return
-        if events.hangup or events.error:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                "connection socket closed (POLLHUP/POLLERR)",
-            )
 
     def wait_writable(self, timeout_ms: Int) raises PgError:
         """Block until the connection's socket can accept more data.
+
+        A socket that reports only hangup / error returns as well, rather than
+        raising on its own: POSIX makes POLLHUP and POLLOUT exclusive and macOS
+        follows it (Linux raises both on a socket), so a refused connect shows
+        up as a bare hangup there. Letting the call return hands the diagnosis
+        to the next libpq call -- `PQconnectPoll` reads `SO_ERROR` and reports
+        `Connection refused`, `PQflush` fails the send -- so the caller sees the
+        real cause on every platform.
 
         Args:
             timeout_ms: Milliseconds to wait. `0` polls the current state;
@@ -769,9 +774,8 @@ struct AsyncConnection(Movable):
         Raises:
             PgError: `PgErrorKind.TIMEOUT` with `wait_writable timed out after
                 N ms` when the budget runs out, `PgErrorKind.CONNECTION` when
-                the connection has no socket or the socket reported only
-                hangup / error, or `PgErrorKind.USAGE` when `timeout_ms` is
-                outside `-1 .. TIMEOUT_MS_MAX`.
+                the connection has no socket, or `PgErrorKind.USAGE` when
+                `timeout_ms` is outside `-1 .. TIMEOUT_MS_MAX`.
         """
         var fd = self.socket()
         if fd < 0:
@@ -783,13 +787,6 @@ struct AsyncConnection(Movable):
             raise PgError(
                 PgErrorKind.TIMEOUT,
                 String("wait_writable timed out after ", timeout_ms, " ms"),
-            )
-        if events.writable:
-            return
-        if events.hangup or events.error:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                "connection socket closed (POLLHUP/POLLERR)",
             )
 
     @staticmethod

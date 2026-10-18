@@ -13,6 +13,7 @@ collide.
 
 from std.ffi import c_int, external_call
 from std.io import FileDescriptor
+from std.sys.info import CompilationTarget
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from std.time import monotonic
 
@@ -212,8 +213,12 @@ def test_socketpair_peer_close_sets_hangup_both_ways() raises:
     _close(ends[0])
     assert_true(readable.readable)
     assert_true(readable.hangup)
-    assert_true(writable.writable)
     assert_true(writable.hangup)
+    # POSIX defines POLLHUP and POLLOUT as mutually exclusive, and macOS
+    # follows it; Linux raises both on a socket. Only the hangup is asserted
+    # for both, so the writability expectation stays where it was measured.
+    if CompilationTarget.is_linux():
+        assert_true(writable.writable)
 
 
 def test_waiting_for_nothing_is_a_sleep() raises:

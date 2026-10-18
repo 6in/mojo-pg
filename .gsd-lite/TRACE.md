@@ -569,3 +569,63 @@ FAIL [ 0.033 ] test_socketpair_peer_close_sets_hangup_both_ways
 ```
 
 F1 の回帰 grep: `cache: false` = 1 / 3、`cache: true` + `locked: true` = 0 / 0、actionlint 指摘 0。ローカル `check` 6/6 PASS = 170 s（11:46:32 → 11:49:22）
+
+## F2 macOS の poll セマンティクスへの追従（turn 12）
+
+設計 **A**（PLAN F2 の背景。B = OS 分岐 / C = テスト緩和は採らない）: `wait_readable` / `wait_writable` は poll が hangup / error
+だけを報告した場合も **raise せず return** し、切断の理由は次の libpq 呼び出しに名乗らせる。
+
+### (a) src の変更（`src/pq/async_conn.mojo` 2 メソッドのみ）
+
+| 変更 | 内容 |
+|---|---|
+| `wait_readable`（旧 `:756-760`） | `if events.hangup or events.error: raise CONNECTION ...` の 5 行を削除。`if events.readable: return` も不要になったので削除（timeout 以外は return で抜ける） |
+| `wait_writable`（旧 `:789-793`） | 同じ 5 行 + `if events.writable: return` を削除 |
+| docstring 2 本 | 本文に「hangup / error だけでも返る。理由は次の libpq 呼び出しが名乗る」の段落を追加。`Raises:` の `CONNECTION` は **socket が無いときだけ**に直した |
+| 残す挙動 | `fd < 0` → `CONNECTION "no socket: connection is closed"`、`events.timeout` → `TIMEOUT "wait_* timed out after N ms"`、`poll_socket` の `USAGE`（範囲外 `timeout_ms`）は不変 |
+| `src/pq/__init__.mojo:290` の表 | 触っていない（`TIMEOUT` / `CONNECTION` / `USAGE` の 3 種はいずれも残るため記述は正しい） |
+
+汎用メッセージは src から消えた: `grep -c 'POLLHUP/POLLERR' src/pq/async_conn.mojo` → **0**（rc 1）。
+
+### (b) 呼び出し側 3 箇所の busy loop 否定（コードレビュー。コード変更なし）
+
+| 呼び出し側 | return 直後の libpq 呼び出し | 失敗の報告のされ方 |
+|---|---|---|
+| `_poll_to_ready`（`:830-834`。`while True` の connect 駆動） | ループ先頭に戻り `poll_connect()` → `PQconnectPoll` | `PQconnectPoll` が `SO_ERROR` を読んで `PGRES_POLLING_FAILED` → `poll_connect` が `CONNECTION`（libpq の `Connection refused`）を raise。1 周で終わる |
+| `_wait_for`（`:1466-1470`。`fetch_all` の `SENDING` 分岐 → `flush()`） | `flush()` → `PQflush` | 送信が失敗した接続では `PQflush` が `-1` → `flush` が `_connection_error()` を raise、`0` を返した場合は状態が `BUSY` に進み次周の `poll_result` → `PQconsumeInput` が 0 を返して `CONNECTION`。どちらでも 1〜2 周で終わる（`1` を返し続けるには送信可能であることが必要 = hangup のみの状態と両立しない） |
+| `_collect_notifications`（`:1658-1664`） | ループ先頭に戻り `notifications()` → `PQconsumeInput` | EOF / エラーの `recv` で `PQconsumeInput` が 0 → `_connection_error()`（`server closed the connection unexpectedly` 等）。`except` が `_restore_collected(out)` してから raise するので収集済み通知も失われない。1 周で終わる |
+
+### (c) テストの変更（`tests/test_poll.mojo` 1 テスト）
+
+`test_socketpair_peer_close_sets_hangup_both_ways`: `readable.readable` / `readable.hangup` / `writable.hangup` の 3 assert は両 OS 共通のまま、
+`assert_true(writable.writable)` だけを `if CompilationTarget.is_linux():` の下に置いた（`test_leak.mojo:77,787` と同じ import / 判定の形）。
+macOS では `writable` を assert しない。テスト数 **11 不変**、既存テストの期待値変更は **0 件**。
+
+### (e) 期待結果の実測（PLAN F2 (e) の表）
+
+| 条件 | 結果 |
+|---|---|
+| `grep -c 'POLLHUP/POLLERR' src/pq/async_conn.mojo` | **0**（rc 1） |
+| `grep -c 'is_linux' tests/test_poll.mojo` | **1**（≥ 1） |
+| `pixi run mojo run -I src tests/test_poll.mojo` | **11 tests run: 11 passed, 0 failed** |
+| `pixi run mojo run -I src tests/test_async.mojo`（54317） | **31 tests run: 31 passed, 0 failed**（`test_connect_failures_name_their_cause` PASS） |
+| `pixi run check`（`db-reset` の後） | **6/6 PASS = 190 s**（12:02:54 → 12:06:04、閾値 247 s）、6/6 段 `matched lines in build/final_check.log: 0`、`final_check: PASS`、両サーバー `SKIP` 1 件ずつ（`test_interval_infinity_*` の PG 版差） |
+| `pixi run package` | 警告 0（出力は pixi のタスク行のみ） |
+| checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | **0 / 24 / 1・3・3（不変）** |
+
+**macOS の `test_connect_failures_name_their_cause` の PASS はローカル（Linux）では観測できない**（Linux は `POLLOUT` を伴うので (a) の分岐に入らず経路差が出ない）。
+CI の macOS ジョブでの判定は verify round 3。
+
+## チェックリスト（turn 12）
+
+`scratch/turn-012-checklist.log`（全 101 key。この節を書く前に採取）。**turn 11 のログとの差分は 1 行だけ**
+（turn 11 が「チェックリスト（turn 11）」の見出しを足した分の単調増加。この節を足した後は 9 になる）:
+
+```
+11c11
+< trace_checklist_section=7
+---
+> trace_checklist_section=8
+```
+
+PLAN 訂正は **0 件**（F2 の期待結果は表のとおり実測と一致）。
