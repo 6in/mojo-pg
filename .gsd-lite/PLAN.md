@@ -144,7 +144,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T1
   - 並列サブ作業: なし（推奨 0 本。tokenizer と分岐は同じファイル）
 
-- [ ] T3: バイナリ配列デコーダ + `decode_binary` の 34 分岐 + 単体テスト（バイナリ側）
+- [x] T3: バイナリ配列デコーダ + `decode_binary` の 34 分岐 + 単体テスト（バイナリ側）
   - 完了基準:
     - (a) `src/pq/decode_binary.mojo` に `_decode_binary_array[origin: ImmOrigin, //, E: Copyable](bytes: Span[UInt8, origin], oid: UInt32, expect_oid: UInt32, elem_oid: UInt32, type_name: StaticString, column: Int) raises PgError -> List[Optional[E]]`
       （RESEARCH §3-2 の検査を**この順で**）: `oid != expect_oid` → `TYPE_MISMATCH`; `len < 12` → `TYPE_MISMATCH`; `ndim` / `flags` / `elemtype` を読む; `flags ∉ {0,1}` → `TYPE_MISMATCH`（P1）; `elemtype != elem_oid` → `TYPE_MISMATCH`（メッセージに両 OID。P5 / P2）;

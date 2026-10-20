@@ -35,6 +35,14 @@ number:
   of the right width is a value those types can hold, the `infinity`
   sentinels included.
 
+A `List[E]` or `List[Optional[E]]` decodes a one-dimensional array of any
+of those element types, through `_decode_binary_array`, which makes the
+same checks on the `array_send` header that the server's `array_recv`
+makes on the way in. The three strictnesses above hold one level down as
+well: the column OID must be the array OID of `E`, the header's element
+OID must be the element OID of `E`, and each element is decoded by the
+same `decode_binary[E]` a scalar column would use.
+
 `String` copies exactly the `PQgetlength` bytes it is given and does not
 treat them as a C string, so a `text` value containing NUL survives intact.
 The bytes are checked to be well-formed UTF-8 first, and a cell that is not
@@ -52,26 +60,49 @@ from std.memory import bitcast
 
 from pq.decode_text import (
     OID_BOOL,
+    OID_BOOL_ARRAY,
     OID_BPCHAR,
+    OID_BPCHAR_ARRAY,
     OID_BYTEA,
+    OID_BYTEA_ARRAY,
     OID_DATE,
+    OID_DATE_ARRAY,
     OID_FLOAT4,
+    OID_FLOAT4_ARRAY,
     OID_FLOAT8,
+    OID_FLOAT8_ARRAY,
     OID_INT2,
+    OID_INT2_ARRAY,
     OID_INT4,
+    OID_INT4_ARRAY,
     OID_INT8,
+    OID_INT8_ARRAY,
     OID_INTERVAL,
+    OID_INTERVAL_ARRAY,
     OID_JSON,
+    OID_JSON_ARRAY,
     OID_JSONB,
+    OID_JSONB_ARRAY,
     OID_NAME,
+    OID_NAME_ARRAY,
     OID_NUMERIC,
+    OID_NUMERIC_ARRAY,
     OID_TEXT,
+    OID_TEXT_ARRAY,
     OID_TIME,
     OID_TIMESTAMP,
     OID_TIMESTAMPTZ,
+    OID_TIMESTAMPTZ_ARRAY,
+    OID_TIMESTAMP_ARRAY,
     OID_TIMETZ,
+    OID_TIMETZ_ARRAY,
+    OID_TIME_ARRAY,
     OID_UUID,
+    OID_UUID_ARRAY,
     OID_VARCHAR,
+    OID_VARCHAR_ARRAY,
+    _array_elem_oid,
+    _require_no_nulls,
 )
 from pq.errors import PgError, PgErrorKind
 from pq.types_datetime import (
@@ -106,6 +137,12 @@ comptime _MAX_TIME_MICROS = Int64(86400000000)
 
 comptime _MAX_OFFSET_SECONDS = Int32(57600)
 """The first `timetz` zone too wide to accept: 16 hours, in seconds."""
+
+comptime _ARRAY_HEADER = 12
+"""Bytes of `array_send` header: `ndim`, `flags` and `elemtype`."""
+
+comptime _ARRAY_DIM = 8
+"""Bytes `array_send` writes per dimension: `dim` and `lbound`."""
 
 
 def _hex4(v: UInt16) -> String:
@@ -812,6 +849,224 @@ def decode_interval[
     return Interval(micros, days, months)
 
 
+def _binary_array_oid_error(
+    oid: UInt32, expect_oid: UInt32, type_name: StaticString
+) -> PgError:
+    """Build the `TYPE_MISMATCH` error for an array column of the wrong OID.
+
+    Like `pq.decode_text._array_oid_error` the message carries both OIDs,
+    because an array OID is far enough from its element OID (`int4` 23 vs
+    `int4[]` 1007) that naming only the column's own leaves the reader
+    guessing what was expected.
+    """
+    return PgError(
+        PgErrorKind.TYPE_MISMATCH,
+        String(
+            "column is oid ",
+            oid,
+            " but ",
+            type_name,
+            " (oid ",
+            expect_oid,
+            (
+                ") was requested in binary format; request a matching type or"
+                " re-run with ResultFormat.TEXT"
+            ),
+        ),
+    )
+
+
+def _decode_binary_array[
+    origin: ImmOrigin, //, E: Copyable & Deinitable
+](
+    bytes: Span[UInt8, origin],
+    oid: UInt32,
+    expect_oid: UInt32,
+    elem_oid: UInt32,
+    type_name: StaticString,
+    column: Int,
+) raises PgError -> List[Optional[E]]:
+    """Decode a binary-format array cell into one `Optional[E]` per element.
+
+    The wire form `array_send` writes is `int32 ndim`, `int32 flags`,
+    `uint32 elemtype`, then `int32 dim` and `int32 lbound` per dimension,
+    then per element an `int32` length -- `-1` for a SQL NULL, which has no
+    payload -- followed by that many bytes of the element's own binary
+    form. An empty array stops after the twelve byte header with `ndim`
+    zero, so the dimension words are not there to be read.
+
+    Every check `array_recv` makes on the server is made here, since a
+    binary cell carries no self-description and a mis-read header would
+    produce a plausible array rather than an error: `elemtype` must be the
+    element OID `E` decodes, `flags` must be 0 or 1, and the cell must end
+    exactly where the last element does. NULL is decided by the element
+    length alone -- a `flags` of 0 alongside a `-1` element is a form the
+    server accepts, so trusting `flags` would drop the NULL. Only one
+    dimension is decoded: a `List` has nowhere to put a second one. The
+    lower bound is read and dropped, so `'[0:1]={7,8}'` decodes to the same
+    two element `List` as `'{7,8}'`, as it does on the text path.
+
+    Parameters:
+        origin: Origin of the viewed bytes; inferred from `bytes`.
+        E: The Mojo type to decode each element into.
+
+    Args:
+        bytes: The cell's binary-format bytes.
+        oid: The column type OID reported by `PQftype`.
+        expect_oid: The array OID `E` requires.
+        elem_oid: The element OID to hand `decode_binary[E]`.
+        type_name: The array type's SQL name, for error messages.
+        column: Zero-based column index, passed through to the elements.
+
+    Returns:
+        One entry per element; `None` for a SQL NULL element.
+
+    Raises:
+        PgError: `PgErrorKind.TYPE_MISMATCH` when `oid` is not
+            `expect_oid`, when the header is malformed or describes more
+            than one dimension, when an element length runs past the end of
+            the cell, or when bytes are left over after the last element.
+        PgError: Whatever `decode_binary[E]` raises for a bad element, with
+            `array element N: ` prefixed to the message, since the
+            element's own message cannot say where in the array it sat.
+    """
+    if oid != expect_oid:
+        raise _binary_array_oid_error(oid, expect_oid, type_name)
+    if len(bytes) < _ARRAY_HEADER:
+        raise _binary_length_error(String(type_name), len(bytes), _ARRAY_HEADER)
+    var ndim = Int(decode_int32(bytes[0:4]))
+    var flags = Int(decode_int32(bytes[4:8]))
+    var elemtype = UInt32(_be_bits(bytes[8:12]))
+    if flags != 0 and flags != 1:
+        raise _binary_value_error(
+            String(type_name), String("invalid array flags ", flags)
+        )
+    if elemtype != elem_oid:
+        raise _binary_value_error(
+            String(type_name),
+            String(
+                "array element type is oid ",
+                elemtype,
+                ", expected oid ",
+                elem_oid,
+            ),
+        )
+    var count = 0
+    var pos = _ARRAY_HEADER
+    if ndim != 0:
+        if ndim < 0 or ndim > 1:
+            raise _binary_value_error(
+                String(type_name),
+                String(
+                    "number of dimensions is ",
+                    ndim,
+                    "; a multidimensional array has no List to decode into",
+                ),
+            )
+        if len(bytes) < _ARRAY_HEADER + _ARRAY_DIM:
+            raise _binary_length_error(
+                String(type_name), len(bytes), _ARRAY_HEADER + _ARRAY_DIM
+            )
+        var dim = Int(decode_int32(bytes[12:16]))
+        pos = _ARRAY_HEADER + _ARRAY_DIM
+        # The lower bound, bytes 16..20, is read past rather than used.
+        if dim < 0:
+            raise _binary_value_error(
+                String(type_name), String("dimension length is ", dim)
+            )
+        # Each element costs at least its four byte length word, so a `dim`
+        # the remaining bytes cannot cover is the "insufficient data" case
+        # already -- caught here rather than in the loop so that a corrupt
+        # length does not reserve a `List` the cell could never fill.
+        if dim > (len(bytes) - pos) // 4:
+            raise _binary_value_error(
+                String(type_name),
+                String(
+                    "array has ",
+                    dim,
+                    " elements but only ",
+                    len(bytes) - pos,
+                    " bytes are left",
+                ),
+            )
+        count = dim
+    var out = List[Optional[E]](capacity=count)
+    for i in range(count):
+        if len(bytes) - pos < 4:
+            raise _binary_value_error(
+                String(type_name),
+                String(
+                    "array element ",
+                    i,
+                    " has no length word: ",
+                    len(bytes) - pos,
+                    " bytes are left",
+                ),
+            )
+        var elem_len = Int(decode_int32(bytes[pos : pos + 4]))
+        pos += 4
+        if elem_len == -1:
+            out.append(None)
+            continue
+        if elem_len < 0 or elem_len > len(bytes) - pos:
+            raise _binary_value_error(
+                String(type_name),
+                String(
+                    "array element ",
+                    i,
+                    " claims ",
+                    elem_len,
+                    " bytes but only ",
+                    len(bytes) - pos,
+                    " are left",
+                ),
+            )
+        var value: E
+        try:
+            value = decode_binary[E](
+                bytes[pos : pos + elem_len], elem_oid, column
+            )
+        except e:
+            raise PgError(e.kind, String("array element ", i, ": ", e.message))
+        pos += elem_len
+        out.append(value^)
+    if pos != len(bytes):
+        raise _binary_value_error(
+            String(type_name),
+            String(
+                len(bytes) - pos, " bytes left after the last array element"
+            ),
+        )
+    return out^
+
+
+def _decode_binary_string_array[
+    origin: ImmOrigin, //
+](bytes: Span[UInt8, origin], oid: UInt32, column: Int) raises PgError -> List[
+    Optional[String]
+]:
+    """Decode any of the six text-like array columns into `String` elements.
+
+    `List[String]` accepts `text[]`, `varchar[]`, `bpchar[]`, `name[]`,
+    `json[]` and `jsonb[]`, the array OIDs of the six element types the
+    scalar `String` branch accepts. Each element is handed its own element
+    OID, so a `jsonb[]` element loses its version byte exactly as a scalar
+    `jsonb` cell does.
+    """
+    if (
+        oid != OID_TEXT_ARRAY
+        and oid != OID_VARCHAR_ARRAY
+        and oid != OID_BPCHAR_ARRAY
+        and oid != OID_NAME_ARRAY
+        and oid != OID_JSON_ARRAY
+        and oid != OID_JSONB_ARRAY
+    ):
+        raise _binary_array_oid_error(oid, OID_TEXT_ARRAY, "text[]")
+    return _decode_binary_array[String](
+        bytes, oid, oid, _array_elem_oid(oid), "text[]", column
+    )
+
+
 def decode_binary[
     origin: ImmOrigin, //, T: Copyable
 ](
@@ -828,8 +1083,15 @@ def decode_binary[
     `Interval` oid 1186. `String` requires one of
     the six string-shaped OIDs -- 25 (`text`), 1043 (`varchar`), 1042
     (`bpchar`), 19 (`name`), 114 (`json`) and 3802 (`jsonb`) -- and is
-    therefore not the catch-all it is on the text path. Any other `T` is a
-    compile-time error.
+    therefore not the catch-all it is on the text path.
+
+    A `List[E]` requires the array OID of `E` -- `List[Int32]` oid 1007,
+    `List[String]` any of the six string-shaped array OIDs -- and yields
+    one `E` per element, raising `PgErrorKind.NULL_VALUE` on a NULL
+    element. `List[Optional[E]]` takes the same cell and returns `None`
+    for a NULL instead. `List[UInt8]` is the exception the text path makes
+    too: it is `bytea`, and an array of them is `List[List[UInt8]]`. Any
+    other `T` is a compile-time error.
 
     A `jsonb` cell opens with a one byte format version, which must be 1;
     the remaining bytes are the JSON text. `String` copies the payload
@@ -947,6 +1209,231 @@ def decode_binary[
         if oid != OID_INTERVAL:
             raise _binary_oid_error(oid, "Interval")
         var value = decode_interval(bytes)
+        return rebind[T](value).copy()
+    elif T == List[Bool]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Bool](
+                bytes, oid, OID_BOOL_ARRAY, OID_BOOL, "bool[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Bool]]:
+        var value = _decode_binary_array[Bool](
+            bytes, oid, OID_BOOL_ARRAY, OID_BOOL, "bool[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Int16]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Int16](
+                bytes, oid, OID_INT2_ARRAY, OID_INT2, "int2[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Int16]]:
+        var value = _decode_binary_array[Int16](
+            bytes, oid, OID_INT2_ARRAY, OID_INT2, "int2[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Int32]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Int32](
+                bytes, oid, OID_INT4_ARRAY, OID_INT4, "int4[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Int32]]:
+        var value = _decode_binary_array[Int32](
+            bytes, oid, OID_INT4_ARRAY, OID_INT4, "int4[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Int64]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Int64](
+                bytes, oid, OID_INT8_ARRAY, OID_INT8, "int8[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Int64]]:
+        var value = _decode_binary_array[Int64](
+            bytes, oid, OID_INT8_ARRAY, OID_INT8, "int8[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Int]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Int](
+                bytes, oid, OID_INT8_ARRAY, OID_INT8, "int8[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Int]]:
+        var value = _decode_binary_array[Int](
+            bytes, oid, OID_INT8_ARRAY, OID_INT8, "int8[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Float32]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Float32](
+                bytes, oid, OID_FLOAT4_ARRAY, OID_FLOAT4, "float4[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Float32]]:
+        var value = _decode_binary_array[Float32](
+            bytes, oid, OID_FLOAT4_ARRAY, OID_FLOAT4, "float4[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Float64]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Float64](
+                bytes, oid, OID_FLOAT8_ARRAY, OID_FLOAT8, "float8[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Float64]]:
+        var value = _decode_binary_array[Float64](
+            bytes, oid, OID_FLOAT8_ARRAY, OID_FLOAT8, "float8[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[String]:
+        var value = _require_no_nulls(
+            _decode_binary_string_array(bytes, oid, column)
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[String]]:
+        var value = _decode_binary_string_array(bytes, oid, column)
+        return rebind[T](value).copy()
+    elif T == List[List[UInt8]]:
+        var value = _require_no_nulls(
+            _decode_binary_array[List[UInt8]](
+                bytes, oid, OID_BYTEA_ARRAY, OID_BYTEA, "bytea[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[List[UInt8]]]:
+        var value = _decode_binary_array[List[UInt8]](
+            bytes, oid, OID_BYTEA_ARRAY, OID_BYTEA, "bytea[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Decimal]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Decimal](
+                bytes, oid, OID_NUMERIC_ARRAY, OID_NUMERIC, "numeric[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Decimal]]:
+        var value = _decode_binary_array[Decimal](
+            bytes, oid, OID_NUMERIC_ARRAY, OID_NUMERIC, "numeric[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[UUID]:
+        var value = _require_no_nulls(
+            _decode_binary_array[UUID](
+                bytes, oid, OID_UUID_ARRAY, OID_UUID, "uuid[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[UUID]]:
+        var value = _decode_binary_array[UUID](
+            bytes, oid, OID_UUID_ARRAY, OID_UUID, "uuid[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Date]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Date](
+                bytes, oid, OID_DATE_ARRAY, OID_DATE, "date[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Date]]:
+        var value = _decode_binary_array[Date](
+            bytes, oid, OID_DATE_ARRAY, OID_DATE, "date[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Timestamp]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Timestamp](
+                bytes,
+                oid,
+                OID_TIMESTAMP_ARRAY,
+                OID_TIMESTAMP,
+                "timestamp[]",
+                column,
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Timestamp]]:
+        var value = _decode_binary_array[Timestamp](
+            bytes,
+            oid,
+            OID_TIMESTAMP_ARRAY,
+            OID_TIMESTAMP,
+            "timestamp[]",
+            column,
+        )
+        return rebind[T](value).copy()
+    elif T == List[TimestampTz]:
+        var value = _require_no_nulls(
+            _decode_binary_array[TimestampTz](
+                bytes,
+                oid,
+                OID_TIMESTAMPTZ_ARRAY,
+                OID_TIMESTAMPTZ,
+                "timestamptz[]",
+                column,
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[TimestampTz]]:
+        var value = _decode_binary_array[TimestampTz](
+            bytes,
+            oid,
+            OID_TIMESTAMPTZ_ARRAY,
+            OID_TIMESTAMPTZ,
+            "timestamptz[]",
+            column,
+        )
+        return rebind[T](value).copy()
+    elif T == List[Time]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Time](
+                bytes, oid, OID_TIME_ARRAY, OID_TIME, "time[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Time]]:
+        var value = _decode_binary_array[Time](
+            bytes, oid, OID_TIME_ARRAY, OID_TIME, "time[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[TimeTz]:
+        var value = _require_no_nulls(
+            _decode_binary_array[TimeTz](
+                bytes, oid, OID_TIMETZ_ARRAY, OID_TIMETZ, "timetz[]", column
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[TimeTz]]:
+        var value = _decode_binary_array[TimeTz](
+            bytes, oid, OID_TIMETZ_ARRAY, OID_TIMETZ, "timetz[]", column
+        )
+        return rebind[T](value).copy()
+    elif T == List[Interval]:
+        var value = _require_no_nulls(
+            _decode_binary_array[Interval](
+                bytes,
+                oid,
+                OID_INTERVAL_ARRAY,
+                OID_INTERVAL,
+                "interval[]",
+                column,
+            )
+        )
+        return rebind[T](value).copy()
+    elif T == List[Optional[Interval]]:
+        var value = _decode_binary_array[Interval](
+            bytes, oid, OID_INTERVAL_ARRAY, OID_INTERVAL, "interval[]", column
+        )
         return rebind[T](value).copy()
     else:
         comptime assert False, "unsupported type for Row.get"

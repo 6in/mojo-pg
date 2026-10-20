@@ -60,7 +60,9 @@ from pq.decode_text import (
     _array_oid_of,
     decode_text,
     parse_array_literal,
+    parse_bytea_hex,
 )
+from pq.decode_binary import decode_binary
 from pq.errors import PgErrorKind
 from pq.types_datetime import (
     Date,
@@ -72,6 +74,75 @@ from pq.types_datetime import (
 )
 from pq.types_numeric import Decimal
 from pq.types_uuid import UUID
+
+# `array_send` payloads, byte for byte as PostgreSQL 17 sent them for
+# the matching `SELECT` (RESEARCH 2.3), plus the malformed headers the
+# server's own `array_recv` rejects.
+comptime _P_INT4_123 = "0000000100000000000000170000000300000001000000040000000100000004000000020000000400000003"
+comptime _P_INT4_EMPTY = "000000000000000000000017"
+comptime _P_INT4_NULL_FLAGS1 = "00000001000000010000001700000003000000010000000400000001ffffffff0000000400000003"
+comptime _P_INT4_NULL_FLAGS0 = "00000001000000000000001700000003000000010000000400000001ffffffff0000000400000003"
+comptime _P_INT4_FLAGS2 = (
+    "00000001000000020000001700000003000000010000000400000001"
+)
+comptime _P_INT4_WRONG_ELEMTYPE = (
+    "00000001000000000000001900000001000000010000000400000001"
+)
+comptime _P_SHORT_HEADER = "0000000000000000000000"
+comptime _P_DIM_BEYOND_DATA = (
+    "000000010000000000000017000000030000000100000004000000010000000400000002"
+)
+comptime _P_ELEM_TOO_LONG = (
+    "0000000100000000000000170000000100000001000000050000000100"
+)
+comptime _P_TRAILING_BYTE = "000000010000000000000017000000030000000100000004000000010000000400000002000000040000000300"
+comptime _P_NDIM2 = "000000020000000000000017000000020000000100000002000000010000000400000001000000040000000200000004000000030000000400000004"
+comptime _P_LBOUND_ZERO = (
+    "000000010000000000000017000000020000000000000004000000070000000400000008"
+)
+comptime _P_TEXT9 = "0000000100000000000000190000000900000001000000016100000003622c630000000364226500000003665c6700000000000000044e554c4c000000046e756c6c00000003207820000000037b797d"
+comptime _P_TEXT_NULL_MULTIBYTE = "0000000100000001000000190000000300000001000000097461625c746865726500000002c3a9ffffffff"
+comptime _P_NUMERIC = (
+    "0000000100000000000006a400000001000000010000000c000200000000000100011388"
+)
+comptime _P_BPCHAR = (
+    "0000000100000000000004120000000100000001000000056162202020"
+)
+comptime _P_JSONB = (
+    "000000010000000000000eda000000010000000100000009017b2261223a20317d"
+)
+comptime _P_INTERVAL = "0000000100000000000004a200000001000000010000001000000000000000000000000100000000"
+comptime _P_BOOL = (
+    "000000010000000000000010000000020000000100000001010000000100"
+)
+comptime _P_BYTEA = (
+    "00000001000000000000001100000002000000010000000200ff00000000"
+)
+comptime _P_INT2_12 = (
+    "0000000100000000000000150000000200000001000000020001000000020002"
+)
+comptime _P_INT8 = (
+    "0000000100000000000000140000000100000001000000087fffffffffffffff"
+)
+comptime _P_FLOAT4 = "0000000100000000000002bc0000000100000001000000043fc00000"
+comptime _P_FLOAT8 = (
+    "0000000100000000000002bd0000000100000001000000083fb999999999999a"
+)
+comptime _P_DATE = "00000001000000000000043a00000001000000010000000400002279"
+comptime _P_TS = (
+    "00000001000000000000045a0000000100000001000000080002b0ec85204f35"
+)
+comptime _P_TSTZ = (
+    "0000000100000000000004a00000000100000001000000080002b0ec85204f35"
+)
+comptime _P_TIME = (
+    "00000001000000000000043b0000000100000001000000080000000a8bda1c00"
+)
+comptime _P_TIMETZ = (
+    "0000000100000000000004f200000001000000010000000c0000000a8bda1c00ffff8170"
+)
+comptime _P_UUID = "000000010000000000000b86000000010000000100000010a0eebc999c0b4ef8bb6d6bb9bd380a11"
+comptime _P_INT2_ELEM = "0000000100000000000000150000000100000001000000020001"
 
 
 def _ok[T: Copyable & Deinitable](text: String, oid: UInt32) raises -> T:
@@ -687,6 +758,427 @@ def test_parse_array_literal_returns_element_texts() raises:
     assert_equal(got[0].value(), "1")
     assert_equal(got[1].value(), "a b")
     assert_false(Bool(got[2]))
+
+
+def _hex(digits: String) raises -> List[UInt8]:
+    """Turn a hex string into the bytes it spells.
+
+    Reuses `parse_bytea_hex` by prefixing the `\\x` marker it expects, so an
+    empty `digits` yields an empty list.
+
+    Args:
+        digits: An even number of hex digits, in either case.
+
+    Returns:
+        One byte per pair of digits.
+
+    Raises:
+        Error: If `digits` is not valid hex.
+    """
+    try:
+        return parse_bytea_hex(String("\\x", digits))
+    except e:
+        raise Error(String(e))
+
+
+def _bin_ok[T: Copyable & Deinitable](digits: String, oid: UInt32) raises -> T:
+    """Decode `digits` as `T`, turning a `PgError` into a plain `Error`.
+
+    Parameters:
+        T: The Mojo type requested from `decode_binary`.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: Column type OID reported by the server.
+
+    Returns:
+        The decoded value.
+
+    Raises:
+        Error: If `decode_binary` raised a `PgError`.
+    """
+    var bytes = _hex(digits)
+    try:
+        return decode_binary[T](Span[UInt8](bytes), oid)
+    except e:
+        raise Error(String(e))
+
+
+def _bin_error_kind[
+    T: Copyable & Deinitable
+](digits: String, oid: UInt32) raises -> PgErrorKind:
+    """Return the kind of the `PgError` raised by `decode_binary[T]`.
+
+    Parameters:
+        T: The Mojo type requested from `decode_binary`.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: Column type OID reported by the server.
+
+    Returns:
+        The `kind` field of the raised `PgError`.
+
+    Raises:
+        Error: If `decode_binary` returned a value instead of raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = decode_binary[T](Span[UInt8](bytes), oid)
+    except e:
+        return e.kind
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def _bin_error_message[
+    T: Copyable & Deinitable
+](digits: String, oid: UInt32) raises -> String:
+    """Return the message of the `PgError` raised by `decode_binary[T]`.
+
+    Parameters:
+        T: The Mojo type requested from `decode_binary`.
+
+    Args:
+        digits: The cell's binary-format bytes, as hex digits.
+        oid: Column type OID reported by the server.
+
+    Returns:
+        The `message` field of the raised `PgError`.
+
+    Raises:
+        Error: If `decode_binary` returned a value instead of raising.
+    """
+    var bytes = _hex(digits)
+    try:
+        _ = decode_binary[T](Span[UInt8](bytes), oid)
+    except e:
+        return e.message
+    raise Error(String("expected PgError for oid ", oid, " and ", digits))
+
+
+def test_binary_array_int4_decodes_the_measured_payload() raises:
+    var got = _bin_ok[List[Int32]](_P_INT4_123, OID_INT4_ARRAY)
+    assert_equal(len(got), 3)
+    assert_equal(got[0], Int32(1))
+    assert_equal(got[1], Int32(2))
+    assert_equal(got[2], Int32(3))
+
+
+def test_binary_array_empty_is_the_twelve_byte_header() raises:
+    # `'{}'::int4[]` stops after `ndim 0`; there are no dimension words to
+    # read, and reading them anyway would walk past the cell.
+    assert_equal(len(_bin_ok[List[Int32]](_P_INT4_EMPTY, OID_INT4_ARRAY)), 0)
+    assert_equal(
+        len(_bin_ok[List[Optional[Int32]]](_P_INT4_EMPTY, OID_INT4_ARRAY)), 0
+    )
+
+
+def test_binary_array_null_element_with_flags_one() raises:
+    var got = _bin_ok[List[Optional[Int32]]](
+        _P_INT4_NULL_FLAGS1, OID_INT4_ARRAY
+    )
+    assert_equal(len(got), 3)
+    assert_equal(got[0].value(), Int32(1))
+    assert_false(Bool(got[1]))
+    assert_equal(got[2].value(), Int32(3))
+
+
+def test_binary_array_null_element_with_flags_zero() raises:
+    # The server accepts a `-1` element alongside `flags 0`, so NULL is
+    # decided by the element length alone.
+    var got = _bin_ok[List[Optional[Int32]]](
+        _P_INT4_NULL_FLAGS0, OID_INT4_ARRAY
+    )
+    assert_equal(len(got), 3)
+    assert_false(Bool(got[1]))
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_INT4_NULL_FLAGS0, OID_INT4_ARRAY),
+        PgErrorKind.NULL_VALUE,
+    )
+
+
+def test_binary_array_null_element_rejected_for_non_optional() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_INT4_NULL_FLAGS1, OID_INT4_ARRAY),
+        PgErrorKind.NULL_VALUE,
+    )
+    var message = _bin_error_message[List[Int32]](
+        _P_INT4_NULL_FLAGS1, OID_INT4_ARRAY
+    )
+    assert_true("array element 1" in message, String("message was: ", message))
+
+
+def test_binary_array_rejects_invalid_flags() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_INT4_FLAGS2, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_rejects_a_foreign_element_type() raises:
+    var message = _bin_error_message[List[Int32]](
+        _P_INT4_WRONG_ELEMTYPE, OID_INT4_ARRAY
+    )
+    assert_true("oid 25" in message, String("message was: ", message))
+    assert_true("oid 23" in message, String("message was: ", message))
+
+
+def test_binary_array_rejects_a_header_shorter_than_twelve_bytes() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_SHORT_HEADER, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_rejects_a_dimension_the_cell_cannot_fill() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_DIM_BEYOND_DATA, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_rejects_an_element_of_the_wrong_width() raises:
+    # An `int4` element with a five byte length: the element decoder is the
+    # one that rejects it, so the message carries the element's index.
+    var message = _bin_error_message[List[Int32]](
+        _P_ELEM_TOO_LONG, OID_INT4_ARRAY
+    )
+    assert_true("array element 0" in message, String("message was: ", message))
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_ELEM_TOO_LONG, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_rejects_bytes_after_the_last_element() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_TRAILING_BYTE, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_rejects_multidimensional() raises:
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_NDIM2, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_lower_bound_is_dropped() raises:
+    var got = _bin_ok[List[Int32]](_P_LBOUND_ZERO, OID_INT4_ARRAY)
+    assert_equal(len(got), 2)
+    assert_equal(got[0], Int32(7))
+    assert_equal(got[1], Int32(8))
+
+
+def test_binary_array_text_elements_keep_their_bytes() raises:
+    var got = _bin_ok[List[String]](_P_TEXT9, OID_TEXT_ARRAY)
+    assert_equal(len(got), 9)
+    assert_equal(got[0], "a")
+    assert_equal(got[1], "b,c")
+    assert_equal(got[2], 'd"e')
+    assert_equal(got[3], "f\\g")
+    assert_equal(got[4], "")
+    assert_equal(got[5], "NULL")
+    assert_equal(got[6], "null")
+    assert_equal(got[7], " x ")
+    assert_equal(got[8], "{y}")
+
+
+def test_binary_array_text_with_null_and_multibyte() raises:
+    var got = _bin_ok[List[Optional[String]]](
+        _P_TEXT_NULL_MULTIBYTE, OID_TEXT_ARRAY
+    )
+    assert_equal(len(got), 3)
+    assert_equal(got[0].value(), "tab\\there")
+    assert_equal(got[1].value(), "é")
+    assert_false(Bool(got[2]))
+
+
+def test_binary_array_string_accepts_the_six_array_oids() raises:
+    assert_equal(_bin_ok[List[String]](_P_BPCHAR, OID_BPCHAR_ARRAY)[0], "ab   ")
+    assert_equal(
+        _bin_ok[List[String]](_P_JSONB, OID_JSONB_ARRAY)[0], '{"a": 1}'
+    )
+    assert_equal(
+        _bin_error_kind[List[String]](_P_TEXT9, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+
+
+def test_binary_array_numeric_element() raises:
+    assert_equal(
+        String(_bin_ok[List[Decimal]](_P_NUMERIC, OID_NUMERIC_ARRAY)[0]), "1.5"
+    )
+
+
+def test_binary_array_interval_element() raises:
+    assert_equal(
+        String(_bin_ok[List[Interval]](_P_INTERVAL, OID_INTERVAL_ARRAY)[0]),
+        "1 day",
+    )
+
+
+def test_binary_array_bool_and_bytea_elements() raises:
+    var flags = _bin_ok[List[Bool]](_P_BOOL, OID_BOOL_ARRAY)
+    assert_true(flags[0])
+    assert_false(flags[1])
+    var blobs = _bin_ok[List[List[UInt8]]](_P_BYTEA, OID_BYTEA_ARRAY)
+    assert_equal(len(blobs[0]), 2)
+    assert_equal(blobs[0][0], UInt8(0))
+    assert_equal(blobs[0][1], UInt8(255))
+    assert_equal(len(blobs[1]), 0)
+
+
+def test_binary_array_remaining_element_types() raises:
+    assert_equal(_bin_ok[List[Int16]](_P_INT2_12, OID_INT2_ARRAY)[1], Int16(2))
+    assert_equal(_bin_ok[List[Int64]](_P_INT8, OID_INT8_ARRAY)[0], Int64.MAX)
+    assert_equal(_bin_ok[List[Int]](_P_INT8, OID_INT8_ARRAY)[0], Int(Int64.MAX))
+    assert_equal(
+        _bin_ok[List[Float32]](_P_FLOAT4, OID_FLOAT4_ARRAY)[0], Float32(1.5)
+    )
+    assert_equal(
+        _bin_ok[List[Float64]](_P_FLOAT8, OID_FLOAT8_ARRAY)[0], Float64(0.1)
+    )
+    assert_equal(
+        Int(_bin_ok[List[Date]](_P_DATE, OID_DATE_ARRAY)[0].days), 8825
+    )
+    assert_equal(
+        String(_bin_ok[List[Timestamp]](_P_TS, OID_TIMESTAMP_ARRAY)[0]),
+        "2024-01-02 03:04:05.678901",
+    )
+    assert_equal(
+        String(_bin_ok[List[TimestampTz]](_P_TSTZ, OID_TIMESTAMPTZ_ARRAY)[0]),
+        "2024-01-02 03:04:05.678901+00",
+    )
+    assert_equal(
+        String(_bin_ok[List[Time]](_P_TIME, OID_TIME_ARRAY)[0]), "12:34:56"
+    )
+    assert_equal(
+        _bin_ok[List[TimeTz]](_P_TIMETZ, OID_TIMETZ_ARRAY)[0].offset_secs,
+        Int32(-32400),
+    )
+    assert_equal(
+        String(_bin_ok[List[UUID]](_P_UUID, OID_UUID_ARRAY)[0]),
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    )
+
+
+def test_binary_array_optional_branch_of_every_element_type() raises:
+    assert_true(
+        _bin_ok[List[Optional[Bool]]](_P_BOOL, OID_BOOL_ARRAY)[0].value()
+    )
+    assert_equal(
+        _bin_ok[List[Optional[Int16]]](_P_INT2_12, OID_INT2_ARRAY)[0].value(),
+        Int16(1),
+    )
+    assert_equal(
+        _bin_ok[List[Optional[Int64]]](_P_INT8, OID_INT8_ARRAY)[0].value(),
+        Int64.MAX,
+    )
+    assert_equal(
+        _bin_ok[List[Optional[Int]]](_P_INT8, OID_INT8_ARRAY)[0].value(),
+        Int(Int64.MAX),
+    )
+    assert_equal(
+        _bin_ok[List[Optional[Float32]]](_P_FLOAT4, OID_FLOAT4_ARRAY)[
+            0
+        ].value(),
+        Float32(1.5),
+    )
+    assert_equal(
+        _bin_ok[List[Optional[Float64]]](_P_FLOAT8, OID_FLOAT8_ARRAY)[
+            0
+        ].value(),
+        Float64(0.1),
+    )
+    assert_equal(
+        len(
+            _bin_ok[List[Optional[List[UInt8]]]](_P_BYTEA, OID_BYTEA_ARRAY)[
+                0
+            ].value()
+        ),
+        2,
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[Decimal]]](_P_NUMERIC, OID_NUMERIC_ARRAY)[
+                0
+            ].value()
+        ),
+        "1.5",
+    )
+    assert_equal(
+        Int(
+            _bin_ok[List[Optional[Date]]](_P_DATE, OID_DATE_ARRAY)[0]
+            .value()
+            .days
+        ),
+        8825,
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[Timestamp]]](_P_TS, OID_TIMESTAMP_ARRAY)[
+                0
+            ].value()
+        ),
+        "2024-01-02 03:04:05.678901",
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[TimestampTz]]](
+                _P_TSTZ, OID_TIMESTAMPTZ_ARRAY
+            )[0].value()
+        ),
+        "2024-01-02 03:04:05.678901+00",
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[Time]]](_P_TIME, OID_TIME_ARRAY)[0].value()
+        ),
+        "12:34:56",
+    )
+    assert_equal(
+        _bin_ok[List[Optional[TimeTz]]](_P_TIMETZ, OID_TIMETZ_ARRAY)[0]
+        .value()
+        .offset_secs,
+        Int32(-32400),
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[Interval]]](_P_INTERVAL, OID_INTERVAL_ARRAY)[
+                0
+            ].value()
+        ),
+        "1 day",
+    )
+    assert_equal(
+        String(
+            _bin_ok[List[Optional[UUID]]](_P_UUID, OID_UUID_ARRAY)[0].value()
+        ),
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+    )
+
+
+def test_binary_array_rejects_the_int2_array_oid_for_int32() raises:
+    # The payload is a well-formed `int2[]`; only the requested type is
+    # wrong, and the OID check catches it before the element type does.
+    assert_equal(
+        _bin_error_kind[List[Int32]](_P_INT2_ELEM, OID_INT2_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
+    var message = _bin_error_message[List[Int32]](_P_INT2_ELEM, OID_INT2_ARRAY)
+    assert_true("oid 1005" in message, String("message was: ", message))
+    assert_true("oid 1007" in message, String("message was: ", message))
+
+
+def test_binary_array_column_read_as_string_is_still_rejected() raises:
+    # Unlike the text path, binary `String` is not a wildcard: an array
+    # column has no printed form to fall back on.
+    assert_equal(
+        _bin_error_kind[String](_P_INT4_123, OID_INT4_ARRAY),
+        PgErrorKind.TYPE_MISMATCH,
+    )
 
 
 def main() raises:
