@@ -1,68 +1,114 @@
-# DECISIONS — phase6-packaging-ci
+# DECISIONS — phase7-pool-copy-array
 
-## D1. slug は `phase6-packaging-ci`
-- **選択**: HANDOFF の Phase 1〜5 の続番で揃える（archive の並びも phase 順）
-- **却下**: `packaging-ci`（番号なし）／`release-0-1-0`（リリースを主目的と位置づける名前）
+## D1. slug は `phase7-pool-copy-array`、3 件を 1 マイルストーンで扱う
 
-## D2. 配布物は conda パッケージ（pixi build）+ GitHub Release + ソース利用手順
-- **選択**: `pixi.toml` に `[package]` + pixi-build-mojo を足して `.conda` を作る。タグから GitHub Release を作ってソース tarball と `.conda` を添付。
-  README の「自分のプロジェクトから使う」を pixi 依存指定で拡充
-- **却下**: modular-community への recipe 提出（外部リポジトリへの PR が必要で人間の作業になる。今回は採らない）
-- **注意**: pixi-build は preview 機能。Mojo 1.1.0 との相性・`mojo-compiler` の pin 方法は research のプローブで実在を確かめてから plan する
-  （Phase 5 reflect の提案「採る前に research のプローブ 1 本で実在を確かめる」）
+- 採用: HANDOFF §3 の対象外 3 件（プール / COPY / 配列型）をまとめて 1 マイルストーンにする。Phase 3（19 型）と同規模。
+- 却下: 「配列型 + COPY を先に、プールは次」「配列型だけ先に」。ユーザーは一度の discuss で全部の仕様を詰めることを選んだ。
+- 付随: 規模が大きいので `verify_round_max` は 4 にする（Phase 6 reflect の提案を適用）。
 
-## D3. CI マトリクスは Linux x86_64 + Linux aarch64 + macOS arm64
-- **選択**: pixi.toml の platforms 3 つ全部。公開リポジトリなので `ubuntu-latest` / `ubuntu-24.04-arm` / `macos-latest` はいずれも無料枠
-- **却下**: Linux のみ（HANDOFF §2「macOS は CI 必須」に反する）／x86_64 のみ
+## D2. 堅牢性の受け入れ基準を入れる
 
-## D4. 持ち越しは SIGPIPE rc 141 と `_collect_notifications` の `out` 復元を同梱、Windows は採らない
-- **選択**: 小規模 2 件を同梱して Phase 5 の残留リスクを消す。Windows はツールチェーンが無いので実機は不可
-- **却下**: 「Phase N+1 が引き取る」と書いたまま持ち越す（Phase 5 reflect の指摘）
+- 採用: Phase 5 / 6 と同じ「どの入力・出力状態でもトレースバックを出さず、既存データを失わない」を受け入れ基準に含める。
+  plan が堅牢性格子を初回タスクに含め、verify が該当指摘で差し戻せる。
+- 却下: 入れない（verify が残留リスクに留める）。COPY の途中切断やプールの死んだ接続など、異常系が主題の機能なので薄くできない。
 
-## D5. macOS ジョブは Homebrew の PostgreSQL 1 本で DB テストまで回す
-- **選択**: macOS ランナーに Docker が無いので、`brew` の PostgreSQL（17 系）をジョブ内で起動して `PQ_TEST_CONNINFO` で指す。PG 14 は Linux だけで回す。
-  blackhole は `socat` / `nc` で代替、無理なら接続タイムアウトのテストだけ SKIP
-- **却下**: DB を使わないステージだけ（macOS の実行が未検証のまま）／速いジョブと DB 付きジョブの 2 本（構成が増える）
+## D3. 配列の要素型は既存 19 型すべて
 
-## D6. Linux のゲートは `pixi run check` をそのまま 1 ジョブ
-- **選択**: ローカルと CI の判定を同じスクリプトに揃える（単一の真実）。PR と main push の両方で走らせる。所要は 1 ジョブ 5〜8 分見込み
-- **却下**: lint / テストのジョブ分割（final_check.sh にフラグが要る）／PR は lint のみ（マージ前に DB テストが走らない）
-- **付随（discuss の判断）**: CI ジョブで `pixi build` も走らせて `.conda` を artifact に置く。タグを使わずにリリース経路のビルド部分を毎 PR で検証できる
+- 採用: `List[T]` の `T` に型マッピング表の 19 型すべてを許す。要素デコーダは既存の `decode_text` / `decode_binary` を再利用し、
+  新規に書くのはテキストの配列リテラルパーサとバイナリの配列ヘッダ（ndim / flags / elemtype / dims / lbound）だけ。
+- 却下: 「基本型だけ」「基本型 + uuid / numeric / 日時（bytea / json / jsonb を除く）」。引用符内エスケープの扱いは要素型によらず
+  リテラル層で 1 回書けば済むので、型を絞る利点が小さい。
 
-## D7. リリースはワークフロー整備まで。タグは人間が打つ
-- **選択**: `v*` タグで動く release ワークフローを置き、動作確認はタグを使わない経路で行う。v0.1.0 のタグと Release はマージ後に人間が行う。
-  無人ターンが外向きの公開操作（タグ push / Release 作成）をしない
-- **却下**: マイルストーン内で v0.1.0 を切る（失敗時のタグ削除が要る）／Release を作らず artifact だけ（恒久的な配布 URL が無い）
+## D4. 配列は Mojo 標準の `List[T]`（1 次元）
 
-## D8. verify は PR 作成 + PR 上の CI 緑を合格条件にする
-- **選択**: リモートがあるので gsd-lite-verify の仕様どおり push + PR。CI がこのマイルストーンの成果物なので、PR 上で緑になることが最終検証。マージは人間
-- **却下**: PR 作成まで（CI が赤でも DONE になる）／従来どおりローカルマージ（verify の自動判定を上書きする記述が要る）
+- 採用: `row.get[List[Int32]](col)`。既存の `List[UInt8]`（bytea）と同じ書き味で、公開型を増やさない。
+- 却下: 自前 `PgArray[T]`（dims / lower bound 保持）。多次元と非 1 始まりの添字を保持できるが、新しい公開型が増え、
+  利用側が `.elements` 等で取り出す手間が増える。多次元の扱いは D5 以降で決める。
 
-## D9. 堅牢性の受け入れ基準を入れる
-- **選択**: timeout-minutes / DB 起動待ちの上限 / セットアップのリトライ / secrets 不要（fork PR でも動く）/ permissions 最小。flaky な赤を最初から潰す
-- **却下**: 入れない（まず動くことを優先）
+## D5. NULL 要素は `List[Optional[T]]` で受ける
 
-## D10. conda パッケージ名は `pq`
-- **選択**: import 名と一致させる。research で conda-forge / modular-community の同名を確認し、衝突があれば `mojo-pq` に落とす
-- **却下**: `mojo-pg`（リポジトリ名と一致するが import 名と違う）／`mojo-pq`（衝突が無ければ不要な接頭辞）
+- 採用: `get[List[T]]` は NULL 要素で `NULL_VALUE`、`get[List[Optional[T]]]` は `None` を要素に入れて返す。列 NULL の `get_optional` と同じ二段構え。
+- 却下: `List[T]` だけ（NULL を含む配列は `String` でしか読めない）。ディスパッチ分岐は倍になるが、NULL 混じりの配列は実務で普通にある。
 
-## D11. README は日本語のまま、英語は概要 + インストール節だけ
-- **選択**: 先頭近くに英語の短い概要とインストール（pixi 依存指定）を置く。翻訳コストが小さい
-- **却下**: README.en.md 全訳（二重管理）／日本語のみ
+## D6. 多次元は `TYPE_MISMATCH`、非 1 始まりの添字は無視
 
-## D12. CHANGELOG.md を作り Release 本文に使う
-- **選択**: Keep a Changelog 形式。0.1.0 の節に Phase 1〜5 の成果を要約。release ワークフローが該当版の節を本文にする
-- **却下**: GitHub の自動生成ノートだけ／両方の連結
+- 採用: ndim ≥ 2 はテキスト / バイナリとも `TYPE_MISMATCH`。下限添字は読み飛ばして要素だけ返す。
+- 却下: 平坦化（形状が失われる）、添字も `TYPE_MISMATCH`（実害が小さいのに読めなくなる）。
 
-## D13. ブランチ保護は手順を書くだけ。設定は人間
-- **選択**: リポジトリ設定の変更は外向きの操作なので無人ターンにやらせない。README に `gh api` / 画面での手順を書く
-- **却下**: impl が `gh api` で設定（間違えると verify 自身の PR に影響）／やらない
+## D7. 配列の送信は 19 型の `List[T]` / `List[Optional[T]]` をバイナリで
 
-## D14. 実行パターンは現在の設定を維持
-- **選択**: 全フェーズ Claude（`engine: claude`, `phase_engines: {}`）。model は research / plan / verify / reflect = claude-fable-5-1、impl = claude-opus-5。
-  `reflect: true`。research の対象は official_docs + similar_oss（local_projects は Mojo の前例が薄いので外す）
-- **却下**: impl を Codex（sandbox の検証が要る）／impl も fable-5-1（コスト増）
+- 採用: 既存の単体型と同じくバイナリ送信。`String` 要素の配列も配列ヘッダが要るのでバイナリ。
+- 却下: テキストリテラルで送る（要素の引用エスケープとサーバ側パースが要る）、受信のみ（`= ANY($1)` が使えない）。
 
-## D15. 無人ターンの外向き操作の線引き
-- **選択**: 許可するのはマイルストーンブランチの push と PR の作成・更新のみ。タグ・Release・リポジトリ設定・main push は人間
-- **理由**: CI がこのマイルストーンの成果物なので PR 上で動かす必要がある一方、公開状態を変える操作は取り消しが難しい
+## D8. 配列の受信はテキストとバイナリの両方
+
+- 採用: 既存 19 型と同じ規則（届いた形式でデコーダを選ぶ）。`execute(sql)`（PQexec、テキスト）の結果でも型付きで取れる。
+- 却下: バイナリだけ（テキスト形式の配列列は `String` でしか読めない）。
+
+## D9. COPY は FROM STDIN と TO STDOUT の両方、同期 `Connection` だけ
+
+- 採用: `PQputCopyData` / `PQputCopyEnd` / `PQgetCopyData` を足し、両方向を同期接続で扱う。
+- 却下: 片方向だけ（用途が半分になる）、`AsyncConnection` の COPY（`PQputCopyData` の 0 戻りと `PQgetCopyData(async=1)` の状態機械で
+  工数が倍になる。プールも同期なので揃える。次の候補として §3 に残す）。
+
+## D10. COPY のデータはバイト列の素通し
+
+- 採用: 利用側が text / CSV / binary の行バイト列を渡し、ライブラリは転送・終端・エラー回収だけ。全形式を最小のコードでカバーする。
+- 却下: 型付き行エンコーダ（`write_row(List[Param])` で PGCOPY binary を組み立てる）、さらに型付き行デコーダ。
+  既存のバイナリエンコーダを再利用できるが別系統のタスクになる。要望があれば次以降。
+
+## D11. COPY は RAII オブジェクト、未完了の drop は中止して接続を戻す
+
+- 採用: `CopyIn[origin]` / `CopyOut[origin]`。`finish` なしに `__del__` されたら `PQputCopyEnd(error)` / 残り行の読み捨てで接続をアイドルに戻す。
+  失敗は `Transaction` の自動 ROLLBACK と同じフック（`set_rollback_failure_handler`）へ。
+- 却下: コールバック 1 発（ストリーム的な利用が関数内に閉じる）、drop で何もしない（接続が COPY 状態のまま残り、次の `execute` が落ちる）。
+
+## D12. プールは単一スレッド前提、ロックなし
+
+- 事実（discuss のプローブ）: Mojo 1.1.0 の標準ライブラリに `std.threading` / `std.sync` / `parallelize` は無く、`std.atomic.Atomic[T]` だけがある。
+  スレッドは libc の pthread を `external_call` するしかない。
+- 採用: `Connection` と同じく Movable のみ、スレッド安全でないと明記。目的は接続の再利用と上限管理。言語にスレッドが来たらロックを足す。
+- 却下: pthread mutex を FFI で呼ぶ（テストに `pthread_create` の FFI も要り、Mojo オブジェクトの跨スレッド安全性を言語が保証しない。Windows は別実装）。
+
+## D13. 枯渇時の `acquire()` は即座に `USAGE`
+
+- 採用: `max_size` に達していれば待たずにエラー。単一スレッドでは返却を待つとデッドロックする。
+- 却下: 上限を超えて開く（上限の意味が変わる）、上限なし（サーバの `max_connections` で初めてエラー）。
+
+## D14. 健全性は `PQstatus` → `PQreset` → 捨てて新規
+
+- 採用: 往復なしで安い。サーバ側から切られた接続は次の `execute` で CONNECTION エラーになり、返却時の `PQstatus` で捨てられる。
+- 却下: 貸し出しごとに `SELECT 1`（毎回 1 往復）、確認しない（切れた接続を何度も貸す）。
+
+## D15. 返却時はトランザクション中なら ROLLBACK、COPY 中などは捨てる
+
+- 採用: `PQtransactionStatus` が INTRANS / INERROR なら `ROLLBACK`。ACTIVE / UNKNOWN は捨てる。GUC / prepared / 一時テーブルは残す（README に明記）。
+- 却下: 毎回 `DISCARD ALL`（1 往復、`DateStyle` / `IntervalStyle` の再設定も要る）、何もしない（開いたトランザクションが次の利用者に渡る）。
+
+## D16. 貸し出しは RAII ガード `PooledConnection[origin]`、drop で自動返却
+
+- 採用: `Connection` の公開メソッドを同じシグネチャで転送するガード。スコープを出たら後始末込みで自動返却し、スロットが漏れない。
+  `Transaction` / `CopyIn` と同じ origin パターン。「`pq` は `ref` を返さない」規則を維持。
+- 却下: `Connection` をムーブで渡し `release(conn^)` で明示返却（転送層は不要だが、返し忘れで貸し出し数が戻らず `max_size` に達する）。
+
+## D17. プールのオプションは統計 + `min_size` + `max_lifetime_s` の 3 つ
+
+- 採用: `size()` / `idle()` / `borrowed()`、`min_size`（事前接続）、`max_lifetime_s`（返却時に寿命超過を閉じる）。すべて `Pool.open` のキーワード引数と単純なカウンタで足せる。
+- 既定値: `min_size=0`、`max_lifetime_s=0`（無期限）。単位は秒で `Int`（`Optional` は使わない）。
+
+## D18. 受け入れ基準の観測手段は `backend_pid` と `pg_stat_activity`
+
+- 採用: 再利用の証明は `SELECT pg_backend_pid()` の一致、接続本数は `pg_stat_activity` の件数で測る。サーバ側切断は `pg_terminate_backend`。
+  verify が同じコマンドで再現できる。
+
+## D19. `.gsd-lite/` はこのまま追跡する
+
+- 採用: 6 フェーズ分の記録をリポジトリに残す運用を変えない（Phase 6 reflect の持ち越し (e) を閉じる）。
+- 却下: PR を squash マージ（人間の運用変更が要る）、gitignore にして追跡をやめる（git 復元で state が戻らず、ループのコミット運用と相性が悪い）。
+
+## D20. 実行パターンは現在の設定を維持
+
+- 採用: engine=claude / phase_engines={} / model: research・plan・verify・reflect = claude-fable-5-1, impl = claude-opus-5 / subagents=auto / reflect=true。
+  Phase 3〜6 と同じ。`GSD_LITE_ENGINE` は未設定、`gsd-lite-loop.sh --check` 合格（trust 済み）。
+- 却下: impl も fable-5-1（単価増）、impl だけ Codex（sandbox の準備確認が要る）、subagents=off。
+- research の調査対象は official_docs / similar_oss / local_projects の 3 つすべて。
