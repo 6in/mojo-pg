@@ -702,6 +702,45 @@ struct Connection(Movable):
         """
         return Int(self._pq[].PQstatus(self._conn))
 
+    def reset(self) raises PgError:
+        """Reconnect with `PQreset` and pin the session settings again.
+
+        `PQreset` closes the socket and reconnects with the parameters the
+        connection was opened with, so the `PGconn*` -- and therefore every
+        `Transaction`, `PreparedStatement`, `CopyIn` or `CopyOut` origin bound
+        to it -- stays valid while the backend behind it is replaced.
+
+        Three consequences are worth knowing before calling this:
+
+        * It reconnects **unconditionally**, so calling it on a healthy
+          connection also replaces the backend: `pg_backend_pid()` reports a
+          different value afterwards. Nothing here tests `PQstatus` first.
+        * The new session starts with the server's own `DateStyle`, which is
+          why `_SESSION_SETUP_SQL` is re-sent: measured on PG14 and PG17, a
+          bare `PQreset` leaves `DateStyle` at `ISO, MDY`, and the text date
+          decoders only read `ISO, YMD`.
+        * Server-side state is gone with the old backend. Prepared statements
+          no longer exist, so the `DEALLOCATE` a live `PreparedStatement`
+          sends on destruction fails and is silently ignored, and temporary
+          tables, `LISTEN` registrations and any open transaction are lost.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when the reconnect failed,
+                carrying libpq's own `PQerrorMessage` text; the connection is
+                left open (and bad) so the caller may retry. Otherwise
+                whatever `execute` raises for the session setup `SET`, under
+                the classification `_take_result` applies.
+        """
+        self._pq[].PQreset(self._conn)
+        if self._pq[].PQstatus(self._conn) != CONNECTION_OK:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        _ = self.execute(String(_SESSION_SETUP_SQL))
+
     def transaction_status(self) -> Int:
         """Return the transaction status as reported by `PQtransactionStatus`.
 
@@ -755,6 +794,27 @@ struct Connection(Movable):
                 status N)`, `N` being the `PQTRANS_*` value); otherwise
                 whatever `execute("BEGIN")` raises.
         """
+        self._transaction_parts()
+        return Transaction[origin_of(self)](
+            Pointer(to=self), self._rollback_failure_handler
+        )
+
+    def _transaction_parts(self) raises PgError:
+        """Run the checks and the `BEGIN` that `transaction()` needs.
+
+        This is the whole of `transaction()` except the final construction,
+        split out for the same reason `_prepare_parts` is: the origin a
+        `Transaction` is parameterised on has to be written by whoever holds
+        the borrow, so `Pool`'s `PooledConnection.transaction` builds the
+        value itself from these parts rather than calling `transaction()`
+        through a `Pointer`.
+
+        `self` is borrowed immutably -- nothing here writes a field -- so it
+        is callable through the immutable borrow a `PooledConnection` holds.
+
+        Raises:
+            PgError: Exactly what `transaction()` documents.
+        """
         if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
             raise PgError(
                 PgErrorKind.CONNECTION,
@@ -774,9 +834,6 @@ struct Connection(Movable):
                 ),
             )
         _ = self.execute("BEGIN")
-        return Transaction[origin_of(self)](
-            Pointer(to=self), self._rollback_failure_handler
-        )
 
     def set_rollback_failure_handler(mut self, handler: def(PgError) thin):
         """Install the handler for a `Transaction`'s failed implicit rollback.

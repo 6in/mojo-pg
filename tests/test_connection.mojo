@@ -24,6 +24,7 @@ from pq._ffi.types import (
 from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind
 from pq.result import Result
+from pq.types_datetime import Date
 
 comptime DEFAULT_CONNINFO = (
     "host=127.0.0.1 port=54317 user=pq password=pq dbname=pq_test"
@@ -490,6 +491,40 @@ def _get_string(result: Result, i: Int) raises -> String:
         raise Error(String(e))
 
 
+def _get_date(result: Result, i: Int) raises -> Date:
+    """Return column `i` of the first row decoded as a `Date`.
+
+    Args:
+        result: A result with at least one row.
+        i: Zero-based column index.
+
+    Returns:
+        The decoded date.
+
+    Raises:
+        Error: If `Row.get` raised a `PgError`.
+    """
+    try:
+        return result[0].get[Date](i)
+    except e:
+        raise Error(String(e))
+
+
+def _reset(conn: Connection) raises:
+    """Reconnect `conn` in place.
+
+    Args:
+        conn: The connection to reset, healthy or not.
+
+    Raises:
+        Error: If `reset` raised a `PgError`.
+    """
+    try:
+        conn.reset()
+    except e:
+        raise Error(String(e))
+
+
 def _column_type_oid(result: Result, i: Int) raises -> UInt32:
     """Return the type OID of column `i`.
 
@@ -943,6 +978,80 @@ def test_open_fixes_intervalstyle() raises:
     assert_equal(shown.row_count(), 1)
     assert_equal(_get_string(shown, 0), "postgres")
     _ = shown^
+    _ = conn^
+
+
+def test_reset_revives_a_dead_connection_and_repins_the_session() raises:
+    """`reset()` reconnects a lost backend and re-sends the session setup.
+
+    The second connection is what kills the first, because
+    `pg_terminate_backend(pg_backend_pid())` on the victim itself would make
+    the terminating statement its own failure. After the kill, `execute` is
+    what notices (libpq only learns the socket is gone when it writes), and
+    `reset()` is what makes the connection usable again.
+
+    The `DateStyle` assertion is the point of the test rather than a detail:
+    measured on PG14 and PG17, a bare `PQreset` comes back with the server's
+    own `ISO, MDY`, so a `reset()` that skipped `_SESSION_SETUP_SQL` would
+    hand `01/02/2024` to a text date decoder that only reads `YYYY-MM-DD`.
+    `get[Date]` on a text result is that decoder, so it fails on a session
+    that was not re-pinned.
+    """
+    var victim = _connect(_conninfo())
+    var before = _execute(victim, "SELECT pg_backend_pid()")
+    var pid = _get_string(before, 0)
+    _ = before^
+
+    var killer = _connect(_conninfo())
+    var killed = _execute(killer, "SELECT pg_terminate_backend(" + pid + ")")
+    _ = killed^
+    _ = killer^
+
+    var lost = _execute_error(victim, "SELECT 1")
+    assert_true(lost.kind == PgErrorKind.CONNECTION)
+
+    _reset(victim)
+    assert_equal(victim.status(), Int(CONNECTION_OK))
+    assert_equal(victim.transaction_status(), Int(PQTRANS_IDLE))
+
+    var style = _execute(victim, "SHOW DateStyle")
+    assert_equal(_get_string(style, 0), "ISO, YMD")
+    _ = style^
+
+    var dated = _execute(victim, "SELECT '2024-01-02'::date")
+    # 8767 days from the PostgreSQL epoch 2000-01-01 is 2024-01-02.
+    assert_true(_get_date(dated, 0) == Date(8767))
+    _ = dated^
+
+    var after = _execute(victim, "SELECT pg_backend_pid()")
+    assert_true(_get_string(after, 0) != pid)
+    _ = after^
+    _ = victim^
+
+
+def test_reset_of_a_healthy_connection_replaces_the_backend() raises:
+    """`reset()` reconnects even when there was nothing wrong.
+
+    It never tests `PQstatus` first, so a caller that uses it as a "repair if
+    needed" call still pays for a full reconnect -- and loses the session's
+    server-side state. The new `pg_backend_pid()` is what proves it, and the
+    temporary table that no longer exists is what makes the cost concrete.
+    """
+    var conn = _connect(_conninfo())
+    var before = _execute(conn, "SELECT pg_backend_pid()")
+    var pid = _get_string(before, 0)
+    _ = before^
+    _ = _execute(conn, "CREATE TEMP TABLE reset_probe (v int4)")
+
+    _reset(conn)
+
+    var after = _execute(conn, "SELECT pg_backend_pid()")
+    assert_true(_get_string(after, 0) != pid)
+    _ = after^
+    # The temp schema went with the old backend.
+    var gone = _execute_error(conn, "SELECT count(*) FROM reset_probe")
+    assert_true(gone.kind == PgErrorKind.SERVER)
+    assert_equal(gone.sqlstate, "42P01")
     _ = conn^
 
 

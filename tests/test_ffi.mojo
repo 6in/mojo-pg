@@ -107,6 +107,22 @@ def test_all_symbols_present() raises:
         assert_true(lib.check_symbol(name), "missing symbol " + name)
 
 
+def test_copy_symbols_resolve() raises:
+    """The three COPY entry points resolve to non-NULL addresses.
+
+    They are checked here rather than appended to `_symbol_names()` so the
+    coverage list above keeps its own count; what this adds over
+    `check_symbol` is that the resolved *function pointers* on a constructed
+    `LibpqFFI` are non-zero, which is what `copy_in` / `copy_out` call
+    through.
+    """
+    var ffi = LibpqFFI(_libpq_path())
+    assert_true(Pointer(to=ffi.PQputCopyData).unsafe_bitcast[Int]()[] != 0)
+    assert_true(Pointer(to=ffi.PQputCopyEnd).unsafe_bitcast[Int]()[] != 0)
+    assert_true(Pointer(to=ffi.PQgetCopyData).unsafe_bitcast[Int]()[] != 0)
+    _ = ffi^
+
+
 def test_lib_version_at_least_14() raises:
     var ffi = LibpqFFI(_libpq_path())
     assert_true(Int(ffi.PQlibVersion()) >= 140000)

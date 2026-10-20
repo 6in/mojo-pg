@@ -50,9 +50,9 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 - 最終判定（クリーンな状態から全検査。verify と T9 が使う）: **`/home/parallels/.pixi/bin/pixi run db-reset` → `/home/parallels/.pixi/bin/pixi run check`**（exit 0、`final_check: PASS`）
   - 4/6 段（`final_check.sh:120-129`）は現在 5 本の examples。**T8 で `examples/copy.mojo` / `examples/pool.mojo` の 2 行を足して 7 本**。6/6 段は `grep -cE 'warning:|WARNING:|implicit ROLLBACK failed'`（`final_check.sh:155`）。
     **見出し行・`print`・テストの出力にこれらの文字列を含めない**。サーバーの `NOTICE:` は数えられない（P28）
-  - 所要見積もり（Phase 4 reflect の式: 前回末実測 + 新規分）: `check` = Phase 6 末実測 **169〜190 s** + 新テストファイル 4 本 × 2 サーバー（コンパイル各 3〜5 s + 実行: `test_decode_array` < 1 s / `test_array` ≈ 3 s / `test_copy` ≈ 2 s（10 万行 IN+OUT 0.1 s、close(fd) 待ちなし）/
-    `test_pool` ≈ 3 s（`pg_sleep(1.1)` + `pg_sleep(0.05)` ×3））+ `test_leak` の 2 ループ ≈ 10 s（1 サーバーのみ）+ examples 2 本 ≈ 4 s → **+60〜85 s = 230〜275 s**。
-    閾値 **300 s**（超えたら PROGRESS に理由。Phase 6 の 247 s は新テスト 0 本の前提なので据え置かない）
+  - 所要見積もり（Phase 4 reflect の式: 前回末実測 + 新規分）: `check` = **turn 3（T1）実測 263 s** + 新テストファイル 4 本 × 2 サーバー（コンパイル各 3〜5 s + 実行: `test_decode_array` < 1 s / `test_array` ≈ 3 s / `test_copy` ≈ 2 s（10 万行 IN+OUT 0.1 s、close(fd) 待ちなし）/
+    `test_pool` ≈ 3 s（`pg_sleep(1.1)` + `pg_sleep(0.05)` ×3））+ `test_leak` の 2 ループ ≈ 10 s（1 サーバーのみ）+ examples 2 本 ≈ 4 s → **+60〜85 s = 323〜348 s**。
+    閾値 **380 s**（超えたら PROGRESS に理由。母数は T1 で取り直した: 訂正の根拠は `TRACE.md`「PLAN 訂正（turn 3）」）
 - **CI は PR 作成後に初めて走る**: `ci.yml` の `on:` は `pull_request`（base main）と `push`（main）だけ → T9 の branch push では走らない。PR を作るのは verify（REQ §6）。PR 作成後は state コミットの push ごとに 3 OS の run が起動し `concurrency` が古いものを cancel する（Phase 6 reflect Minus 5）
 - PG14 / PG17 の差: 無し（RESEARCH §2.1 / §2.4 両サーバー同一）。`server_version()` 分岐は書かない
 
@@ -100,7 +100,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 各タスクの完了基準は「`pixi run check` 6/6 PASS（既存テストの期待値変更 0 件）+ 自タスクのチェックリスト行が期待値 + PROGRESS の最新ターン節 40 行以内」を共通に含む（以下では省略）。
 陽性対照は「実装前に走らせて赤を見る」か「検査を外したコピー（scratch）で赤を見る」のどちらかで、**判別しなかった対照はそう書いて差し替える**（Phase 5 reflect）。
 
-- [ ] T1: 土台 — FFI 3 関数 + `Connection.reset()` + `_transaction_parts` 分離 + TRACE.md + 堅牢性格子スクリプト
+- [x] T1: 土台 — FFI 3 関数 + `Connection.reset()` + `_transaction_parts` 分離 + TRACE.md + 堅牢性格子スクリプト
   - 完了基準:
     - (a) `src/pq/_ffi/functions.mojo` に `PQputCopyData: def(PGconnPtr, CStr, c_int) thin abi("C") -> c_int  # libpq-fe.h:547`、
       `PQputCopyEnd: def(PGconnPtr, Int) thin abi("C") -> c_int  # libpq-fe.h:548（errormsg は 0 = NULL。決めた事項 2）`、
