@@ -198,3 +198,13 @@
 - 次への注意: round 2 の verify は F1 の回帰（`test_copy` 26 件 + 期待値変更 1 件が ① であること）+ クリーン `check` + 堅牢性格子 126 セルで足りる。
   `check` の所要は同じ木で 280 s（クリーン）〜360 s（テスト直後）と揺れるので、閾値 300 s は**クリーン実測**で判定する（TRACE「`check` の所要（turn 13）」）。
   未カバーの経路（`finish` / `abort` の `rc < 0` の drain）は指摘ではなく記録として残してある
+
+## turn 14 — verify — round 2: 合格（指摘 0 件）、PR #2 作成、CI 3 / 3 SUCCESS → reflect
+- やったこと: F1 差分（`transaction.mojo` / `copy.mojo` / `pool.mojo` docstring / `test_copy.mojo` 26 件）の回帰レビュー（親のみ、サブエージェントなし）、`db-reset` → `check` 6/6 PASS **288 s**（PASS 1534 / FAIL 0）、
+  堅牢性格子 126 / 126 セル unhandled 0（rc 分布は round 1 と完全一致）、チェックリスト 77 key は turn 13 基線と差分 0。VERIFICATION.md に round 2 節 → commit → push →
+  `gh pr create` で **PR #2**（https://github.com/6in/mojo-pg/pull/2）→ `gh pr checks 2 --watch` で run `39428167302` の 3 ジョブが SUCCESS（約 12.5 分、再実行なし）
+- 想定外: なし（`check` 288 s は閾値 300 s 内。CI は 40 分の上限に対して 12.5 分）
+- やり直し: 0 回
+- 次への注意: reflect は `.gsd-lite/reflect/` に書いてから DONE にする。振り返りの材料: (1) round 1 の 3 指摘はいずれも「T6 で `_check_not_copying` が入って変わった `execute` の失敗の仕方」を `Transaction` / `CopyIn` の状態機械が織り込んでいなかった同型の問題で、
+  impl の TRACE（T8 の PLAN 訂正 ②「handler を呼ぶのは `CopyIn.__deinit__`」）が誤報の観測を正しく記録していたから verify で拾えた。(2) F1 (d) ④ は修正前から green（陽性対照にならなかった）。
+  (3) `Read` ツールの dedup スタブ（turn 12）は今回は `Read(offset=)` で回避できた。マージ・タグ・Release は人間（Phase 6 D7 / D15）。ブランチは `gsd-lite/phase7-pool-copy-array` に残したまま終了する

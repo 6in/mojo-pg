@@ -41,7 +41,7 @@ round 1 で拾えた理由: 3 件とも「`_check_not_copying` が入ったこ�
 
 配列（テキスト / バイナリ / 送信）、COPY の正常系と USAGE 格子、プール全件、`Connection.reset()`、文書・examples・pixi・final_check、堅牢性格子 126 セル、セキュリティ観点。round 2 は F1 の差分（`transaction.mojo` / `copy.mojo` / `pool.mojo` docstring / `test_copy.mojo`）の回帰と、`check` 6/6 + 格子の再確認だけを行い、新しいクラスの探索はしない。
 
-## round 2（turn 14、2026-10-20）— 判定: **合格**（指摘 0 件、verify_round 2 / 4）→ push + PR
+## round 2（turn 14、2026-10-20）— 判定: **合格**（指摘 0 件。state の `verify_round` は 1 / 4 のまま: 合格は +1 しない）→ push + PR
 
 対象: F1 の差分 `git diff 5390545..HEAD`（`src/pq/copy.mojo` +90/−24、`src/pq/transaction.mojo` +35/−10、`src/pq/pool.mojo` docstring、`tests/test_copy.mojo` +296）
 と、round 1 で合格だった事項の回帰確認。HEAD `1edf68e`。実行エンジン: Claude Code（claude-fable-5-1）。
@@ -71,5 +71,11 @@ round 1 の方針どおり**新しいクラスの探索はしていない**（�
 
 ### PR / CI
 
-- PR: （作成後に追記）
-- CI: （`gh pr checks --watch` の結果を追記）
+- PR: https://github.com/6in/mojo-pg/pull/2（`gh pr create --base main`、HEAD `f6c4fdb`。マージは人間 / CI）
+- CI run: `39428167302`（event `pull_request`、headSha `f6c4fdb`、created 2026-10-20T13:10:35Z = 自分の push が起動した run）
+- CI: **3 / 3 SUCCESS**（`gh pr checks 2 --watch`、13:10:38Z 開始 → 13:23:03Z 完了 = 約 12.5 分、再実行なし）。
+  `check (ubuntu-latest)` 13:19:44Z / `check (ubuntu-24.04-arm)` 13:23:03Z / `check (macos-latest)` 13:17:08Z → REQ §4.4「CI 3 OS 緑」達成
+
+### 判定
+
+受け入れ基準 §4.1〜§4.4 と §2.4 をすべて満たす。差し戻しなし。`reflect: true` なので `phase: "reflect"` へ（マージは人間 / CI、タグ・Release は人間）。
