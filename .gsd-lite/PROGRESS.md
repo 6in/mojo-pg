@@ -21,3 +21,18 @@
 - やり直し: 1 回（チェックリストの `.md` コメント除外。再実行して基線を取り直した）
 - 次への注意: `pixi` は絶対パス、`bash <任意パス>` は `pixi run bash <file>` 経由。T1 は `_transaction_parts` 分離で `test_transaction` 13 件の期待値不変を確認。チェックリストは「コメントを書いたらコミット前に 1 回」。
   T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）。各ターン `check` の所要を TRACE に（閾値 300 s）。PROGRESS 節は 40 行以内
+
+## turn 3 — impl — T1 土台（COPY FFI 3 関数 / `Connection.reset()` / `_transaction_parts` 分離 / TRACE.md / 堅牢性格子）
+- やったこと: (a) `_ffi/functions.mojo` に `PQputCopyData` / `PQputCopyEnd` / `PQgetCopyData` + `_dl_sym`、`test_ffi` に 3 シンボルの解決 1 件（8 件 PASS）。
+  (b) `Connection.reset()`（`PQreset` → `PQstatus` → `_SESSION_SETUP_SQL` 再送）+ `test_connection` に 2 件（31 → 33 件 PASS）。(c) `_transaction_parts()` を切り出し `test_transaction` 13 件 PASS（期待値変更 0）。
+  (d) `.gsd-lite/TRACE.md` 新設（全 77 key / `check` の所要 / PLAN 訂正）。(e) `scratch/turn-003-robust-grid.sh`（入力 6 × 出力 4 × 依存 4、3 軸は配列変数で列挙）を 1 回実行 → **90 行すべて `unhandled_markers=0`**（rc 141 は EPIPE の 10 行のみ、Phase 5 の既知）。
+  (f) `db-reset` → `check` 6/6 PASS = **263 s**。チェックリスト T1 の 11 行は全部期待値（`ffi_*`=3 / `conn_reset_def`=1 / `conn_reset_session_setup`=5 / `conn_transaction_parts_def`=1 / `test_connection_tests`=33 / `trace_*`=exists,1 / `grid_script`=exists、`conn_transaction_parts_sites` は `absent(pool.mojo)` で T7 まで許容）。生値と総数 77 は TRACE.md「チェックリスト（turn 3）」
+- 想定外: (1) **`check` の母数が PLAN と違った**: 実測 263 s に対し PLAN の母数は「Phase 6 末 169〜190 s」。T1 の reset テスト 2 件が両サーバーで ≈ 43 s を足し（この環境は 1 接続 `open` ≈ 3.5 s、reset テストは 1 件で 3 接続）、
+  その分は PLAN の `+60〜85 s` に入っていなかった → PLAN 訂正（下記）。(2) `test_ffi.mojo` の `_symbol_names()` は `assert_equal(len(names), 55)` を持つので、3 シンボルをそこに足すと既存の期待値を変えてしまう → 別テスト `test_copy_symbols_resolve`（`LibpqFFI` のフィールドが非 0）にして**期待値変更 0 件**を守った。
+  (3) `Date.from_ymd` は `raises PgError` でテストから直接呼べない → `Date(8767)`（既存 `test_extended_datetime.mojo:936` と同じ書き方）に。(4) `tee` / `date` は allowlist に通った（PLAN の注意は `bash <任意パス>` のみ該当）
+- やり直し: 1 回（`Date(2024, 1, 2)` が fieldwise ctor（`days: Int32`）に合わずコンパイルエラー → `Date(8767)` に直して再実行）
+- PLAN 訂正: `check` の母数「Phase 6 末実測 169〜190 s」→ **turn 3 実測 263 s**、見積もり「230〜275 s」→ **323〜348 s**、閾値「300 s」→ **380 s**（根拠は TRACE.md「PLAN 訂正（turn 3）」）
+- 陽性対照: `scratch/turn-003-posctl-reset.mojo`（`reset()` から `_SESSION_SETUP_SQL` 再送を外した形 = 生の `PQreset`）→ `DateStyle` が `ISO, MDY` で、テストの `assert_equal(…, "ISO, YMD")` が赤になることを実測（`turn-003-posctl-reset.log`）
+- 次への注意: `check` の閾値は **380 s**（300 s ではない。TRACE の訂正節）。新しいサーバーテストは 1 件 ≈ 3.6 s × 2 サーバーで積み上がるので、T5 / T6 / T7 のテスト件数は所要に直結する。
+  T2 は `decode_text.mojo` 単独（`parse_array_literal` + 40 分岐）で `test_decode_array.mojo` はサーバー不要 → `pixi run mojo run -I src tests/test_decode_array.mojo` だけで回せる。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）。
+  `conn_transaction_parts_sites` と `copy_in_defs` / `copy_out_defs` は `pool.mojo` を見るので T7 まで `absent`。コメントを書いたらコミット前にチェックリストを 1 回（turn 3 は TRACE の 2 key 以外の差分なしを `diff` で確認した）
