@@ -208,3 +208,11 @@
 - 次への注意: reflect は `.gsd-lite/reflect/` に書いてから DONE にする。振り返りの材料: (1) round 1 の 3 指摘はいずれも「T6 で `_check_not_copying` が入って変わった `execute` の失敗の仕方」を `Transaction` / `CopyIn` の状態機械が織り込んでいなかった同型の問題で、
   impl の TRACE（T8 の PLAN 訂正 ②「handler を呼ぶのは `CopyIn.__deinit__`」）が誤報の観測を正しく記録していたから verify で拾えた。(2) F1 (d) ④ は修正前から green（陽性対照にならなかった）。
   (3) `Read` ツールの dedup スタブ（turn 12）は今回は `Read(offset=)` で回避できた。マージ・タグ・Release は人間（Phase 6 D7 / D15）。ブランチは `gsd-lite/phase7-pool-copy-array` に残したまま終了する
+
+## turn 15 — reflect — phase7-pool-copy-array
+- やったこと: 振り返りを .gsd-lite/reflect/20261020-2228-phase7-pool-copy-array.md に作成（提案 10 件。Plus 8 / Minus 8 / Interesting 10）。
+  計測は turns.jsonl 14 行 + 生ログ 14 本の `result` 合算 + `turn-015-gaps.py`（record 間隔）で取った
+- 想定外: (1) turns.jsonl の turn 10 が 11,411 s（他の impl は 754〜2,535 s）で、生ログに 9,897 s の空白 + `EAI_AGAIN` の API エラーがあったのに PROGRESS turn 10 は停止に触れていない。
+  (2) turn 9 / 10 / 12 / 14 は `result` が複数（4 / 16 / 6 / 3）で、turns.jsonl の出力トークンは最後の 1 件だけ（Phase 5 / 6 提案のツール側修正は未反映）
+- やり直し: 0 回
+- 次への注意: ループに停止検知（record 間隔 > 15 分で WARN + `stall_s`）と複数 `result` の合算を足す（ツール側）。`Monitor` は deny に。ガードを N 箇所に足すタスクは「ガード × 状態遷移」の格子を完了基準に
