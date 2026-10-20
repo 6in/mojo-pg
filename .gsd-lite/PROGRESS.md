@@ -111,3 +111,27 @@
   T7 で `copy_in_defs` / `copy_out_defs` / `conn_transaction_parts_sites` の `absent(src/pq/pool.mojo)` が解消し 3 / 3 / ≥ 3 になる。`PooledConnection` の origin 付き 4 本は `_X_parts` + `_conn_ptr()` rebind（決めた事項 19、`probe-pool.mojo:155-161`）で、`_copy_in_parts` / `_copy_out_parts` はこのターンで用意済み。
   **サブエージェントの報告の時間は `Summary [ N ]` を秒と読んでいる可能性がある**（実体はミリ秒）。所要は `final_check.log` の `took Ns` 行で確かめる。`check` は 266 s で余裕 114 s、母数は 260〜370 s の揺れ込みで読む。
   サブエージェントが書き終える前に検証を始めないこと（(4)）。`try` の中から `Error` を投げられない（(2)）。
+
+## turn 9 — impl — T7 `src/pq/pool.mojo` + `tests/test_pool.mojo` + leak 2 ループ（サブエージェント 1 本で並行）
+- やったこと: (a) `src/pq/pool.mojo` 新設 — `Pool`（`open` の conninfo / `Dict` 2 オーバーロード、引数検査 3 種は**接続前**に `USAGE`、`acquire` / `_release` / `close` / `size` / `idle` / `borrowed` / `set_rollback_failure_handler`）、
+  `PooledConnection[origin]`（`__deinit__` で返却 + 転送 11 本。origin 付き 4 本は `_transaction_parts` / `_prepare_parts` / `_copy_in_parts` / `_copy_out_parts` + `_conn_ptr()` rebind）、`_Slot`。
+  返却の判定順は決めた事項 18 どおり（closed → `ROLLBACK` → status/txstatus → 寿命 → `PQconsumeInput` ×2 → park）。内部状態の書き換えは `_mut_idle()` / `_mut_borrowed()` の untracked ポインタ。
+  (b) `__init__.mojo` に re-export。(c) テストはサブエージェント B が仕様から独立に: `tests/test_pool.mojo` **18 件**（≥ 14）、`tests/test_leak.mojo` に pool 2 ループ（20 → **22 件**）。PG17 / PG14 両方 PASS。
+  `check` 6/6 PASS = **321 s**（閾値 380 s、`PASS` 1524 行 = turn 8 の 1486 + 18×2 + 2、`FAIL` 0 = **既存テストの期待値変更 0 件**）。チェックリスト T7 の 11 行は全部期待値
+  （`pool_mojo`=exists / `pool_struct`=1 / `pooled_struct`=1 / `pool_release_def`=1 / `pool_consume_input`=5 / `pool_rollback`=1 / `pool_monotonic`=10 / `init_export_pool`=1 / `test_pool_tests`=18 / `test_leak_tests`=22 / `test_leak_pool`=7）。
+  併せて `conn_transaction_parts_sites`=3 / `copy_in_defs`=3 / `copy_out_defs`=3 / `test_file_count`=28 / `src_mojo_count`=22 で **`absent` は T8 の examples 2 本だけ**（生値と総数 77 は TRACE「チェックリスト（turn 9）」）
+- PLAN 訂正 4 件（詳細は TRACE「PLAN 訂正（turn 9）」）: ① T7 (d) の陽性対照は「`_release` の**捨てる**経路」では判別しない（leak の 2 ループはどちらも捨てる経路を通らない）→ **park 経路**（`_idle.append` の直前で handle を NULL）に差し替え。
+  ② `set_rollback_failure_handler` は `for ref slot in self._idle` ではコンパイル不可（`List iteration requires the element to be 'Copyable'`）→ 添字形。③ `_Slot` から `Connection` を取るのは `take(deinit self)` だけが通る。④ `PooledConnection[origin]` に `Parameters:` 節が必要
+- 想定外: (1) `slot.conn^` が `field '...' destroyed out of the middle of a value` で不可。`def take(var self)` でも同じで、**`deinit self` の消費メソッドだけが通る**（`turn-009-probe-take.mojo` で A/B 比較）。
+  (2) `libpq_ptr()` は raises なので `__init__` からは呼べない（`__init__` は raises でない）→ `pq` を引数で渡し `open` 側で `libpq_ptr()` を呼ぶ形に。
+  (3) `PooledConnection[origin]` の `Parameters:` 節が無いと 3/6 段と 6/6 段が warning 1 行で FAIL する（`check` を 1 回分無駄にした。struct に parameter を付けたら docstring も足す）。
+  (4) サブエージェントの報告で **モジュールレベルの `var` は Mojo 1.1.0 に無い**（`global variables are not supported`）→ ⑭ の handler 呼び出し回数は既存 `test_transaction` / `test_copy` と同じ**環境変数**で数えている（依頼文の `List[Int]` 指定は実現不能だった）
+- やり直し: 2 回（(2) の `libpq_ptr` と `_mut_cell` の origin 型 = `package` のコンパイルエラーで即判明 / (3) の `Parameters:` 節 = `check` が 3/6・6/6 段で FAIL → 1 行追加で解消）。テストの赤は 0 回
+- 陽性対照: 3 件すべて 1 件に絞れた（TRACE「陽性対照（turn 9）」）。① park した handle の `PQfinish` を落とす写し → `test_leak` が `test_pool_acquire_and_release_does_not_leak` **1 件だけ** FAIL（open/drop ループは PASS = 2 ループが別経路を見ている証明）。
+  ② `_release` で `_stmt_counter[0] = 0` にする写し → `test_pool` が `test_the_statement_counter_rides_along_with_the_connection` **1 件だけ** FAIL（サーバーは `42P05`）。③ P21（T7 ⑰）: `var p2 = pool^` の後に guard を使うと `use of uninitialized value 'pool'` でコンパイル失敗
+- サブエージェント: 1 本（B = `tests/test_pool.mojo` + `test_leak.mojo`）。**親の実装のバグを 1 件見つけた**（上記 PLAN 訂正 ②。B は scratch に patched copy を置くだけで src には触っていない → 親が本体を直した）。
+  契約外の提案 6 件はすべて**未実装のまま報告**（leak ループの payload 拡大 / `Pool.max_size()` 等の accessor / 貸し出し中接続への handler 適用 / 追加テスト 4 種 / `server_version` を素の `Connection` と比較 / `Pool.clear()` と明示 `release()`）
+- 次への注意: T8 は README / CHANGELOG / `__init__` docstring / examples 2 本（`copy.mojo` / `pool.mojo`）+ `examples/params.mojo` の `= ANY($1)` + `pixi.toml` + `final_check.sh`。並列サブ作業 2 本（A = examples + pixi + final_check、B = README + CHANGELOG、親 = `__init__.mojo` + 照合器）が PLAN の推奨。
+  **README のコード片は examples から逐語**で、`python3 .gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-008-readme-excerpts.py` を必ず回す。`examples/pool.mojo` は `Pool.open(conninfo, 2)` → 3 本目の `USAGE` → drop → 同じ pid の再利用まで（`backend_pid` は `SELECT pg_backend_pid()`）。
+  `check` は 321 s（余裕 59 s）、母数 260〜370 s の揺れ込み。T8 の増分は examples 2 本（2 s × 2 サーバー）と文書だけ。`pool_*` のキーは全部埋まったので T8 は README 系 12 行と件数 3 行だけが動く。
+  **struct に parameter を足したら docstring に `Parameters:` 節**（(3)）。テスト側で数える副作用カウンタは環境変数（(4)）
