@@ -232,11 +232,20 @@ T2 の期待値との対応:
 |---|---|---|---|---|---|
 | 3 | T1 | `pixi run db-reset` → `pixi run check` | 2026-10-20T15:17:43+09:00 → 2026-10-20T15:22:06+09:00 | **263 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1252 件） |
 | 4 | T2 | `pixi run db-up` → `pixi run check` | 2026-10-20T15:38:44+09:00 → 2026-10-20T15:43:54+09:00 | **310 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1332 件） |
+| 5 | T3 | `pixi run check` | （PROGRESS turn 5 の実測。表への転記漏れ） | **368 s** | PASS 6/6 |
+| 6 | T4 | `pixi run db-up` → `pixi run check` | 2026-10-20T16:18:01+09:00 → 2026-10-20T16:23:19+09:00 | **318 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1392 件） |
 
 turn 4（T2）は 310 s。足したのは `tests/test_decode_array.mojo` 40 件だけで、サーバーに触らないため
 実行は 0.065 s × 2 サーバー。差の ≈ 47 s はこのファイルの**コンパイル**（1 サーバーあたり ≈ 23 s。
 `check` は 1 ファイル 1 プロセスで両サーバー分コンパイルし直す）で、サーバーテストを持たない
 テストファイルでも 1 本 ≈ 47 s 増えるという値になる。閾値 380 s まで残り 70 s。
+
+turn 6（T4）は **318 s** で、turn 5 の 368 s より **50 s 短い**。足したのは新規ファイルではなく既存
+2 ファイルへの追記（`test_encode_binary` +3 件 = 0.006 s、`test_params` +4 件 = うち 3 件がサーバーで
+≈ 14 s × 2 サーバー）なので、単調に増えるはずの値が下がった = **この環境の `check` には ±50 s の
+揺れがある**。turn 5 の「残り 12 s」という読みは揺れの上側を母数にしたもので、実際の母数は
+310〜370 s とみるのが正しい。閾値 380 s は据え置き（T5〜T7 で超えたら PROGRESS に実測と内訳を書いて
+進める、という PLAN 55 行の扱いも据え置き）。
 
 **これが Phase 7 の見積もりの母数**（PLAN「検証コマンド」の所要見積もりの `前回末実測`）。
 
@@ -255,3 +264,148 @@ turn 4（T2）は 310 s。足したのは `tests/test_decode_array.mojo` 40 件�
   leak 2 ループ）に入っていなかった。(2) この環境は 1 接続 `open` ≈ 3.5 s で、新規サーバーテストの
   単価が PLAN の見積もり（`test_array` ≈ 3 s など）より高く出る余地がある。380 s は
   263 + 85 = 348 s に 1 割の余裕。**超えたら PROGRESS に理由を書く**という扱いは変えない
+
+## チェックリスト（turn 6）
+
+`scratch/turn-006-checklist.log` の全文（**全 77 key**）。T4 の 6 行には期待値を添える
+（turn 4 からの差分は T3 の 3 行 + `test_decode_array_tests` 40 → 63（turn 5 の分）と、
+T4 の 6 行だけ。`diff turn-004-checklist-after-trace.log turn-006-checklist.log` で確認）。
+turn 5 のログは取り直していないので差分は 2 ターン分をまとめて載せる。
+
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=2
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=absent(tests/test_array.mojo)
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=25
+src_mojo_count=20
+src_def_ref_return=0
+src_iterator_in_copy=absent(src/pq/copy.mojo)
+tests_sh_bash4_only=0
+```
+
+T4 の 6 行の期待値（PLAN 表 76-77 行）と実測:
+
+| key | 期待値 | 実測 |
+|---|---|---|
+| `encode_array_def` | 1 | **1** |
+| `params_list_implicit` | 35 | **35**（既存 `var v: List[UInt8]` 1 + 新規 34） |
+| `params_optional_list_implicit` | 17 | **17** |
+| `params_text_array_oid` | ≥ 1 | **3**（import 1 + `List[String]` / `List[Optional[String]]` の 2 本） |
+| `test_encode_binary_tests` | ≥ 29 | **29**（26 + 3） |
+| `test_params_tests` | ≥ 37 | **37**（33 + 4。既存 33 件の期待値変更 0） |
+
+他の 71 key は turn 5 のまま（`src_mojo_count` / `test_file_count` は新規ファイルを作らないので不変）。
+
+## P9 実測（turn 6）
+
+`List[String]` を OID 1009（`text[]`）で送って 1015 / 3807 の位置に届くかは RESEARCH で未実測の
+1 件だった（決めた事項 9 / PLAN T4 (c)）。プローブ `scratch/turn-006-probe-p9.mojo`
+（ログ `turn-006-probe-p9.log`、PG17）の実測:
+
+```
+select varchar[] OK -> {a,"b,c","d\"e"}
+select jsonb[] OK -> {"{\"k\": 1}","[1, 2]"}
+insert varchar[] OK -> {x,y}
+nul inside element FAILED -> 22021 / invalid byte sequence for encoding "UTF8": 0x00
+empty varchar[] OK -> {}
+int4[] with NULL OK -> {1,NULL,3}
+= ANY(int4[]) OK -> true
+```
+
+- **`$1::varchar[]` / `$1::jsonb[]` / `varchar[]` 列への INSERT はすべて通る** → 決めた事項 9
+  （1009 固定 + サーバーの配列キャスト）をそのまま採用。PLAN の代替案（`Param` に `oid` 引数付き
+  ctor を足して 1015 で送る）には**切り替えない**。PLAN 訂正なし
+- **NUL 入り要素の sqlstate は `22021`**（`character_not_in_repertoire`、PG14 / PG17 同一）。
+  決めた事項 10 の「22021 想定」が実測で確定したので、`test_params.mojo` の
+  `test_nul_in_a_string_array_element_is_the_servers_call` は `kind == SERVER` だけでなく
+  `sqlstate == "22021"` も断言する（このファイルの方針「SQLSTATE / OID / 値だけを断言する」に沿う。
+  サブエージェントは未実測を前提に `!= ""` + `print` で書いていたのを親が差し替えた）
+- 併せて `= ANY($1)`（T5 (e)）と `List[Optional[Int32]]` の `{1,NULL,3}`（T5 (b)）も通ることを確認。
+  T5 はこの 2 つを本番のテストとして書く
+
+## 陽性対照（turn 6）
+
+`tests/test_params.mojo` の OID 表から `timetz[]` の 1 行だけを 1270 → 1266 に変えた写し
+（`scratch/turn-006-posctl-oid.mojo`、ログ `turn-006-posctl-oid.log`）を走らせると
+**`test_param_oids_of_the_array_types` 1 件だけが FAIL**（`reason: timetz[]: oid`、36 passed / 1 failed）。
+34 行の表が literal で固定されていて、転記ミスが検査されていることの証明（PLAN T4 (d)）。
+turn 4 の教訓（両方向マップだけでは循環で検査にならない）に従い、この表は `_array_oid_of` を呼ばずに
+数値を直書きしている。

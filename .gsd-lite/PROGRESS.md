@@ -61,3 +61,20 @@
 - 陽性対照: NULL 判定を `elem_len == -1 and flags == 1`（= P1 の罠）に変えると `test_binary_array_null_element_with_flags_zero` **だけ**が FAIL（`turn-005-posctl-flags.log`）。63 件中 1 件に効いている
 - 次への注意: T4 は `encode_binary.encode_array` と `params.mojo` の `@implicit` 34 本（期待値 1 / 35 / 17）。最初に `List[String]` → `$1::varchar[]` をサーバーで 1 回実測する（P9。未実測のまま OID 1009 固定にしている）。
   `check` の所要が閾値に迫っている（368 / 380 s）。T5〜T7 で超えたら PLAN 53-55 行の見積もり（新ファイル 4 本で +60〜85 s）が低すぎたのが理由 — 実測は `test_decode_array` 1 本で +18 s なので、**超過は BLOCKED にせず PROGRESS に実測値と内訳を書いて進める**（PLAN 55 行の指示どおり）
+
+## turn 6 — impl — T4 配列エンコーダ + `Param` の `@implicit` 34 本（サブエージェント 1 本で並行）
+- やったこと: (a) `encode_binary.encode_array(elems, elem_oid)`（空 = 12 byte ヘッダ / それ以外は ndim 1・flags = None の有無・dim・lbound 1 + 要素ごと `int32 len + bytes`、None は `ffffffff`）。`ARRAY[1,2,3]::int4[]` の実測 44 byte と一致。
+  (b) `params.Param` に `List[E]` 17 + `List[Optional[E]]` 17 の `@implicit`（生成スクリプト `turn-006-gen-params.py` の 1 表から機械生成 → `turn-006-splice-params.py` で挿入 → `mojo format`）。(c) **P9 を最初に実測**（下記）。
+  (d) テストはサブエージェント B が仕様表から独立に: `test_encode_binary` +3 件（29）/ `test_params` +4 件（37、既存 33 件の期待値変更 0 件）。親が統合して検証。
+  `check` 6/6 PASS = **318 s**（閾値 380 s、PASS 1392 件）。チェックリスト T4 の 6 行は全部期待値（`encode_array_def`=1 / `params_list_implicit`=35 / `params_optional_list_implicit`=17 / `params_text_array_oid`=3 / 29 / 37。生値と総数 77 は TRACE「チェックリスト（turn 6）」）
+- P9 実測（`turn-006-probe-p9.log`、PG17）: `$1::varchar[]` / `$1::jsonb[]` / `varchar[]` 列への INSERT は **すべて通る** → 決めた事項 9（`List[String]` = 1009 固定 + サーバーの配列キャスト）をそのまま採用、代替案に切り替えず **PLAN 訂正なし**。
+  NUL 入り要素は sqlstate **`22021`**（PG14 / PG17 同一）= 決めた事項 10 の「22021 想定」が確定。併せて `= ANY($1)` と `{1,NULL,3}`（T5 (b)(e) の先取り）も通ることを確認
+- 想定外: (1) **`def (E) -> List[UInt8]` を値で渡す汎用ヘルパは Mojo 1.1.0 で作れない**（thin 関数が `def(E)` 型に適合しない。`turn-006-probe-fnparam.mojo`）→ 34 本それぞれが自分のループを持つ形（生成スクリプトで量産）に。
+  (2) `List[Optional[Int32]] = [1, None, 3]` の literal は**通らない**（`IntLiteral` → `Optional[Int32]` の 2 段変換が無い）。`[Optional[Int32](1), None, Optional[Int32](3)]` と書く必要がある。ただし `List[Optional[String]] = ["a", None]` は通る（`String` の `@implicit` が 1 段で当たる）。
+  (3) `encode_array` の中で `elems[i].value()` を `var` に束縛すると `List[UInt8]` が `ImplicitlyCopyable` でないとエラー → `ref bytes = elems[i].value()` で借用して 1 byte ずつ append（コピーも起きない）。
+  (4) `check` が **318 s** で turn 5 の 368 s より 50 s 短い（足したのは既存ファイルへの追記だけで増える方向しかないのに下がった）→ **この環境の `check` には ±50 s の揺れがある**。turn 5 の「残り 12 s」は揺れの上側を母数にした読みで、実際の母数は 310〜370 s（TRACE に追記）
+- やり直し: 2 回（(1) の汎用ヘルパ = probe で没、(3) の `ref` 束縛 = コンパイルエラーで即判明）。どちらもプローブ / コンパイル段階で、テストの赤ではない
+- 陽性対照: OID 表の `timetz[]` 1 行だけを 1270 → 1266 に変えた写し（`turn-006-posctl-oid.log`）→ **`test_param_oids_of_the_array_types` 1 件だけが FAIL**（`reason: timetz[]: oid`）。turn 4 の教訓どおり表は `_array_oid_of` を呼ばず数値を直書きしている
+- サブエージェント: 1 本（B = テスト 2 ファイル）。契約外の提案 5 件はすべて**未実装のまま報告**（`Span` を取る `_assert_bytes` 追補 / `text[]` の実測バイト列 / 全要素 None / jsonb の正規化 / キャスト無しの失敗方向）。親が直したのは 1 箇所だけ: NUL の sqlstate を未実測前提の `!= ""` + `print` から **`== "22021"` の断言 + マーカー不在**に（実測が済んだため。テスト内の `print` はこのリポジトリに前例が無い）
+- 次への注意: T5 は `tests/test_array.mojo` 新設（≥ 14 件、17 型 × text/binary × `List`/`List[Optional]`）。送信側は `List[Param] = [x^]` の形で、**名前付き `List` には `^` が必須**。`List[Optional[E]]` の literal は `Optional[E](...)` を明示（上記 (2)）。
+  text/binary 両形式の比較は `execute(sql)` と `execute(sql, [], result_format=BINARY)`。`check` は 310〜370 s の揺れがあるので、1 回の計測で閾値超過を判断しない（db-up 済みで 2 回測る余地があるならそうする）
