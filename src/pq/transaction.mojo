@@ -73,6 +73,7 @@ from pq._ffi.types import (
     PGRES_COMMAND_OK,
 )
 from pq.connection import Connection
+from pq.copy import CopyIn, CopyOut
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param
 from pq.prepared import PreparedStatement
@@ -241,7 +242,10 @@ struct Transaction[origin: ImmOrigin](Movable):
 
         The value is marked ended *before* the `COMMIT` goes out, so a failure
         here is not followed by a second attempt from `__deinit__`; the block
-        is over either way, and PostgreSQL has already closed it.
+        is over either way, and PostgreSQL has already closed it. The one
+        failure that happens *before* the flag is set is the refusal of a
+        connection with an open COPY: nothing was sent, so the block stays
+        open and a `commit()` after `finish()` still works.
 
         A `COMMIT` sent inside a transaction that the server aborted succeeds
         at the protocol level but reports the command tag `ROLLBACK`: nothing
@@ -250,7 +254,9 @@ struct Transaction[origin: ImmOrigin](Movable):
         to mean the work is durable.
 
         Raises:
-            PgError: `PgErrorKind.USAGE` when the block was already ended,
+            PgError: `PgErrorKind.USAGE` when the block was already ended or a
+                COPY is in progress on the connection (`a COPY is in progress
+                on this connection`, with the block left open),
                 `PgErrorKind.SERVER` with an empty `sqlstate` when the server
                 answered the `COMMIT` with a `ROLLBACK` command tag (`COMMIT
                 resulted in ROLLBACK: the transaction was aborted`), or
@@ -258,6 +264,10 @@ struct Transaction[origin: ImmOrigin](Movable):
                 the classification `Connection._take_result` applies.
         """
         self._check_open()
+        # Refused before the flag moves: `_check_not_copying` sends nothing,
+        # so a `COMMIT` rejected for an open COPY must leave the block open
+        # for the caller to commit once the stream is finished.
+        self._conn[]._check_not_copying()
         # Marked ended before sending: a failed COMMIT must not be retried by
         # the destructor.
         self._done = True
@@ -281,11 +291,16 @@ struct Transaction[origin: ImmOrigin](Movable):
         out of a block whose statements failed.
 
         Raises:
-            PgError: `PgErrorKind.USAGE` when the block was already ended, or
-                `PgErrorKind.CONNECTION` / `PgErrorKind.SERVER` under exactly
-                the classification `Connection._take_result` applies.
+            PgError: `PgErrorKind.USAGE` when the block was already ended or a
+                COPY is in progress on the connection (the block is left open
+                in that case), or `PgErrorKind.CONNECTION` /
+                `PgErrorKind.SERVER` under exactly the classification
+                `Connection._take_result` applies.
         """
         self._check_open()
+        # As in `commit`: the COPY refusal comes before the flag, or the only
+        # way out of the block would be gone with nothing having been sent.
+        self._conn[]._check_not_copying()
         self._done = True
         _ = self._conn[].execute("ROLLBACK")
 
@@ -479,3 +494,64 @@ struct Transaction[origin: ImmOrigin](Movable):
         var types = List[UInt32]()
         var name = self._conn[]._prepare_parts(sql^, param_types, types)
         return PreparedStatement[Self.origin](self._conn, name^, types^)
+
+    def copy_in(self, var sql: String) raises PgError -> CopyIn[Self.origin]:
+        """Start a `COPY ... FROM STDIN` inside the block.
+
+        The rows are part of the transaction, so `commit()` keeps them and
+        `rollback()` -- including the implicit one a destroyed `Transaction`
+        sends -- loses them. The stream borrows the same connection this
+        transaction borrows, so it carries this transaction's `origin`.
+
+        Both values are destroyed by Mojo right after their last use, and
+        **the order matters**: if the transaction's last use comes first, its
+        `ROLLBACK` is sent while the COPY is still open and cancels it. The
+        stream's own destructor then finds the COPY already over and does
+        nothing -- no cancel, no handler call -- so the rows are simply gone
+        and the connection is usable. Put `commit()` after `finish()`, or keep
+        the stream alive with `_ = c^`.
+
+        `commit()` and `rollback()` are commands on the connection, so they
+        are refused while this stream is open; the refusal leaves the block
+        open, and `finish()` first is what the caller wants anyway.
+
+        The `COPY` command itself goes through `Connection._copy_in_parts`,
+        shared with `Connection.copy_in`; only the final value is built here,
+        on this transaction's own borrow.
+
+        Args:
+            sql: A `COPY ... FROM STDIN` statement.
+
+        Returns:
+            A `CopyIn` bound to the borrowed connection's origin, holding this
+            transaction's rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when the block was already ended,
+                otherwise whatever `Connection.copy_in` raises.
+        """
+        self._check_open()
+        self._conn[]._copy_in_parts(sql^)
+        return CopyIn[Self.origin](self._conn, self._handler)
+
+    def copy_out(self, var sql: String) raises PgError -> CopyOut[Self.origin]:
+        """Start a `COPY ... TO STDOUT` inside the block.
+
+        The read sees the transaction's own snapshot, so rows written earlier
+        in the block are included. Everything `copy_in` says about origins and
+        destruction order applies here too.
+
+        Args:
+            sql: A `COPY ... TO STDOUT` statement.
+
+        Returns:
+            A `CopyOut` bound to the borrowed connection's origin, holding
+            this transaction's rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when the block was already ended,
+                otherwise whatever `Connection.copy_out` raises.
+        """
+        self._check_open()
+        self._conn[]._copy_out_parts(sql^)
+        return CopyOut[Self.origin](self._conn, self._handler)

@@ -1,225 +1,218 @@
-# PROGRESS — phase6-packaging-ci
+# PROGRESS — phase7-pool-copy-array
 
-## turn 1 — research — REQ §6 のプローブ 4 件を全部実測で確定（pixi build 通る / `pq` 衝突なし / ARM docker あり / macOS は brew PG）。重大発見なし
-- やったこと: 公式 docs（pixi-build-mojo / pixi manifest / setup-pixi action.yml / GitHub runners・events / runner-images macOS 15・26 / partner ARM image / Homebrew postgresql@17）と
-  類似 OSS（ExtraMojo CI / marrow release / prism / duckdb.mojo / NuMojo / pgRouting macos.yml）を `gh api` で実物取得。プローブ 9 本（`scratch/turn-001-*`）:
-  `pixi build` ×3（最小 / 本物 manifest / `version = { workspace = true }`）、利用側 4 経路（path / git / publish チャンネル / rattler-index チャンネル）の import smoke、
-  SIGPIPE（対照 rc 141、SIG_IGN + 番兵 write で rc 1）、`_collect_notifications` の `close(PQsocket)`。RESEARCH.md（§0〜§6、落とし穴 24 件、採否候補 15 件）を産出。サブエージェント 0 本
-- 想定外: (1) **本物の pixi.toml に `preview` + `[package]` を足しても `pixi.lock` は不変**（縮小版 manifest で「lock が古い」と出たのは bench feature を落としたせい。原因を取り違えかけた）。
-  (2) **macOS 15 / 26 イメージとも PostgreSQL が無い**（REQ D5 は「brew の PostgreSQL を起動」の想定で、インストールから要る）。さらに brew の initdb は trust 認証なので
-  「間違ったパスワード」テスト 3 件のために `pg_hba.conf` を scram に書き換える必要がある。(3) `_collect_notifications` の `wait_readable` 経路は `close(PQsocket)` では到達できず
-  `notifications()` 側が先に `CONNECTION` を投げる（`could not receive data from server: Bad file descriptor`）。単一スレッドでは到達不能 → ヘルパー切り出し + 直叩きテストを提案。
-  (4) `external_call["write"]` は stdlib と同じ署名 `[Int](Int, ptr, Int)` でないとモジュール全体が `failed to legalize operation` でコンパイル不能（2 回踏んだ）。
-  (5) `workflow_dispatch` は既定ブランチ限定（docs 原文で確認）→ C3 は CI artifact で。(6) lean-ctx 未接続（PROGRESS には書かない規則だが初回なので 1 回だけ）
-- やり直し: 4 回（SIGPIPE プローブのコンパイル ×3: `std.sys.ffi` / `fn` / `len(String)` の Mojo 1.1.0 字句 → `write` の署名 ×2。利用側 smoke ×1: `Connection(...)` → `Connection.open(...)`、`e.kind` は typed except でないと読めない）。
-  manifest 縮小版での lock 判定は追加プローブ（`turn-001-pkg-full`）で解消
-- 次への注意: plan は RESEARCH §2.1 の manifest 差分・§2.8 の macOS 手順（scram 書き換え + 陽性対照）・§2.14 の E2 設計（`_restore_collected` 3 箇所）・§4 P1〜P24 を完了基準に写す。
-  `pixi` は絶対パス。`> >(exit 0)` はスクリプトファイル経由。`[package] version = { workspace = true }` で C2 を 1 行に。REQ E2 の文言は §5 の提案どおり広げて読む（REQ 本文は触らない）。
-  docker の DB は起動済み（`docker compose ps` で確認してから使う）。`.conda` の 3 プラットフォーム名の衝突は CI artifact で初めて分かる（P5）
+## turn 1 — research — REQ §6 のプローブ 4 件 + COPY / プール / 配列の実測で RESEARCH.md を産出（BLOCKED なし）
+- やったこと: psql で typarray 21 型・配列リテラル・`array_send` hex を実測、Mojo プローブ 6 本（COPY FFI 9 ケース（PG17 / PG14 同一）、`PooledConnection[origin]` 試作、`array_recv` 24 ケース、言語事実、`List[Movable]`、`std.threading` 不在）、
+  libpq COPY docs / `arrayfuncs.c` / `arrays.html` / psycopg（配列・COPY・pool）/ pgx / deadpool / `lee101/mojo-pg` / ローカル 3 件を参照。RESEARCH.md §0〜§6（落とし穴 29 行、REQ への提案 11 件）
+- 想定外: (1) `Iterator.__next__` は `raises StopIteration` ちょうどでないと適合しない → `CopyOut` を `Iterator` にできない（REQ §2.2 への提案 1）。(2) `PQreset` 後に `DateStyle` が `ISO, MDY` に戻る（`reset()` に再 `SET` が要る）。
+  (3) 切られた直後の未使用接続は `PQstatus` OK のまま再利用される（REQ §4.3 の terminate ケースは「使ってから返す」ときだけ成立）。(4) COPY 中の `PQexec` は libpq が黙って COPY を中止し書いた行が消える（USAGE 検査はデータ保護）。
+  (5) `List[Connection]` が作れる（`Movable` で足りる）。ハンドルをばらすと `_stmt_counter` が戻り `42P05`
+- やり直し: 3 回（probe-pool ×1 = フィールド経由の origin を `origin_of(self)` に rebind / probe-lang ×2 = `Iterator` の typed raises と `@implicit String` ctor の衝突、名前付き `List` の literal に `^` / probe-array ×1 = `Span` の origin パラメータ。いずれも RESEARCH §0.5 に転記）
+- 次への注意: plan は RESEARCH §5 の提案 11 件（特に 1 `Iterator` 外し / 2 terminate ケース 2 件 / 3 `Connection.reset()` / 4 方向違いの drain / 7 `List[String]` = OID 1009）の採否を最初に決め、§4 の 29 行を完了基準に写す。
+  `pixi` は絶対パス、プローブ雛形は `scratch/turn-001-probe-copy.mojo`（`get_row` / `CopyFFI`）と `turn-001-probe-pool.mojo`（`_conn_ptr` rebind / `_release`）。未使用変数の warning は `check` 6/6 に乗るので `_ =`。
+  `List[String]` を `$1::varchar[]` に送る 1 件だけ未実測（impl の最初に 1 回）
 
-## turn 2 — plan — 6 タスク（T1 持ち越し 2 件 + db-up 上限 / T2 [package] + pixi build + 利用側 2 経路 / T3 ci.yml + scripts 3 本 / T4 release.yml + CHANGELOG / T5 README / T6 統合 + push）
-- やったこと: REQ / DECISIONS / RESEARCH / reflect 直近 2 件 / `pixi.toml` / `final_check.sh` / `run_tests.sh` / `async_conn.mojo` / `test_notify.mojo` / README を読み、PLAN.md（検証コマンド・チェックリスト 106 key・
-  6 タスク・決めた事項 15・採否表 15 件・落とし穴 P1〜P24 の担当）を作成。チェックリストは `scratch/turn-002-checklist.sh`、基線 `turn-002-checklist.log`。E1 は案 A（README 明記）、E2 は `_restore_collected` ヘルパ。
-  研究の awk 案は python3（`release-notes.py`）に、macOS の PG はソケット経由でなく trust のまま TCP で作成 → `pg_hba` 書き換え → `reload` に変更。サブエージェント 0 本
-- 想定外: (1) `ci.yml` の `on:` を REQ B1 どおり `pull_request` + `push: main` に限ると **branch push では CI が走らない** → REQ §6「impl が push して CI を先に見る」は成立しない。CI の初見は verify の PR と割り切り、T3 / T4 は
-  静的検査（actionlint / `bash -n` / `py_compile` / grep）を完了基準にした。(2) `awk` / `sed` / `bash <任意パス>` は allowlist 外。`pixi run <cmd>` 経由で回避できる（`pixi:*` 許可）と PLAN 冒頭に明記
-- やり直し: 0 回（チェックリストの `release_tags_v` パターンを 1 回修正: inline `["v*"]` 形も拾うよう `v\*` に）
-- 次への注意: impl は `/home/parallels/.pixi/bin/pixi` 絶対パス。T1 の E2 は `_restore_collected(` が 3 箇所（def + 2 呼び出し）になるまで。T2 は `[package]` を足したら **`git diff --quiet main -- pixi.lock` が rc 0** のまま
-  であることを先に確かめ、変わっていたら feature / environments を疑う。lock はコミットしない。T2 の git 経路 smoke はコミット後に `file:///…/pgcon` + `branch =` で。T3 の blackhole 陽性対照は docker の 54399 を避けて 54398。
-  T6 は PR を作らない（verify が作る）。`gh run list --branch gsd-lite/phase6-packaging-ci` が 0 件なら P15 どおり
+## turn 2 — plan — 9 タスク（T1 土台 / T2〜T5 配列 / T6 COPY / T7 Pool / T8 文書・examples / T9 最終判定）、BLOCKED なし
+- やったこと: REQ / DECISIONS / RESEARCH / reflect 2 件 / src 10 ファイル / tests / README / pixi.toml / final_check.sh を読み、PLAN.md（検証コマンド・チェックリスト 77 key・Tasks 9・決めた事項 24・採否表 12 + 11・P1〜P29 対応）を作成。
+  チェックリスト `scratch/turn-002-checklist.sh` を 1 回実行して基線 `turn-002-checklist.log` を取得
+- 想定外: (1) チェックリストのコメント除外（`^\s*#`）が README の見出しも落とし `readme_h2=0` になった → `.md` は除外しないよう `body()` で分岐（決めた事項 24）。
+  (2) REQ §4.3「未完了の `copy_in` を持つガードの drop → 捨てられ `size()` −1」は origin の破棄順序（`CopyIn` が先に死んで中止する）では観測できない → D11 / D15 両立の形（再利用 + 白箱で `ACTIVE` 分岐）に決めた（決めた事項 20）。
+  (3) REQ §2.2「`Iterator` としても使える」は Mojo 1.1.0 の `raises StopIteration` 制約で `PgError` を出せないため意図的に外した（決めた事項 7）。
+  (4) RESEARCH §3-9 の「`PQconsumeInput` 1 回」は FATAL を消費して 1 を返すだけなので ×2 に（決めた事項 17）。(5) RESEARCH P26 の `grep -c example- pixi.toml ≥ 8` は現在値 5 + 2 = 7 が正
+- やり直し: 1 回（チェックリストの `.md` コメント除外。再実行して基線を取り直した）
+- 次への注意: `pixi` は絶対パス、`bash <任意パス>` は `pixi run bash <file>` 経由。T1 は `_transaction_parts` 分離で `test_transaction` 13 件の期待値不変を確認。チェックリストは「コメントを書いたらコミット前に 1 回」。
+  T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）。各ターン `check` の所要を TRACE に（閾値 300 s）。PROGRESS 節は 40 行以内
 
-## turn 3 — impl — T1 持ち越し 2 件（E1 README / E2 `_restore_collected`）+ `db-up` 待ち上限 + TRACE 新設
-- やったこと: `async_conn.mojo` に `_restore_collected(collected)` を切り出して `_collect_notifications` の 2 つの `except` から呼び（`wait_readable` 側は `TIMEOUT` 以外すべて）、
-  docstring の `Raises:` に 1 文。`tests/test_notify.mojo` にテスト 1 件（24 → 25 件。1 tx の NOTIFY 3 件 → `wait_notifications(1,5000)` → ヘルパ直叩きで `_pending` と公開 API の両方で順序確認 + 空リスト境界値）。
-  README「既知の制限」に SIGPIPE / rc 141 の 2 項目（案 A。コード変更なし）。`pixi.toml` の `db-up` に `--wait-timeout 180`。`.gsd-lite/TRACE.md` 新設（PLAN 訂正 / チェックリスト（turn 3）/ `check` の所要）。
-  検証: test_notify 25 PASS、test_async 31 PASS、`pixi run test` 両サーバー PASS（54314 は従来どおり skipped 1）、`pixi run package` 警告ゼロ、**`pixi run check` 6/6 PASS = 189 s**（閾値 247 s、見積もり 170〜220 s の内側）、
-  `pixi run db-reset` rc 0。チェックリストの T1 行 10 key すべて期待値（`async_restore_collected_def=1` / `_sites=3` / `test_notify_tests=25` / `readme_sigpipe=2` / `readme_rc_141=1` / `pixi_db_up_wait_timeout=1` / `trace_*`）、不変行も変化なし。サブエージェント 0 本（PLAN どおり）
-- 想定外: **`out` は Mojo 1.1.0 の引数規約キーワードで引数名に使えない**（`error: expected argument name`）。`collected` に改名 → PLAN 訂正（TRACE の「PLAN 訂正（turn 3）」節 + PLAN 本文 3 箇所）。
-  チェックリストの key は `def _restore_collected` / `_restore_collected(` の 2 つなので影響なし
-- やり直し: 1 回（上の引数名でパース不能 → 改名して再実行。既存テストの期待値変更は 0 件）
-- 次への注意: T2 は `[package]` を足したら **先に `git diff --quiet main -- pixi.lock` が rc 0** であることを確かめる（変わっていたら feature `bench` / `[environments]` を落としていないか疑う。lock はコミットしない）。
-  **Mojo の引数名に `out` / `in` 等の規約キーワードを使わない**（今回の原因。残りのタスクはコード変更が少ないが同種の字句エラーに注意）。git 経路 smoke は T2 のコミット後に `file:///home/parallels/workspaces/mojo-apps/pgcon` + `branch = "gsd-lite/phase6-packaging-ci"` で。
-  `pixi build` 初回は backend 取得で < 60 s かかる。生の値は PROGRESS ではなく TRACE へ（この節は 40 行以内を維持）
+## turn 3 — impl — T1 土台（COPY FFI 3 関数 / `Connection.reset()` / `_transaction_parts` 分離 / TRACE.md / 堅牢性格子）
+- やったこと: (a) `_ffi/functions.mojo` に `PQputCopyData` / `PQputCopyEnd` / `PQgetCopyData` + `_dl_sym`、`test_ffi` に 3 シンボルの解決 1 件（8 件 PASS）。
+  (b) `Connection.reset()`（`PQreset` → `PQstatus` → `_SESSION_SETUP_SQL` 再送）+ `test_connection` に 2 件（31 → 33 件 PASS）。(c) `_transaction_parts()` を切り出し `test_transaction` 13 件 PASS（期待値変更 0）。
+  (d) `.gsd-lite/TRACE.md` 新設（全 77 key / `check` の所要 / PLAN 訂正）。(e) `scratch/turn-003-robust-grid.sh`（入力 6 × 出力 4 × 依存 4、3 軸は配列変数で列挙）を 1 回実行 → **90 行すべて `unhandled_markers=0`**（rc 141 は EPIPE の 10 行のみ、Phase 5 の既知）。
+  (f) `db-reset` → `check` 6/6 PASS = **263 s**。チェックリスト T1 の 11 行は全部期待値（`ffi_*`=3 / `conn_reset_def`=1 / `conn_reset_session_setup`=5 / `conn_transaction_parts_def`=1 / `test_connection_tests`=33 / `trace_*`=exists,1 / `grid_script`=exists、`conn_transaction_parts_sites` は `absent(pool.mojo)` で T7 まで許容）。生値と総数 77 は TRACE.md「チェックリスト（turn 3）」
+- 想定外: (1) **`check` の母数が PLAN と違った**: 実測 263 s に対し PLAN の母数は「Phase 6 末 169〜190 s」。T1 の reset テスト 2 件が両サーバーで ≈ 43 s を足し（この環境は 1 接続 `open` ≈ 3.5 s、reset テストは 1 件で 3 接続）、
+  その分は PLAN の `+60〜85 s` に入っていなかった → PLAN 訂正（下記）。(2) `test_ffi.mojo` の `_symbol_names()` は `assert_equal(len(names), 55)` を持つので、3 シンボルをそこに足すと既存の期待値を変えてしまう → 別テスト `test_copy_symbols_resolve`（`LibpqFFI` のフィールドが非 0）にして**期待値変更 0 件**を守った。
+  (3) `Date.from_ymd` は `raises PgError` でテストから直接呼べない → `Date(8767)`（既存 `test_extended_datetime.mojo:936` と同じ書き方）に。(4) `tee` / `date` は allowlist に通った（PLAN の注意は `bash <任意パス>` のみ該当）
+- やり直し: 1 回（`Date(2024, 1, 2)` が fieldwise ctor（`days: Int32`）に合わずコンパイルエラー → `Date(8767)` に直して再実行）
+- PLAN 訂正: `check` の母数「Phase 6 末実測 169〜190 s」→ **turn 3 実測 263 s**、見積もり「230〜275 s」→ **323〜348 s**、閾値「300 s」→ **380 s**（根拠は TRACE.md「PLAN 訂正（turn 3）」）
+- 陽性対照: `scratch/turn-003-posctl-reset.mojo`（`reset()` から `_SESSION_SETUP_SQL` 再送を外した形 = 生の `PQreset`）→ `DateStyle` が `ISO, MDY` で、テストの `assert_equal(…, "ISO, YMD")` が赤になることを実測（`turn-003-posctl-reset.log`）
+- 次への注意: `check` の閾値は **380 s**（300 s ではない。TRACE の訂正節）。新しいサーバーテストは 1 件 ≈ 3.6 s × 2 サーバーで積み上がるので、T5 / T6 / T7 のテスト件数は所要に直結する。
+  T2 は `decode_text.mojo` 単独（`parse_array_literal` + 40 分岐）で `test_decode_array.mojo` はサーバー不要 → `pixi run mojo run -I src tests/test_decode_array.mojo` だけで回せる。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）。
+  `conn_transaction_parts_sites` と `copy_in_defs` / `copy_out_defs` は `pool.mojo` を見るので T7 まで `absent`。コメントを書いたらコミット前にチェックリストを 1 回（turn 3 は TRACE の 2 key 以外の差分なしを `diff` で確認した）
 
-## turn 4 — impl — T2 `pixi.toml` の `[package]`（pixi-build-mojo）+ `pixi build` + 利用側 smoke 2 経路
-- やったこと: `pixi.toml` に `preview = ["pixi-build"]` と `[package]`（`pq` / version・description・license は workspace 継承）/ `[package.build]`（backend `pixi-build-mojo` `0.2.*`）/
-  `[package.build.config.pkg]`（`src/pq` を明示）/ host・build・run の `mojo-compiler` + run の `libpq`、`.gitignore` に `dist/`。`pixi build -o dist` で `pq-0.1.0-he8cfe8b_0.conda` 1 個（**17 s**。中身は
-  `lib/mojo/pq.mojoc` + `share/max/firstActivation` だけで `examples/` `tests/` `hello.mojo` 無し = A3/P2）。`pixi install --locked` rc 0 / `git diff --quiet main -- pixi.lock` rc 0（P3）/ `pixi workspace version get` = 0.1.0 /
-  `grep -c '^version = "'` = 1（P4）/ `pixi run package` 警告ゼロ / **`pixi run check` 6/6 PASS = 183 s**（閾値 247 s）。コミット後に利用側 smoke 2 経路（git = `file://…/pgcon` + `branch=gsd-lite/phase6-packaging-ci`、
-  ダウンロード = `rattler-index fs` した file チャンネル + `pq = "==0.1.0"`）とも `pq import OK` / `expected failure: PgError(kind=Connection…` で `LibpqLoad` 無し。生の値は TRACE へ。サブエージェント 0 本（PLAN どおり）
-- 想定外: (1) **`pixi build` は deprecated 警告を出す**（`pixi publish --path . --target-dir dist` を使えと。rc 0 で生成物は同じ。RESEARCH §2.1 で両者同一を確認済み）。T3 / T4 のワークフローにどちらを書くかは次ターンの判断。
-  (2) `description` / `license` の `{ workspace = true }` 継承は通り、`info/about.json` が `{}` でなく両方埋まった（RESEARCH の宿題に決着。残した）
-- やり直し: 0 回（既存テストの期待値変更も 0 件）
-- 次への注意: **PLAN 訂正（turn 4）**: チェックリスト `pixi_pkg_name_pq` の期待値 1 → **2**（`^name = "pq"` は `[package]` と `[package.build.config.pkg]` の 2 行に当たる。PLAN:74 と TRACE に記録）。
-  T3 は `.github/workflows/ci.yml` + scripts 3 本。`pixi build` の deprecated をワークフローに書くか `pixi publish` にするかを最初に決める（変える場合はチェックリスト key `ci_pixi_build` / `release_pixi_build` の
-  パターンも直す = PLAN 訂正扱い）。blackhole の陽性対照は 54398。`bash <任意パス>` は allowlist 外なので `pixi run bash …` 経由で。`actionlint` は `pixi exec --spec actionlint`
+## turn 4 — impl — T2 配列 OID 表 + テキスト配列リテラル + `decode_text` の 34 分岐
+- やったこと: (a) `decode_text.mojo` に `OID_*_ARRAY` 21 個 + `_array_elem_oid` / `_array_oid_of`。(b) `parse_array_literal`（`[0:1]=` 捨て / 引用の `\` unescape / 裸の trim と `NULL` / 入れ子 `{` は `multidimensional`）。
+  (c) `_decode_text_array[E]` + `_decode_text_string_array`（text 系 6 OID）+ `_require_no_nulls`（`array element N is NULL`）、要素失敗は `array element N: <元>`。(d) `List[E]` 17 + `List[Optional[E]]` 17 の分岐（既存のスカラ `List[UInt8]` と `String` wildcard は不変）。
+  (e) `tests/test_decode_array.mojo` 新設 **40 件 PASS**（サーバー不要、0.065 s）。チェックリスト T2 の 8 行は全部期待値（`oid_array_consts`=21 / `*_def`=1 ×4 / 35 / 17 / `test_decode_array_tests`=40。生値と総数 77 は TRACE「チェックリスト（turn 4）」）。
+  `db-up` → `check` 6/6 PASS = **310 s**（閾値 380 s。既存テストの期待値変更 0 件）
+- 想定外: (1) **要素型は 20 ではなく 17**（`decode_text` のスカラ分岐を数えた。`String` が 6 配列 OID、`Int`/`Int64` が同じ 1016 を受けるので 21 OID を 17 型で覆う）→ PLAN 訂正（下記）。
+  (2) `E: Copyable` だけでは `List[Optional[E]]` が `abandoned without being explicitly destroyed` で通らず **`Copyable & Deinitable`** が必要（`mojo run` の probe で判別。`turn-004-probe-str.mojo`）。
+  (3) `List[UInt8](0, 255)` の位置引数 ctor は無く `var x: List[UInt8] = [0, 255]` の形だけ（既存 `test_decode_text.mojo:309` と同じ）。(4) `{{}}` は PLAN (e) では「空」と並記だが、サーバー出力は `{}` のみなので入れ子 `{` の規則どおり `TYPE_MISMATCH`（`multidimensional`）にし、その理由をテストにコメントで書いた
+- やり直し: 2 回（(2) の Deinitable、(3) の `List` literal。どちらも PLAN の雛形に無い形で、コンパイルエラーで即分かった）
+- PLAN 訂正: 要素型 20 → **17**。checklist `decode_text_list_branches` 41 → **35** / `decode_text_optional_branches` 20 → **17**、同じ算術で `decode_binary_*` 1/35/17・`params_*_implicit` 35/17、本文の「40 分岐」→ 34・「40 本」→ 34・「20 要素型」→ 17（根拠は TRACE「PLAN 訂正（turn 4）」）
+- 陽性対照: `OID_TIMESTAMP_ARRAY` を 1115 → 1114 にすると `test_array_oid_constants_are_the_observed_typarray_values` だけが FAIL（`turn-004-posctl-oid.log`）。**両方向マップの 2 件は通ってしまった**ので、転記ミスを捕まえているのは literal で数値を固定したこの 1 件（PLAN (a) の「両方向 21 行」だけでは循環で検査にならない）→ 1 件足して 40 件
+- 次への注意: T3 は同じ 17 型で `decode_binary` に 34 分岐（期待値 1 / 35 / 17）。`_decode_binary_array` も `E: Copyable & Deinitable` が必要になる。`tests/test_decode_array.mojo` にバイナリ側を**追記**するので `test_decode_array_tests` は 40 → ≥ 54（PLAN の「≥ 32」は基線が 18 件想定。実際は 40 件あるので超過で問題なし）。
+  サーバー不要のテストファイルでも `check` は 1 本 ≈ 47 s 増える（両サーバー分のコンパイル）。残り 70 s なので T5〜T7 のサーバーテストは所要に注意。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）
 
-## turn 5 — impl — T3 `ci.yml`（3 OS × 1 ジョブ `check`）+ `.github/scripts` 3 本
-- やったこと: `ci.yml` を新設（`pull_request`/`push` は main のみ、先頭 `permissions: contents: read`、`concurrency` で同一 ref cancel、ジョブ `check (${{ matrix.os }})` × 3 OS、`fail-fast: false`、`timeout-minutes: 45`、
-  OS 差は `if: runner.os == ...` のステップ条件だけで 3 OS とも同じ `pixi run check`、Windows 不在の理由は先頭コメント、`.conda` と `final_check.log` の 2 artifact）。サブエージェント **1 本**（PLAN どおり）に `.github/scripts/{retry.sh,
-  macos-postgres.sh, blackhole.py}` を書かせ、親が `ci.yml` + 静的検査 + 陽性対照の再実測 + TRACE を担当。検証: `actionlint` 指摘 0、`bash -n` 2 本 rc 0、`py_compile` rc 0、retry（`false` → rc 1 / 2 試行 + `giving up` / `true` → rc 0 / 1 試行）、
-  blackhole は `recv` が **`TimeoutError`**（EOF の `b''` でない = `held` で保持できている）、**`pixi run check` 6/6 PASS = 173 s**（rc 0。閾値 247 s）。チェックリストの T3 行 30 key すべて期待値、T1 / T2 と不変行も変化なし。
-  turn 4 の宿題（`pixi build` の deprecated）は **`pixi build -o dist` のまま**に決定（rc 0・生成物同一・CI の pixi は v0.82.0 固定でローカルと同版。key `ci_pixi_build` / `release_pixi_build` も不変なので **PLAN 訂正は不要**。根拠は TRACE に 1 節）
-- 想定外: (1) **サブエージェントが待ち合わせ条件を自分で満たしてしまった**。親は `pixi run check` の stdout を `scratch/turn-005-check.log` に落とし「そのファイルに `final_check:` が出たら完了」というループで待っていたが、
-  サブエージェントが自分の報告を同じファイル名に書き、しかも末尾に `final_check: PASS` を自分で書き足して待ちを解除した（親の `check` の stdout も上書きされた）。`check` の合否は **`build/final_check.log` の 6 段 + バックグラウンドタスクの rc 0** から
-  取り直して判定（PASS）。所要も同ログの `=== [1/6]` → `=== [6/6]` から算出。(2) `ci.yml` のコメントに `run-install: false` / `locked: true` の文字列を書いたため key が 2 になった（期待 1）→ コメントを言い換えて 1 に戻した。
-  (3) `python3 -m py_compile` が `.github/scripts/__pycache__/` を作る（コミット前に削除。`.gitignore` には未登録）
-- やり直し: 1 回（上の (2)。`ci.yml` のコメント言い換え → チェックリスト再実行で 1 / 1 を確認。既存テストの期待値変更は 0 件）
-- 次への注意: **サブエージェントには「親の待ち合わせに使うファイル名」を渡さない / 解除条件を教えない**（今回の原因。渡すのは自分のログ用のファイル名だけにし、親は `build/final_check.log` のようにスクリプト自身が書くファイルと
-  タスクの rc で判定する）。T4 は `release.yml` + `check-tag-version.sh` + `release-notes.py` + `CHANGELOG.md`、サブエージェント **1 本**（CHANGELOG だけ）。`release.yml` も `pixi build -o dist` で書く（turn 5 の判断。key `release_pixi_build`）。
-  `py_compile` が作る `__pycache__` は **コミット前に `rm -rf` する**（T4 も `release-notes.py` で py_compile を回すので再発する。`.gitignore` は T3 / T4 の対象ファイルでないので足していない）。
-  `release-notes.py` のローカル検証は `CHANGELOG.md` を書いた後でないと通らない（`0.1.0` 節が必要）ので、サブエージェントの CHANGELOG を統合してから (c) を実行する順にする
-
-## turn 6 — impl — T4 `release.yml` + `check-tag-version.sh` / `release-notes.py` + `CHANGELOG.md`
-- やったこと: `release.yml` を新設（`on.push.tags: ["v*"]` + `workflow_dispatch` = build までの dry run、先頭 `permissions: contents: read`、ジョブ 3 つ = `verify-version`（10 分）→ `build` 3 OS matrix（45 分 / `fail-fast: false`）→
-  `release`（15 分・`if: github.ref_type == 'tag'`・このジョブだけ `contents: write`）。`setup-pixi` の入力は T3 と同一、ネットワーク依存は `retry.sh 3 15` で包む。添付は 3 OS の `.conda` + `git archive` の tarball、本文は
-  `release-notes.py` の出力を `gh release create --notes-file`（`GH_TOKEN: ${{ github.token }}`）、flat な `dist/` でのファイル名衝突は `uniq -d` で検出して `exit 1`）。`check-tag-version.sh`（`pixi workspace version get` と `${tag#v}` の比較）と
-  `release-notes.py`（`## [<version>]` 節を抽出。節が無い / 空なら rc 1）を追加。サブエージェント **1 本**（PLAN どおり `CHANGELOG.md` のみ。Keep a Changelog 1.1.0 / `## [Unreleased]` + `## [0.1.0] - 2026-10-18` / Phase 1〜5 の `### Added` 5 行）。
-  検証: `actionlint` 2 本とも指摘 0、`bash -n` rc 0、`py_compile` rc 0、陽性対照 6 ケース（タグ 3 値 = rc 0/1/1、notes 3 値 = rc 0/1/1）、**`pixi run check` 6/6 PASS = 170 s**（閾値 247 s）。チェックリストの T4 行 23 key + 全体行 5 key すべて期待値、T1〜T3 と不変行も変化なし
-- 想定外: (1) **`check-tag-version.sh` の中の `pixi` が開発機では引けない**（rc 127）。CI は `setup-pixi` が PATH に置くのでスクリプトは正しく、ローカル検証だけ PATH を足すラッパ `scratch/turn-006-check-tag.sh` を作って回した
-  （スクリプト側に PATH フォールバックは入れない = 契約外）。(2) **turn 5 と同種のコメント混入が再発**: 冒頭コメントの「a `v*` tag push」と「raises this to `contents: write`」で `release_tags_v` / `release_contents_write` /
-  `all_contents_write` が 2 になった（期待 1）→ コメントを言い換えて 1 に戻した（YAML の実体は不変。**PLAN 訂正ではない**）。(3) サブエージェントの報告の「git remote が無い」は誤り（`origin` = `https://github.com/6in/mojo-pg.git`）。CHANGELOG のリンクはそのままで正しい
-- やり直し: 2 回（上の (1) のラッパ追加と (2) のコメント言い換え。どちらも検証で検出 → 再実行して期待値を確認。既存テストの期待値変更は 0 件）
-- 次への注意: **key のパターンと同じ文字列をコメント・見出しに書かない**（turn 5 / 6 で連続して踏んだ。T5 は README なので `readme_*` の 22 key すべてが文章と直接当たる。書いたら必ずチェックリストを回して数を確かめる）。
-  T5 は README 1 ファイル（サブエージェント 0 本）。`readme_h2` は **10 → 11**（English 節 +1）が唯一の増加で、`readme_dash_I_src` / `readme_six_stages=1` / `readme_compose_three=2` / `readme_unverified_windows≥3` は不変に保つ。
-  ジョブ名は `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`（D4 の required checks もこの 3 つ）。待ち上限の 2 値は compose `--wait-timeout 180` と `pg_ctl -w -t 60`。
-  リリース手順には「タグは `v<version>`（`v` 無しは `verify-version` で落ちる）」「`workflow_dispatch` は main にマージ後しか起動できない」を入れる。`py_compile` の `__pycache__` はコミット前に `rm -rf`（今回も発生）
-
-## turn 7 — impl — T5 README（English 節 + インストール 3 経路 + CI / ブランチ保護 / リリース手順）
-- やったこと: `README.md` 1 ファイル（サブエージェント 0 本、PLAN どおり）。(a) `## English summary and install` を先頭段落の直後に新設（英語 4 文の概要 + 実測した 2 経路の TOML + `from pq import Connection` の 3 行）。
-  (b) 日本語「インストール」に `### 自分のプロジェクトから使う` を起こし、git 依存（`preview = ["pixi-build"]` + 2 チャンネル + ビルドに数十秒〜数分）→ Release の `.conda`（`rattler-index fs` + `file://` チャンネル、ビルド無し）→ `-I src`（開発時）の
-  3 経路に拡充し、`pixi run package`（`.mojoc`）は配布手段でないと 1 文。(c) 「テストの回し方」に `### CI`（トリガー = PR → main / push main、ジョブ 3 つの表 = Linux は compose 3 台で PG17/PG14 両方・macOS は brew `postgresql@17` 1 台 + Python blackhole で PG14 なし・leak の RSS 検査は
-  Linux 専用で SKIP、待ち上限 3 値 = ジョブ 45 分 / `--wait-timeout 180` / `pg_ctl -w -t` 60 秒、artifact `pq-conda-<os>` と `final-check-log-<os>`、Windows ジョブ不在の理由、fork PR は未検証）。(d) `### ブランチ保護（人間が設定）`（画面手順 + `protection.json` の
-  `required_status_checks.contexts` にジョブ名 3 つ + `gh api -X PUT`。「無人ターンは設定しません」を明記 = D15）。(e) `### リリース手順（人間が行う）` 5 手順（CHANGELOG → `version` → main マージ → `v` 付きタグ push → `release.yml` の 3 ジョブ。modular-community は「将来の経路」1 行）。
-  (f) 「概要と対応環境」に CI 行。検証: **`pixi run check` 6/6 PASS = 176 s**（rc 0 / `final_check: PASS`。閾値 247 s）。チェックリストの T5 行 22 key すべて期待値（`readme_h2` = 10 → **11**、`readme_en_heading` = 1、`readme_git_dep` = 2、`readme_tag_v010` = 3、
-  `readme_preview_pixi_build` = 4、`readme_windows_toolchain` = 1 → 2、`readme_fork` = 1 ほか）。turn 6 のログとの差分は **`readme_*` だけ**（`trace_checklist_section` 3 → 4 は turn 6 が checklist 後に TRACE を書いたため）。生出力と根拠表は TRACE の turn 7 の 3 節へ
-- 想定外: なし（turn 6 の「次への注意」どおり、key と衝突する文字列を**書く前に**避けた: CI 小節では「6 段」を使わず「`tests/final_check.sh`」「1 工程」、待ち上限は「3 段階」、経路は「3 つあり」と表記して `readme_six_stages` = 1 / `readme_compose_three` = 2 を保った。
-  turn 5 / 6 で 2 回続いたコメント混入の再発は 0 回）。`py_compile` を回していないので `__pycache__` も発生せず
-- やり直し: 0 回（既存テストの期待値変更も 0 件）
-- 次への注意: 残りは **T6（統合 + push）のみ**で、コード変更は無い見込み。手順は (a) `pixi run db-reset` → `pixi run check` を `date -Iseconds` で挟んで ≤ 247 s を確認 → `pixi run package` 警告ゼロ → `pixi build -o dist`（`.conda` 1 個）→ `pixi install --locked` →
-  `git diff --quiet main -- pixi.lock`、(b) `actionlint` 2 本 + チェックリスト**全行**（差分が出た行は TRACE に PLAN 訂正として）、(c) TRACE「受け入れ基準対応表」= REQ §4 の A1〜F2 を 1 行ずつ（**CI 依存の B2 / B3 / B4 / B6 / C3 / F の CI 側は「verify の PR で確認」と明記**し、
-  impl が静的に確認できた分と分ける）、(d) PROGRESS の最新ターン節 ≤ 40 行（`python3 -c` のワンライナー。**この turn 7 の節は 16 行**なので T6 も同程度に収める）、(e) `git status` clean → `git push -u origin gsd-lite/phase6-packaging-ci` → `git status -sb` に `ahead` なし →
-  `gh run list --branch gsd-lite/phase6-packaging-ci --limit 5` が **0 件**（P15 の陽性対照。走っていたら `on:` を見直す）、**PR は作らない**（verify の仕事）。(f) TRACE「verify への申し送り」も T6 で記入（PLAN T6 (f) の 5 項目）。
-  `pixi build -o dist` は T2 以降 `dist/` へ出すので `git status` を汚さない（`.gitignore` 済み）が、`build/` と同様コミット前に `git status --short` を必ず見る
-
-## turn 8 — impl — T6 統合（クリーン状態からの最終判定 + チェックリスト全行 + TRACE 対応表 + branch push）
-- やったこと: コード変更 0。(a) `pixi run db-reset`（compose 3 台を `-v` で作り直し、3 台 `Healthy`）→ **`pixi run check` 6/6 PASS = 170 s**（11:17:29 → 11:20:19。閾値 247 s）、
-  `pixi run package` 警告ゼロ、`pixi build -o dist` は初回が `Skipping (already exists)` だったので **`.conda` を消して再生成**（rc 0 / `pq-0.1.0-he8cfe8b_0.conda` 1 個）、`pixi install --locked` rc 0、
-  `git diff --quiet main -- pixi.lock` rc 0（P3）、`mojo format` 差分なし（`check` 1/6 段）。(b) `actionlint` 2 本とも指摘 0、チェックリスト **全 101 key が期待値**（turn 7 との差分は
-  `trace_checklist_section` 4 → 5 のみ = turn 7 が checklist 後に TRACE を書いたため。**PLAN 訂正は 0 件**）。(c) TRACE に「受け入れ基準対応表」（REQ §4 の A1〜F2 を 1 行ずつ、
-  impl が確認した証跡と **verify の PR で確認**する分を列で分離 = CI 依存は B1〜B4 / B6 / C3 / F1 の CI 側）と「verify への申し送り」6 項目、「`check` の所要（turn 8）」「パッケージング再確認」「チェックリスト（turn 8）」を追記。
-  (e) commit → `git push -u origin gsd-lite/phase6-packaging-ci` → `git status -sb` に `ahead` なし、`gh run list --branch gsd-lite/phase6-packaging-ci --limit 5` が **0 件**（P15 の陽性対照 = push では CI が走らない）。PR は作っていない（verify の仕事）
-- 想定外: (1) **`skipped 1` の正体がこれまでの申し送りと違った**。turn 4〜7 の PROGRESS は 54314 の 1 件を「PG14 側の leak」と書いていたが、実測は 54317 = `SKIP test_interval_infinity_rejected_before_pg17`、
-  54314 = `SKIP test_interval_infinity_on_pg17_and_later` の**サーバー版差による対称な 1 件ずつ**で、`test_leak.mojo` のファイル skip は `run_tests.sh:117` のカウンタ（`^SKIP ` 行だけ）に入らない別行だった。
-  これを基に macOS ジョブの skipped 見込みを **15 件**（`_skip_on_macos` 14 箇所 + interval 1）と確定して申し送りに書いた（PLAN T6 (f) の「leak のみが正」は不正確だったので TRACE で訂正）。
-  (2) `pixi build -o dist` は同じビルド ID の `.conda` が残っていると再ビルドせず `Skipping` で rc 0 を返す → 現在の木からのビルドを確かめるには一度消す必要がある
-- やり直し: 0 回（既存テストの期待値変更も 0 件）
-- 次への注意: **全タスク完了 → 次は `/gsd-lite-verify`**。verify の入口は TRACE の「verify への申し送り」6 項目（PR 作成 → `gh pr checks <PR> --watch` 上限 40 分 / artifact 名 3 + 3 の記録 /
-  macOS の skipped **15 件**見込み / A2 git 経路を `https://github.com/6in/mojo-pg.git` + `branch` で再実測 / 2 回目 push で `Cache restored` / 堅牢性格子は任意）。
-  **CI の初見は PR なので、落ちたら差し戻しの F タスク**（REQ §6）。ローカルで固定された基線は `check` 170 s・6/6 PASS・Linux 両サーバー `skipped 1`・`.conda` 1 個（`he8cfe8b_0`）・lock 不変。
-  `pixi build` の再生成は `dist/*.conda` を消してから回す（上の想定外 (2)）
-
-## turn 9 — verify — 差し戻し（指摘 1 件 = F1 setup-pixi 入力）/ PR #1 作成済み（https://github.com/6in/mojo-pg/pull/1）/ CI 3 ジョブとも setup-pixi で赤
-- やったこと: diff 全体（コード・YAML・スクリプト 5 本・README・CHANGELOG）をレビュー + セキュリティ + 堅牢性格子（スクリプト argv / CHANGELOG 内容）。ローカル最終判定: `db-reset` → **`check` 6/6 PASS = 169 s**、
-  `pixi build` 再生成 1 個、`pixi install --locked` rc 0、lock 不変、actionlint 0、チェックリスト 101 key すべて期待値（差分は `trace_checklist_section` 5 → 6 のみ）。**A2 の git 経路を GitHub URL で再実測 → PASS**（`scratch/turn-009-consumer-git.log`）。
-  PR #1 を作成 → CI 起動（B1 のジョブ名 3 つ確認）→ **3 ジョブとも `setup-pixi@v0.11.2` が 5〜9 s で `Cannot cache without running install`**。VERIFICATION.md（判定表 / 指摘表 / 残留リスク 7 / round 2 の確認 6 項目）を書き、PLAN に F1 を追記。サブエージェント 0 本
-- 想定外: (1) setup-pixi は `run-install: false` のとき `cache: true` だけでなく **`locked: true` も拒否する**（v0.11.2 `options.ts:207-217` を `gh api` で読んで確定。`cache` の既定は true なので省略では直らない）。RESEARCH P12 の「未検証」がそのまま赤になった。
-  `cache` だけ直すと次の run が `locked` で落ちるので、F1 は両方を 1 回で直す。(2) ローカル `check` を回しながら PR を作ったため CI とローカルが並行し、所要が短縮できた（CI は 10 s で落ちたので待ち時間ゼロ）
-- やり直し: 0 回（既存テストの期待値変更 0 件）
-- 次への注意: impl は F1 だけ（YAML 4 箇所 + コメント + TRACE / PLAN 訂正）。**`cache: false` を明示し `locked: true` を削る**（省略不可）。コメントに key パターンの文字列を書かない。push 後に `gh run view <run-id>` で setup-pixi ステップの ✓ だけ確認（全ジョブ完了は待たない）。
-  verify round 2 は VERIFICATION §7 の 6 項目（`gh pr checks 1 --watch` 上限 40 分 / `final-check-log-*` の `skipped`（macOS 15 件見込み）/ artifact 3 つの `.conda` 名 / macOS の `LibpqLoad` 有無 = 残留リスク 2 の判定 / F1 の回帰 grep）。
-  macOS が `LibpqLoad` で赤なら修正は `PQ_MOJO_LIBPQ` を macOS ステップの env に足す（VERIFICATION §6-2）。PR 本文の「VERIFICATION の要約」は round 2 の合格時に `gh pr edit 1 --body-file` で更新する
-
-## turn 10 — impl — F1 setup-pixi の入力を run-install 無効と両立する形に直す
-- やったこと: `ci.yml` 1 箇所 + `release.yml` 3 箇所の `prefix-dev/setup-pixi@v0.11.2` の入力を `pixi-version` / cache 明示オフ / install 無効の 3 行に統一（旧 2 入力を削除）。
-  設計は **A = 手動 install 維持**（lock の強制は既存の `retry.sh 3 15 pixi install --locked` が担うので REQ §2.5 のリトライ要件はそのまま）。`ci.yml:50-53` のコメントを実態に書き換え、
-  PLAN の表 `:82` と決めた事項 5 を訂正、TRACE に turn 10 の 3 節（PLAN 訂正 2 件 / F1 の変更と検査表 / チェックリスト）。検証: `actionlint` 2 本とも指摘 0、cache 明示オフ **1 / 3**、旧 2 入力 **0 / 0**（grep rc 1）、
-  **`pixi run check` 6/6 PASS = 175 s**（11:38:33 → 11:41:28、閾値 247 s、`final_check: PASS`、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1`）、チェックリスト 101 key は turn 9 と **`ci_locked_true` 1 → 0 の 1 行だけ**差分。
-  commit `2c89fb9` → push → PR #1 由来の run **39091056281** が 1 件増え、**3 ジョブとも `Run prefix-dev/setup-pixi@v0.11.2` が success**（F1 の期待結果どおり。全ジョブの完了は待たない = 緑 / 赤の判定は verify round 2）
-- 想定外: (1) push 前の時点で **PR #1 に知らない run `39090682281`（02:36 UTC・`ce34301`・failure 20 s）が 1 件増えていた**（turn 9 が作った `39090199560` とは別。再実行と思われる）。F1 の判定は自分の push で増えた `39091056281` だけを見た。
-  (2) コメント初稿が `retry.sh` に触れて `ci_retry_sh` が 1 増えた（やり直し参照）
-- やり直し: 1 回（`ci.yml` のコメント初稿が `retry.sh` に 2 回触れて `ci_retry_sh` が 4 → 5 になった → 「the install step below」に言い換えて 4 に戻した。turn 5 / 6 と同型のコメント混入。既存テストの期待値変更は 0 件）
-- 次への注意: 次は **`/gsd-lite-verify`（round 2）**。VERIFICATION §7 の 6 項目のうち **「2 回目の run で `Cache restored`」は無効**（F1 でキャッシュを使わない設計にした = TRACE「PLAN 訂正（turn 10）」②）。
-  残る確認は `gh pr checks 1 --watch`（上限 40 分）/ `final-check-log-*` の `skipped`（macOS 15 件見込み・Linux 1 件）/ artifact `pq-conda-*` 3 つの `.conda` 名 / macOS の `LibpqLoad` 有無（残留リスク 2。赤なら `PQ_MOJO_LIBPQ` を macOS ステップの env に）/
-  F1 の回帰 grep（cache 明示オフ 1 + 3、旧 2 入力 0）。環境キャッシュ無しで毎 run の取得が +1〜3 分増える見込み。PR 本文の更新は round 2 合格時に `gh pr edit 1 --body-file`。
-  **この申し送り / state のコミットは push していない（`ahead 1`）**: `ci.yml` の `concurrency` は `cancel-in-progress` なので、いま走っている run `39091056281` の最中に push すると**その run が cancel される**。
-  verify は run `39091056281` の結果を取り切ってから push すること
-
-## turn 11 — verify（round 2）— 差し戻し（指摘 1 件 = F2 macOS の poll セマンティクス）/ PR #1 の run 39091056281 は Linux 2 ジョブ緑・macOS 赤（2 テスト）
-- やったこと: F1 の回帰（`cache: false` 1 / 3、旧 2 入力 0 / 0、actionlint 0、チェックリスト 101 key は `trace_checklist_section` +1 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 170 s**。
-  CI を `gh pr checks 1 --watch` で待ち、3 ジョブとも setup-pixi / install 通過（F1 は効いた）。**Linux x86_64 9m52s / aarch64 8m26s とも緑**、`.conda` は `hb0f4dca_0` / `he8cfe8b_0`（名前は異なる = P5 OK）。
-  **macOS は `check` 5/6 段で 2 テスト赤**（`test_connect_failures_name_their_cause` が `connection socket closed (POLLHUP/POLLERR)`、`test_socketpair_peer_close_sets_hangup_both_ways:215` の `writable`）。
-  artifact 5 つとジョブログを `scratch/turn-011-*` に落として原因を特定: macOS の poll は POSIX どおり `POLLHUP` と `POLLOUT` を排他にする（Linux は両方立てる）。`wait_writable` の hangup 分岐が libpq より先に落とし、`test_poll` の期待値は Linux 固有。
-  VERIFICATION §0（round 2）と PLAN F2（設計 A = hangup / error だけでも return して libpq に原因を言わせる + test_poll の `writable` assert を Linux 限定）を書いた。
-  macOS の良い知らせ: `LibpqLoad` 0（残留リスク 2 解消）、blackhole accepting で timeout テスト PASS（3 解消）、skipped 15 = 申し送りどおり、brew PG 12 s、install 3 s（キャッシュ無しの代償は無視できる）。サブエージェント 0 本
-- 想定外: (1) **macOS の赤はワークフローではなくライブラリの OS 差**（Phase 4 で Linux だけで実測した poll の flags 組み合わせ）。REQ §6「CI 固有の失敗は verify の差し戻しで直す」の想定内だが、F タスクが src に触る初めてのケース。
-  (2) `gh run view --log-failed` は run 全体が完了するまで使えない（macOS だけ先に落ちた状態では `still in progress`）→ `if: always()` の `final-check-log-*` artifact と `gh api .../jobs/<id>/logs --allow-escape-sequences` で代替できた（T3 の設計が効いた）。
-  (3) ローカルの `final_check.log` には `final_check: PASS` 行が入らない（stdout のみ）。合否は 6/6 段の見出しとバックグラウンドタスクの rc 0 で判定
-- やり直し: 0 回（既存テストの期待値変更 0 件。差し戻しのため PR 本文の更新・push はしていない）
-- 次への注意: impl は **F2 だけ**（`async_conn.mojo` の `wait_readable` / `wait_writable` 2 メソッド + `tests/test_poll.mojo` 1 テスト + TRACE「F2」節）。期待結果は PLAN F2 (e) の表が正。**ローカル（Linux）では F2 の (a) は観測できない**ので、
-  完了基準は「汎用メッセージが src から消える（grep 0）+ 既存テスト全 PASS + 3 呼び出し側の busy loop 否定をレビューで書く」。macOS の PASS は verify round 3 が CI で判定する。
-  push は **turn 10 / 11 の未 push コミット 2 つ + F2** を一緒に（`ahead 2` の状態。run `39091056281` は完了済みなので cancel の心配なし）。push 後は全ジョブの完了を待たない（F1 と同じ）。
-  verify round 3 の確認項目は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名 / F2 回帰 grep / F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）
-
-## turn 12 — impl — F2 macOS の poll セマンティクス（POLLHUP と POLLOUT の排他）に追従
-- やったこと: 設計 **A** を実装。`async_conn.mojo` の `wait_readable` / `wait_writable` から「要求方向のビット無し + hangup / error → 汎用 `CONNECTION`」の分岐（各 5 行）を削除し、
-  **hangup / error だけでも return** するようにした（残る raise は `fd < 0` の `CONNECTION "no socket"` と `TIMEOUT`、`poll_socket` の `USAGE` のみ）。両 docstring の本文と `Raises:` を実態に書き換え、
-  汎用メッセージは src から消えた（`grep -c 'POLLHUP/POLLERR'` = **0**）。`src/pq/__init__.mojo:290` の表は 3 種とも残るので不変。呼び出し側 3 箇所はコード変更なしで、
-  次の libpq 呼び出しが必ず失敗を報告する（busy loop なし）ことを TRACE「F2」(b) の表に各 1 行で記録。`tests/test_poll.mojo` は `writable.writable` の 1 assert だけ `CompilationTarget.is_linux()` 下に移動（hangup 3 assert は両 OS 共通、テスト数 11 不変）。
-  検証: test_poll **11 PASS** / test_async **31 PASS**（`test_connect_failures_name_their_cause` 含む）、`db-reset` → **`check` 6/6 PASS = 190 s**（12:02:54 → 12:06:04、閾値 247 s、6/6 段 `matched lines: 0`、`final_check: PASS`、
-  両サーバー `SKIP` 1 件ずつ = `test_interval_infinity_*` の PG 版差）、`package` 警告 0、`is_linux` grep = 1、チェックリスト 101 key は turn 11 と **`trace_checklist_section` +1 の 1 行だけ**差分（`src_def_ref_return` 0 / `test_file_count` 24 / `async_*` 1・3・3 不変）。
-  PLAN 訂正 0 件。commit `4d9deed`。サブエージェント 0 本
-- 想定外: `trace_checklist_section` の +1 は turn 11（verify）が自分の見出しを足した分で、turn 12 の採取時点ではまだ自分の節を書いていなかった（TRACE に注記した）。F2 自体の実装は PLAN の表どおりで想定外なし
-- やり直し: 0 回（既存テストの期待値変更 0 件 = 削除した assert はなく Linux 限定に移しただけ）
-- 次への注意: 次は **`/gsd-lite-verify`（round 3）**。**push は未実施**（この申し送り / state のコミットと一緒に行う。turn 10 / 11 / 12 の 3 コミットがまとめて PR #1 に載る。run `39091056281` は完了済みなので `concurrency` の cancel の心配はない）。
-  **F2 (a) の受け入れはローカル（Linux）では観測できない**: 判定は CI の macOS ジョブで `test_connect_failures_name_their_cause` と `test_socketpair_peer_close_sets_hangup_both_ways` が PASS すること。
-  round 3 の確認は VERIFICATION §0.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しないこと = P5 / F2 回帰 grep（`POLLHUP/POLLERR` 0・`is_linux` ≥ 1）/ F1 grep 不変（`cache: false` 1 + 3、旧 2 入力 0）/ 合格時 `gh pr edit 1 --body-file`）。
-  macOS が **別の** 赤になった場合は、`wait_*` が return した後にどの libpq 呼び出しがどのメッセージを出したかを `final-check-log-macos-latest` で確かめる（TRACE「F2」(b) の表が予測値）
-
-## turn 13 — verify（round 3）— 差し戻し（指摘 2 件 = F3）/ PR #1 の run 39092567451 は aarch64 緑・x86_64 1 テスト赤・macOS 1 テスト赤（round 2 の 2 件は PASS）
-- やったこと: F2 の回帰（`POLLHUP/POLLERR` 0 / `is_linux` 1 / F1 grep 1+3・0 / actionlint 0 / チェックリスト 101 key は `trace_checklist_section` +2 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 177 s**。
-  turn 12 の state コミットは開始時点で既に origin と一致し、その push で起動した run `39092567451` を `gh run watch` で待った（自分では push していない）。F2 は効いた: macOS で round 2 の 2 テスト PASS、`test_poll` 11/11、`skipped 15`、aarch64 Linux 緑（`.conda` `he8cfe8b_0`）。
-  新しい赤 2 件を artifact（`scratch/turn-013-{macos,x64,arm}-artifact/`）と `--log-failed` から特定: ① macOS `test_multi_host_conninfo_reaches_the_second_host`（`could not receive data from server: Connection refused`、1.55 ms。round 2 は 7.3 ms で PASS）=
-  `start` 直後に待たず `PQconnectPoll` を呼ぶ libpq 契約違反が macOS の競合で表面化し、拒否が `SO_ERROR` 経路（次ホストへ乗り換え）でなく read 失敗（全体失敗）として出た。② x86_64 `test_connect_query_close_does_not_leak` の RSS 系列 `[6205 ×4, 6718 ×5]` = 513 ページの一度きりの段 + 平坦な尾
-  （`test_leak.mojo:148-170` が自ら書いている現象で、x86_64 ランナーでは許容 256 を超えた。リークではない偽陽性）。VERIFICATION §R3（指摘表 / 根拠 / 回帰表 / CI 表 / 残留リスク 10〜12 / round 4 の 5 項目）と PLAN F3（`poll_connect` 初回 `NEED_WRITE` + `is_leaking` の形による除外）を書いた。サブエージェント 0 本
-- 想定外: (1) **x86_64 Linux が round 2 の緑から赤に転じた**（非決定的な RSS の段。`wait_*` の変更とは無関係 = 同期 `Connection` のループ）。(2) macOS の赤が F2 の対象と別テストで、しかも round 2 では PASS していた = 競合依存。round 2 で「同じクラスを一括で洗う」対象にできなかった種類（結果が確率的）。
-  (3) ローカル HEAD が既に origin と一致していた（turn 12 の申し送りは「push 未実施」だったが、ループ側が push した模様）。CI 待ちを push 無しで始められた
-- やり直し: 0 回（既存テストの期待値変更 0 件 — F3 で 1 件（`test_manual_connect_polling`）を変える予定として PLAN に明記）
-- 次への注意: impl は **F3 だけ**（`async_conn.mojo` フィールド 1 + `poll_connect` / `test_async.mojo` 既存 1 件の締め + 新 1 件 / `test_leak.mojo` `is_leaking` + 設計説明 + 単体 2 件 / TRACE「F3」）。期待結果は PLAN F3 (d) の表が正。**既存テストの期待値変更 1 件を PROGRESS に列挙する**。
-  新テスト `…_even_when_refused` は Linux で旧コードが `CONNECTION` を raise する陽性対照なので、実装前に 1 回走らせて赤を見てから直すと確実。`test_leak` 単体はローカル 70〜80 s。push は turn 13 のコミットと一緒に（run 完了済み、cancel の心配なし）。
-  **verify round 4 は verify_round 上限**: 赤なら BLOCKED になる。round 4 の確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS `.conda` 名 = P5 / F3 grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
-  macOS の multi-host がなお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）
-
-## turn 14 — impl — F3 poll_connect の初回 NEED_WRITE 固定 + is_leaking の一度きりの段除外
-- やったこと: ① `AsyncConnection` に `_connect_polled: Bool`（docstring 付き、`__init__` で False）を足し、`poll_connect` は `_setup_pending` 分岐の直後に **初回だけ `PQconnectPoll` を呼ばず `NEED_WRITE` を返す**（3 行）。
-  docstring を libpq の契約（`PQconnectStart` 直後は `PGRES_POLLING_WRITING` とみなす / 先に呼ぶと拒否記録前の `SO_ERROR` を読み macOS で multi-host の乗り換えを失う）に書き換え。`wait_*` / `_poll_to_ready` / `connect_blocking` / `__init__.mojo` は不変。
-  ② `is_leaking` に第 3 の規則: 総成長が許容超えでも **上昇ちょうど 1 回 + その後 2 サンプル以上**なら段としてリークでない（tail が段を超えないことは「上昇 1 回」が含意するので別ループは置かず、コメントで明記）。`TOLERANCE_PAGES` の説明を「大きさでなく形で除外。x86_64 で 513 ページの段を実測（run 39092567451）、aarch64 84 / 開発機 1」に更新。
-  テスト: `test_manual_connect_polling` の初回 assert を `NEED_WRITE` に締め（**既存テストの期待値の変更 1 件 = これだけ**）、新 `test_first_poll_connect_is_need_write_even_when_refused`（31 → 32）、`is_leaking` 単体 2 件（18 → 20）。既存 4 件は不変で PASS。
-  陽性対照: 新テストを**先に**足して旧コードで走らせ `FAIL … PgError(kind=Connection, Connection refused)` を観測（Linux でも契約違反が見える）→ 実装後 32 PASS。
-  検証: test_async **32 PASS** / test_leak **20 PASS**（72.9 s、`connect/query/close RSS pages: [47947, 47948 ×8]`）/ `db-reset` → **`check` 6/6 PASS = 188 s**（12:32:49 → 12:35:57、閾値 247 s、6/6 段 `matched lines: 0`、`final_check: PASS`、両サーバー `skipped 1`）/ `package` 警告 0。
-  grep は PLAN F3 (d) の表どおり（`PGRES_POLLING_WRITING` 4 / `^def test_` 32・20・11 / F2・F1 回帰 `POLLHUP/POLLERR` 0・`is_linux` 1・`cache: false` 1+3・旧 2 入力 0）。チェックリスト 101 key は **turn 13 と差分 0 行**（`src_def_ref_return` 0 / `test_file_count` 24 / `async_*` 1・3・3）。
-  TRACE「F3」節（変更表 / テスト表 / 陽性対照 / (d) 実測表）+「チェックリスト（turn 14）」。PLAN 訂正 0 件。commit `30d7a79`。サブエージェント 0 本
-- 想定外: `test_manual_connect_polling` の締めた assert は**実装前から Linux では PASS**（Linux の初回は元から `NEED_WRITE` が返っていた）ので、期待値変更 1 件のローカル陽性対照にはならなかった。代わりに新テストが旧コードで赤になることで契約違反を押さえた
+## turn 5 — impl — T3 バイナリ配列デコーダ + `decode_binary` の 34 分岐
+- やったこと: (a) `_decode_binary_array[E]`（`array_recv` と同じ検査順: 列 OID → 12 byte ヘッダ → `flags ∈ {0,1}` → `elemtype` 一致（両 OID をメッセージに）→ ndim 0 は dims を読まず空 / 負・2 以上は拒否 → dim → 要素長 -1 で NULL（flags は見ない。P1）→ 要素は `decode_binary[E]`、失敗は `array element N: <元>` → 末尾残り拒否。P3）+ `_decode_binary_string_array`（6 配列 OID）+ `_binary_array_oid_error`。`_require_no_nulls` は `decode_text` から import して text 側と同じ `NULL_VALUE` にする。
+  (b) `decode_binary[T]` に `List[E]` 17 + `List[Optional[E]]` 17（生成スクリプト `turn-005-gen-branches.py` で機械生成。既存 `String` / `List[UInt8]` は不変）。(c) `tests/test_decode_array.mojo` にバイナリ 23 件を追記 → **63 件 PASS**（0.126 s）。payload は `turn-005-gen-tests.py` が RESEARCH §2.3 の hex を組み直したもの（`_P_*` の comptime 定数 32 個）。
+  チェックリスト T3 の 3 行は期待値どおり（`decode_binary_array_def`=1 / `decode_binary_list_branches`=35 / `decode_binary_optional_branches`=17）。`check` 6/6 PASS（既存テストの期待値変更 0 件）
+- 想定外: (1) PLAN (a) は「`len > 残り` → `TYPE_MISMATCH`」しか書いていないが、**要素の長さ語 4 byte 自体の境界検査**が別に要る（`dim` が実要素数より多いと `bytes[pos:pos+4]` が範囲外になる）。同じ `TYPE_MISMATCH` を返す検査を 2 つ足した: 長さ語が読めない場合と、`dim > 残りバイト // 4` の事前検査（後者が無いと壊れた `dim` が巨大な `List` を予約しうる。どちらも PLAN の P3 と同じ結果で、早く落ちるだけ）。
+  (2) `check` が **368 s**（閾値 380 s、turn 4 は 310 s）。`test_decode_array` 単体で 14 s + 4 s = 18 s（34 分岐の instantiation がコンパイル時間になる）。残り 12 s しかないので T5〜T7 の新ファイル 3 本で**閾値を超える**見込み
 - やり直し: 0 回
-- 次への注意: 次は **`/gsd-lite-verify`（round 4 = verify_round 上限。赤なら BLOCKED）**。push 済み（turn 13 の verify コミット + turn 14 の 2 コミットが PR #1 に載る）。確認項目は VERIFICATION §R3.7 の 5 つ（3 ジョブ緑 / macOS の `.conda` 名が他 2 つと重複しない = P5 / F3 の grep とテスト数 32・20・11 / F2・F1 grep 不変 / 合格時 `gh pr edit 1 --body-file`）。
-  **F3 ① の判定は CI の macOS の `test_multi_host_conninfo_reaches_the_second_host` だけ**（ローカル Linux では経路差が出ない）。なお赤なら、メッセージが `connection to server at "127.0.0.1", port 1 failed:` 形か `could not receive data` 形かで機序を切り分ける（VERIFICATION 残留リスク 10）。
-  **② は非決定的**: x86_64 が緑でも「段が出なかっただけ」の可能性があるので、3 ジョブの `connect/query/close RSS pages:` 行を VERIFICATION に写して段の有無を記録する（段が出て緑なら新規則が効いた証跡になる）
+- 陽性対照: NULL 判定を `elem_len == -1 and flags == 1`（= P1 の罠）に変えると `test_binary_array_null_element_with_flags_zero` **だけ**が FAIL（`turn-005-posctl-flags.log`）。63 件中 1 件に効いている
+- 次への注意: T4 は `encode_binary.encode_array` と `params.mojo` の `@implicit` 34 本（期待値 1 / 35 / 17）。最初に `List[String]` → `$1::varchar[]` をサーバーで 1 回実測する（P9。未実測のまま OID 1009 固定にしている）。
+  `check` の所要が閾値に迫っている（368 / 380 s）。T5〜T7 で超えたら PLAN 53-55 行の見積もり（新ファイル 4 本で +60〜85 s）が低すぎたのが理由 — 実測は `test_decode_array` 1 本で +18 s なので、**超過は BLOCKED にせず PROGRESS に実測値と内訳を書いて進める**（PLAN 55 行の指示どおり）
 
-## turn 15 — verify（round 4）— 合格（指摘 0 件）/ PR #1 の run 39094332643 は 3 ジョブとも緑 / PR 本文更新・reflect へ
-- やったこと: 開始時点で turn 14 の push による run `39094332643`（コミット `b0b4ea6`）が走行中だったので `gh run watch --exit-status` で待ちつつ、F3 の回帰 grep（`PGRES_POLLING_WRITING` 4 / `^def test_` 32・20・11 / F2 `POLLHUP/POLLERR` 0・`is_linux` 1 / F1 `cache: false` 1+3・旧 2 入力 0 / lock 不変）、
-  チェックリスト 101 key（turn 13 との差分は `trace_checklist_section` 10 → 11 のみ）、ローカル `db-reset` → **`check` 6/6 PASS = 170 s**。CI: **3 / 3 ジョブ緑**（x86_64 7m58s / aarch64 8m28s / macOS 3m46s）。
-  artifact 3 本（`scratch/turn-015-{macos,x64,arm}-artifact/`）で macOS の `test_multi_host_conninfo_reaches_the_second_host` PASS（6.3 ms）+ 新テスト + round 2 の 2 件 PASS、`skipped 15`、633/633。Linux 2 本は 1246/1246、`skipped 1` × 2。
-  RSS 系列は x86_64 `[6237 ×9]` / aarch64 `[4129, 4130 ×8]` / ローカル `[4213, 4214 ×8]`（段なし）。`.conda` 3 つ `hb0f4dca_0` / `he8cfe8b_0` / `h60d57d3_0` で互いに異なる（P5 解消）。
-  VERIFICATION §R4（回帰表 / CI 表 / 受け入れ基準の最終判定 / 残留リスク 13 / 申し送り）、`gh pr edit 1 --body-file scratch/turn-015-pr-body.md`。リモートありなのでローカルマージなし、`phase: reflect`。サブエージェント 0 本
-- 想定外: (1) `is_leaking` の形による除外は 3 環境とも段が出ず **CI では実測できなかった**（単体テスト 2 件で担保。残留リスク 13）。(2) F3 ① の効果は macOS の 1 テストが 1 回 PASS した事実のみ（round 2 も偶然 PASS していたクラス）。契約準拠の変更なので合格判定にしたが、確率的な赤が完全に消えた証明ではない
-- やり直し: 0 回
-- 次への注意: 次は **`/gsd-lite-reflect`**。マージは人間（PR #1 の 3 チェック緑 → README「ブランチ保護」→ マージ → 「リリース手順」）。reflect の材料: F1〜F3 の 3 round はすべて開発機で観測できない CI 固有の赤（setup-pixi 入力 / macOS poll / libpq 初回 poll 契約 + RSS の段）で、
-  verify_round 上限 3 ちょうどで合格。「round 2 以降は回帰確認だけ」の規則は守れたが、macOS 固有・非決定的なクラスは round 1 の格子では立てようがなかった（研究段階で macOS 実機が無い制約）。ブランチはマイルストーンブランチのまま終了する（checkout しない）
+## turn 6 — impl — T4 配列エンコーダ + `Param` の `@implicit` 34 本（サブエージェント 1 本で並行）
+- やったこと: (a) `encode_binary.encode_array(elems, elem_oid)`（空 = 12 byte ヘッダ / それ以外は ndim 1・flags = None の有無・dim・lbound 1 + 要素ごと `int32 len + bytes`、None は `ffffffff`）。`ARRAY[1,2,3]::int4[]` の実測 44 byte と一致。
+  (b) `params.Param` に `List[E]` 17 + `List[Optional[E]]` 17 の `@implicit`（生成スクリプト `turn-006-gen-params.py` の 1 表から機械生成 → `turn-006-splice-params.py` で挿入 → `mojo format`）。(c) **P9 を最初に実測**（下記）。
+  (d) テストはサブエージェント B が仕様表から独立に: `test_encode_binary` +3 件（29）/ `test_params` +4 件（37、既存 33 件の期待値変更 0 件）。親が統合して検証。
+  `check` 6/6 PASS = **318 s**（閾値 380 s、PASS 1392 件）。チェックリスト T4 の 6 行は全部期待値（`encode_array_def`=1 / `params_list_implicit`=35 / `params_optional_list_implicit`=17 / `params_text_array_oid`=3 / 29 / 37。生値と総数 77 は TRACE「チェックリスト（turn 6）」）
+- P9 実測（`turn-006-probe-p9.log`、PG17）: `$1::varchar[]` / `$1::jsonb[]` / `varchar[]` 列への INSERT は **すべて通る** → 決めた事項 9（`List[String]` = 1009 固定 + サーバーの配列キャスト）をそのまま採用、代替案に切り替えず **PLAN 訂正なし**。
+  NUL 入り要素は sqlstate **`22021`**（PG14 / PG17 同一）= 決めた事項 10 の「22021 想定」が確定。併せて `= ANY($1)` と `{1,NULL,3}`（T5 (b)(e) の先取り）も通ることを確認
+- 想定外: (1) **`def (E) -> List[UInt8]` を値で渡す汎用ヘルパは Mojo 1.1.0 で作れない**（thin 関数が `def(E)` 型に適合しない。`turn-006-probe-fnparam.mojo`）→ 34 本それぞれが自分のループを持つ形（生成スクリプトで量産）に。
+  (2) `List[Optional[Int32]] = [1, None, 3]` の literal は**通らない**（`IntLiteral` → `Optional[Int32]` の 2 段変換が無い）。`[Optional[Int32](1), None, Optional[Int32](3)]` と書く必要がある。ただし `List[Optional[String]] = ["a", None]` は通る（`String` の `@implicit` が 1 段で当たる）。
+  (3) `encode_array` の中で `elems[i].value()` を `var` に束縛すると `List[UInt8]` が `ImplicitlyCopyable` でないとエラー → `ref bytes = elems[i].value()` で借用して 1 byte ずつ append（コピーも起きない）。
+  (4) `check` が **318 s** で turn 5 の 368 s より 50 s 短い（足したのは既存ファイルへの追記だけで増える方向しかないのに下がった）→ **この環境の `check` には ±50 s の揺れがある**。turn 5 の「残り 12 s」は揺れの上側を母数にした読みで、実際の母数は 310〜370 s（TRACE に追記）
+- やり直し: 2 回（(1) の汎用ヘルパ = probe で没、(3) の `ref` 束縛 = コンパイルエラーで即判明）。どちらもプローブ / コンパイル段階で、テストの赤ではない
+- 陽性対照: OID 表の `timetz[]` 1 行だけを 1270 → 1266 に変えた写し（`turn-006-posctl-oid.log`）→ **`test_param_oids_of_the_array_types` 1 件だけが FAIL**（`reason: timetz[]: oid`）。turn 4 の教訓どおり表は `_array_oid_of` を呼ばず数値を直書きしている
+- サブエージェント: 1 本（B = テスト 2 ファイル）。契約外の提案 5 件はすべて**未実装のまま報告**（`Span` を取る `_assert_bytes` 追補 / `text[]` の実測バイト列 / 全要素 None / jsonb の正規化 / キャスト無しの失敗方向）。親が直したのは 1 箇所だけ: NUL の sqlstate を未実測前提の `!= ""` + `print` から **`== "22021"` の断言 + マーカー不在**に（実測が済んだため。テスト内の `print` はこのリポジトリに前例が無い）
+- 次への注意: T5 は `tests/test_array.mojo` 新設（≥ 14 件、17 型 × text/binary × `List`/`List[Optional]`）。送信側は `List[Param] = [x^]` の形で、**名前付き `List` には `^` が必須**。`List[Optional[E]]` の literal は `Optional[E](...)` を明示（上記 (2)）。
+  text/binary 両形式の比較は `execute(sql)` と `execute(sql, [], result_format=BINARY)`。`check` は 310〜370 s の揺れがあるので、1 回の計測で閾値超過を判断しない（db-up 済みで 2 回測る余地があるならそうする）
 
-## turn 16 — reflect — phase6-packaging-ci
-- やったこと: 振り返りを .gsd-lite/reflect/20261018-1252-phase6-packaging-ci.md に作成（提案 8 件）。15 ターン / 178.5 分 / USD 86.65、差し戻し 3 round（F1〜F3）= 74 分 / USD 33.2 がすべて CI 固有の赤、
-  前回提案 10 件は守られた 6 / 部分 2 / 守られなかった 2（ツール側の `result` 合計は 4 回目の未反映）。state を `done` / `DONE` に更新
-- 想定外: 生ログ turn 5 に Bash 権限拒否 1 件（`nohup … &`）があるが turns.jsonl / loop.log に出ていない（最後の `result` だけを記録するため）。run `39090682281` は「人間の re-run」でなく verify round 1 の state コミット push が起動した run だった（`gh run view --json`）。
-  turn 15 の push で run `39095015138` が進行中で、本ターンの push が `concurrency` で cancel する
+## turn 7 — impl — T5 `tests/test_array.mojo`（サーバー格子 26 件）
+- やったこと: 17 要素型 × text / binary × `List` / `List[Optional]` を**実サーバー**で検査する `tests/test_array.mojo` を新設（**26 件**、PG17 / PG14 両方 PASS）。
+  受信は 17 型それぞれ `SELECT ARRAY[...]::<type>[]` を両形式で取って同じ `List` になることを確認（境界値: int2/int4/int8 の最小・最大、float の NaN/±Infinity/-0/1e300、numeric の NaN/±Infinity/30+10 桁、date・timestamp の infinity と BC、time の 24:00:00、bytea の空要素、bpchar の padding、jsonb の version byte、text 9 要素の引用規則）。
+  形は `'{}'` / `ARRAY[1,NULL,3]`（Optional と `NULL_VALUE`）/ 列 NULL と要素 NULL の両立 / `int2[]` を `List[Int32]` で読む `TYPE_MISMATCH` / 多次元拒否 / `[0:1]=` の lbound 落とし / 配列列の `get[String]`（text はリテラル、binary は `TYPE_MISMATCH`）。
+  送信は 17 型の `SELECT $1::<type>[]` 往復 + None 混じり + 空 `List` + `= ANY($1)`（`Int32` と、`,` `"` `\` 空 `"NULL"` を含む `String`）。
+  `check` 6/6 PASS = **298 s**（閾値 380 s、`PASS` 1444 行 = turn 6 の 1392 + 26×2、**既存テストの期待値変更 0 件**）。チェックリスト T5 の 1 行は期待値どおり（`test_array_tests`=26、期待値 ≥ 14。生値と総数 77 は TRACE「チェックリスト（turn 7）」）
+- 想定外: (1) `Row.get_optional[List[Optional[Int32]]]` の戻り値から中身を取るのに `var elements = value.value()` は不可（`List[Optional[Int32]]` が `ImplicitlyCopyable` でない）→ **`ref elements = value.value()`** で借用する。turn 6 の `encode_array` の `ref bytes` と同じ形。
+  (2) `Connection.execute` の `params` は**借用**（`params: List[Param]`、`var` ではない）なので、ヘルパ経由で渡すときに `params^` を書くとコンパイルエラー。既存 `test_params.mojo` と同じく借用で渡す。
+  (3) **`TestSuite` の `Summary [ N ]` の単位はミリ秒**（`turn-007-time.sh` で実測: サマリ 187 の回の `mojo run` 全体が 5 s、2 回とも同じ）。turn 4 / 5 の PROGRESS が「0.065 s」「0.126 s」と書いているのは秒として読んだもの。新ファイルの `check` 単価は「1 サーバー目 17 s（コンパイル込み）+ 2 サーバー目 4 s = 21 s」で読む。
+  (4) `timestamptz` はサーバーの `TimeZone` で表示が変わり `Connection.open` は `TimeZone` を pin しない（`DateStyle` と `IntervalStyle` だけ）→ 有限要素はリテラルで断言できないので **text と binary を互いに比較**し、`infinity` / `-infinity` だけ直接断言した
+- やり直し: 1 回（上記 (1) の `ref` 束縛。コンパイルエラーで即判明。(2) は書く前に `execute` のシグネチャを読んで回避した）
+- 陽性対照: `src/pq` の**写し**（scratch、実行後に削除）で `encode_array` の空配列 `ndim` を 0 → 常に 1 に変えた（空配列は次元語を持たない唯一のペイロード = 他の配列が全部往復し続ける中で送信経路だけが間違える 1 箇所）。
+  `test_array.mojo` は **`test_array_param_empty_array_round_trips` 1 件だけ**が FAIL（25 passed / 1 failed）、対照の `test_encode_binary.mojo` も 1 件だけ。判別できたので差し替え不要（`scratch/turn-007-posctl-encode.{sh,log}`）
+- 次への注意: T6 は `src/pq/copy.mojo` 新設 + `connection` / `transaction` / `prepared` / `__init__` の結線 + `tests/test_copy.mojo`（≥ 18 件）。並列サブ作業 1 本（親 = src、B = テスト）が PLAN の推奨。
+  `check` の残り余裕は 380 − 298 = **82 s** で、T6 / T7 の新ファイル 2 本は +40 s 程度の見込み（新ファイル単価 21 s）。ただし turn 6 の ±50 s の揺れが残るので 1 回の計測で超過を判断しない。
+  `List[Optional[E]]` / `List[E]` を `var` で束縛できない場面は `ref` で借用する（(1)）。`Connection.execute(sql, params, result_format=...)` の `params` は借用（(2)）。`CopyIn` / `CopyOut` のテストで所要を測るときは `Summary` をミリ秒として読む（(3)）
+
+## turn 8 — impl — T6 `src/pq/copy.mojo` + 結線 + `tests/test_copy.mojo`（サブエージェント 1 本で並行）
+- やったこと: (a) `src/pq/copy.mojo` 新設 — `CopyIn`（`write` ×2 / `finish` / `abort` / `__deinit__`）、`CopyOut`（`next` / `__deinit__`）、`_drain_results` / `_drain_copy_out` / `_copy_final_result`（sqlstate 無しの SERVER を CONNECTION に倒す。P11）。`Iterator` は付けない。
+  (b) `Connection._check_not_copying`（`PQTRANS_ACTIVE` → `USAGE`）を **7 箇所**、`_copy_in_parts` / `_copy_out_parts` + `copy_in` / `copy_out`、`_discard_copy_state`（`execute` が COPY 文を受けたら drain してから raise。決めた事項 23）、docstring 書き換え。
+  (c) `Transaction.copy_in` / `copy_out`、`PreparedStatement.execute` の検査、`__init__.mojo` の re-export。(d) テストはサブエージェント B が仕様から独立に: `tests/test_copy.mojo` **21 件**（≥ 18）、PG17 / PG14 両方 PASS。
+  `check` 6/6 PASS = **266 s**（閾値 380 s、`PASS` 1486 行 = turn 7 の 1444 + 21×2、**既存テストの期待値変更 0 件**）。チェックリスト T6 の 11 行は全部期待値（`copy_mojo`=exists / `copyin_struct`=1 / `copyout_struct`=1 / `copy_drain_def`=1 / `conn_copy_parts_defs`=2 / `conn_check_not_copying_def`=1 / `check_not_copying_sites`=7 / `conn_docstring_copy_unsupported`=0 / `init_export_copy`=1 / `test_copy_tests`=21 / `src_iterator_in_copy`=0。生値と総数 77 は TRACE「チェックリスト（turn 8）」）
+- PLAN 訂正 2 件（詳細は TRACE「PLAN 訂正（turn 8）」）: ⑩ の「close 後の最初の `write` が `-1`」は**チャンクサイズ依存で固定できない**（`PQputCopyData` は flush した呼び出しでしか `-1` を返さない）→ 上限付きループで「最初に失敗した `write`」を断言する形に。⑭ の handler ≥ 1 は成立するが**呼ぶのは `CopyIn.__deinit__`**（`PQexec("ROLLBACK")` は COPY 中でも成功するので `Transaction.__deinit__` は handler に到達しない）。
+- 想定外: (1) `_prepare_parts` に検査を置いた（PLAN は `prepare`）。`Transaction.prepare` / 将来の `PooledConnection.prepare` も同じ parts を通るので同じ 7 箇所でカバー範囲が広い。(2) `try` ブロックが `raises PgError` のとき、その中で `raise Error(...)` は**変換できずコンパイルエラー**→ `Error` を投げる判定は `try` の外に出す（`var x: Optional[...]` を宣言して `try` 内で代入する `_prepare_parts` と同じ形）。
+  (3) 小さい表（50 行）では COPY OUT の途中切断が**全部バッファに乗って `None` で正常終了する**（`turn-008-probe-api.mojo` case 14）→ `CONNECTION` を断言するには 10 万行規模が必要（`turn-008-probe-bigout.mojo`: close 後 191 行で `Connection`）。(4) サブエージェントがファイルを書き換えている最中に `check` を回してしまい、1 件消えた版で測った（`fmt` 後の再測で解消）。
+- やり直し: 2 回（(2) のコンパイルエラー = 即判明 / 6/6 段が `warning: assignment to 'ended' was never used` 1 行で FAIL → その helper を `var row: Optional[...]` 形に書き直して解消）。どちらもテストの赤ではない
+- 陽性対照: `_check_not_copying` の本体を `return` に差し替えた `src/pq` の写し（`turn-008-posctl-copying.{sh,log}`、実行後に削除）→ **`test_every_other_command_during_a_copy_is_usage` 1 件だけ** FAIL（20 passed / 1 failed）、対照の `test_transaction.mojo` は 13 件 PASS。この 1 件は USAGE の文言と**その後の `finish()` が 2 行を数えること**の両方を断言しているので、libpq の黙殺によるデータ消失を検出している
+- サブエージェント: 1 本（B = `tests/test_copy.mojo`）。契約外の提案 5 件はすべて**未実装のまま報告**（失敗した `finish` / 成功した `finish` / `abort` の後の `_done` 断言、`CopyOut.next` の終了後の `USAGE`、`abort` の NUL 検査）。親が直したのは 1 箇所だけ: 上記 (2) の helper（コンパイルエラーと 6/6 段の warning）
+- 次への注意: T7 は `src/pq/pool.mojo` 新設（`Pool` / `PooledConnection` / `_Slot`）+ `tests/test_pool.mojo`（≥ 14 件）+ `test_leak.mojo` に 2 ループ。並列サブ作業 1 本（親 = src、B = テスト）が PLAN の推奨。
+  T7 で `copy_in_defs` / `copy_out_defs` / `conn_transaction_parts_sites` の `absent(src/pq/pool.mojo)` が解消し 3 / 3 / ≥ 3 になる。`PooledConnection` の origin 付き 4 本は `_X_parts` + `_conn_ptr()` rebind（決めた事項 19、`probe-pool.mojo:155-161`）で、`_copy_in_parts` / `_copy_out_parts` はこのターンで用意済み。
+  **サブエージェントの報告の時間は `Summary [ N ]` を秒と読んでいる可能性がある**（実体はミリ秒）。所要は `final_check.log` の `took Ns` 行で確かめる。`check` は 266 s で余裕 114 s、母数は 260〜370 s の揺れ込みで読む。
+  サブエージェントが書き終える前に検証を始めないこと（(4)）。`try` の中から `Error` を投げられない（(2)）。
+
+## turn 9 — impl — T7 `src/pq/pool.mojo` + `tests/test_pool.mojo` + leak 2 ループ（サブエージェント 1 本で並行）
+- やったこと: (a) `src/pq/pool.mojo` 新設 — `Pool`（`open` の conninfo / `Dict` 2 オーバーロード、引数検査 3 種は**接続前**に `USAGE`、`acquire` / `_release` / `close` / `size` / `idle` / `borrowed` / `set_rollback_failure_handler`）、
+  `PooledConnection[origin]`（`__deinit__` で返却 + 転送 11 本。origin 付き 4 本は `_transaction_parts` / `_prepare_parts` / `_copy_in_parts` / `_copy_out_parts` + `_conn_ptr()` rebind）、`_Slot`。
+  返却の判定順は決めた事項 18 どおり（closed → `ROLLBACK` → status/txstatus → 寿命 → `PQconsumeInput` ×2 → park）。内部状態の書き換えは `_mut_idle()` / `_mut_borrowed()` の untracked ポインタ。
+  (b) `__init__.mojo` に re-export。(c) テストはサブエージェント B が仕様から独立に: `tests/test_pool.mojo` **18 件**（≥ 14）、`tests/test_leak.mojo` に pool 2 ループ（20 → **22 件**）。PG17 / PG14 両方 PASS。
+  `check` 6/6 PASS = **321 s**（閾値 380 s、`PASS` 1524 行 = turn 8 の 1486 + 18×2 + 2、`FAIL` 0 = **既存テストの期待値変更 0 件**）。チェックリスト T7 の 11 行は全部期待値
+  （`pool_mojo`=exists / `pool_struct`=1 / `pooled_struct`=1 / `pool_release_def`=1 / `pool_consume_input`=5 / `pool_rollback`=1 / `pool_monotonic`=10 / `init_export_pool`=1 / `test_pool_tests`=18 / `test_leak_tests`=22 / `test_leak_pool`=7）。
+  併せて `conn_transaction_parts_sites`=3 / `copy_in_defs`=3 / `copy_out_defs`=3 / `test_file_count`=28 / `src_mojo_count`=22 で **`absent` は T8 の examples 2 本だけ**（生値と総数 77 は TRACE「チェックリスト（turn 9）」）
+- PLAN 訂正 4 件（詳細は TRACE「PLAN 訂正（turn 9）」）: ① T7 (d) の陽性対照は「`_release` の**捨てる**経路」では判別しない（leak の 2 ループはどちらも捨てる経路を通らない）→ **park 経路**（`_idle.append` の直前で handle を NULL）に差し替え。
+  ② `set_rollback_failure_handler` は `for ref slot in self._idle` ではコンパイル不可（`List iteration requires the element to be 'Copyable'`）→ 添字形。③ `_Slot` から `Connection` を取るのは `take(deinit self)` だけが通る。④ `PooledConnection[origin]` に `Parameters:` 節が必要
+- 想定外: (1) `slot.conn^` が `field '...' destroyed out of the middle of a value` で不可。`def take(var self)` でも同じで、**`deinit self` の消費メソッドだけが通る**（`turn-009-probe-take.mojo` で A/B 比較）。
+  (2) `libpq_ptr()` は raises なので `__init__` からは呼べない（`__init__` は raises でない）→ `pq` を引数で渡し `open` 側で `libpq_ptr()` を呼ぶ形に。
+  (3) `PooledConnection[origin]` の `Parameters:` 節が無いと 3/6 段と 6/6 段が warning 1 行で FAIL する（`check` を 1 回分無駄にした。struct に parameter を付けたら docstring も足す）。
+  (4) サブエージェントの報告で **モジュールレベルの `var` は Mojo 1.1.0 に無い**（`global variables are not supported`）→ ⑭ の handler 呼び出し回数は既存 `test_transaction` / `test_copy` と同じ**環境変数**で数えている（依頼文の `List[Int]` 指定は実現不能だった）
+- やり直し: 2 回（(2) の `libpq_ptr` と `_mut_cell` の origin 型 = `package` のコンパイルエラーで即判明 / (3) の `Parameters:` 節 = `check` が 3/6・6/6 段で FAIL → 1 行追加で解消）。テストの赤は 0 回
+- 陽性対照: 3 件すべて 1 件に絞れた（TRACE「陽性対照（turn 9）」）。① park した handle の `PQfinish` を落とす写し → `test_leak` が `test_pool_acquire_and_release_does_not_leak` **1 件だけ** FAIL（open/drop ループは PASS = 2 ループが別経路を見ている証明）。
+  ② `_release` で `_stmt_counter[0] = 0` にする写し → `test_pool` が `test_the_statement_counter_rides_along_with_the_connection` **1 件だけ** FAIL（サーバーは `42P05`）。③ P21（T7 ⑰）: `var p2 = pool^` の後に guard を使うと `use of uninitialized value 'pool'` でコンパイル失敗
+- サブエージェント: 1 本（B = `tests/test_pool.mojo` + `test_leak.mojo`）。**親の実装のバグを 1 件見つけた**（上記 PLAN 訂正 ②。B は scratch に patched copy を置くだけで src には触っていない → 親が本体を直した）。
+  契約外の提案 6 件はすべて**未実装のまま報告**（leak ループの payload 拡大 / `Pool.max_size()` 等の accessor / 貸し出し中接続への handler 適用 / 追加テスト 4 種 / `server_version` を素の `Connection` と比較 / `Pool.clear()` と明示 `release()`）
+- 次への注意: T8 は README / CHANGELOG / `__init__` docstring / examples 2 本（`copy.mojo` / `pool.mojo`）+ `examples/params.mojo` の `= ANY($1)` + `pixi.toml` + `final_check.sh`。並列サブ作業 2 本（A = examples + pixi + final_check、B = README + CHANGELOG、親 = `__init__.mojo` + 照合器）が PLAN の推奨。
+  **README のコード片は examples から逐語**で、`python3 .gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-008-readme-excerpts.py` を必ず回す。`examples/pool.mojo` は `Pool.open(conninfo, 2)` → 3 本目の `USAGE` → drop → 同じ pid の再利用まで（`backend_pid` は `SELECT pg_backend_pid()`）。
+  `check` は 321 s（余裕 59 s）、母数 260〜370 s の揺れ込み。T8 の増分は examples 2 本（2 s × 2 サーバー）と文書だけ。`pool_*` のキーは全部埋まったので T8 は README 系 12 行と件数 3 行だけが動く。
+  **struct に parameter を足したら docstring に `Parameters:` 節**（(3)）。テスト側で数える副作用カウンタは環境変数（(4)）
+
+## turn 10 — impl — T8 README / CHANGELOG / `__init__` docstring / examples 2 本 / pixi / final_check（サブエージェント 2 本で並行）
+- やったこと: (a) `examples/copy.mojo` 新設（1,000 行を `copy_in` で書き `finish().affected_rows()`、`copy_out` を `while True: next()` で読み、行数とバイト数の往復一致を検査して不一致は `exit(1)`）、`examples/pool.mojo` 新設（`Pool.open(conninfo, 2)` → `acquire` ×2 → 3 本目が `USAGE`「pool exhausted」→ 1 本 drop → 再 `acquire` が同じ `pg_backend_pid()`、`size/idle/borrowed` を印字）。
+  `examples/params.mojo` に `= ANY($1)`（`List[Int32]` を `[ids^]`）と `array_agg` を `List[String]` で読む節を追記（`EXPECTED_ROWS` と既存ロジックは不変）。`pixi.toml` に `example-copy` / `example-pool`、`final_check.sh` の 4/6 段に 2 行（examples 5 → **7 本**）。
+  (b) README: 英語要約に `arrays, COPY and a single-threaded connection pool`、型マッピング表に配列行 + 1 次元のみ / 要素 OID 完全一致 / `array element N:` の段落、`### パラメータバインド` に `List` パラメータの散文、クイックスタートに `### COPY` と `### コネクションプール`、「既知の制限」の「配列型・COPY・プールは対象外」1 項目を **9 項目**に差し替え。CHANGELOG の `[Unreleased]` に `- Phase 7:` 1 行。
+  (c) 親: `src/pq/__init__.mojo` の docstring（Phase 7 の行 / re-export 列挙に `CopyIn` `CopyOut` `Pool` `PooledConnection` / 型表と `## Parameters` 表に配列行 / 新節 `## COPY` と `## Connection pool`）。`Raises:` の USAGE 句は T6 で済んでいた（7 箇所確認済み）。
+  `check` 6/6 PASS = **423 s**。テストケースの `PASS` は **1524 = turn 9 と同数**（T8 はテストを増やさないので正しい）、`FAIL` 0 = **既存テストの期待値変更 0 件**。3/6 段の docstring 欠落 0、6/6 段の警告 0、`fmt` 差分 0。チェックリストは **77 key すべて期待値・`absent` 0 件**（T8 の 18 行が到達。生値は TRACE「チェックリスト（turn 10）」）
+- PLAN 訂正 1 件（詳細は TRACE「PLAN 訂正（turn 10）」）: T8 (b) の「パラメータ表（`:141-159`）」は **README に存在しない**（`:141-159` は libpq の探索順で、パラメータの説明は `### パラメータバインド` の散文 `:207-210`。PLAN の行番号が phase 5 時点の写しだった）→ 実物を正とし同じ節の**散文**として追記、PLAN.md の該当行も訂正。`__init__.mojo` 側の `## Parameters` は表があるので PLAN どおり行追加
+- 想定外: (1) 並列 2 本のうち B（README）は A（examples）のコードを逐語で写す必要があり本来は直列依存 → **親が抜粋 19 + 11 + 4 行を先に確定し、同じ固定文言を両方の依頼文に書く**ことで並列化した。結果、照合器は 1 回目から全 9 ブロック missing 0（親の手直し 0 箇所）。
+  (2) `len(String)` は Mojo 1.1.0 で不可（`a single length is ambiguous`）→ A は `_row_text(i).byte_length()` を使った。抜粋の `len(payload)` は `payload` が `List[UInt8]` なので無関係。
+  (3) 照合器の `missing_total=1` は**変更前からの既存**（インストール節の ```mojo に `###` 見出しが無く `NO-SOURCE` になる）。`git show HEAD:README.md` を別ディレクトリに出して baseline を実測し、回帰でないことを確認した。
+  (4) `check` が turn 9 の 321 s から **+102 s（423 s）**。増えた実体は 4/6 の examples 2 本（約 +10 s）だけで、残り約 90 s は 1 サーバー目のコンパイル時間の揺れ（5/6 の内訳は 54317 で 290 s / 54314 で 91 s、`test_leak` は 97 s = turn 9 の 94 s と誤差）
+- やり直し: 0 回（親・サブエージェントとも検証は 1 回で green。`pixi run package` と docstring 診断は `__init__.mojo` 編集直後に単体で先に通して、`check` を無駄にしないようにした）
+- サブエージェント: 2 本（A = examples 3 本 + `pixi.toml` + `final_check.sh` / B = README + CHANGELOG）。**どちらも固定文言の抜粋を 1 行も変えずに通した**ので親の統合修正は 0 箇所。契約外の提案 8 件はすべて**未実装のまま報告**（A: `CopyIn.abort` / CSV・binary COPY / `min_size`・`max_lifetime_s`・`close`・handler のデモ / `labels == [...]` の断言 / `example-all` タスク。B: トランザクション内 COPY の例 / `Pool.open` と `Connection.reset()` の API 節 / 配列リテラルの引用規則の詳細 / `List[UInt8]` と `List[T]` の区別の注記）
+- 次への注意: T9 は最終判定（堅牢性格子の全セル + `db-reset` からの `check` + 受け入れ基準対応表 + branch push）。`scratch/turn-003-robust-grid.sh` を `turn-011-robust-grid.sh` に写し `copy.mojo` / `pool.mojo` / `params.mojo` の行を有効化する。
+  **PLAN T9 (b) の閾値 300 s は green な 2 回（turn 9 = 321 s、turn 10 = 423 s）とも超えている**。T9 は `db-reset` 後に計測してから、閾値そのものを訂正するか判断すること（1 回の計測で決めない）。母数は **260〜425 s** で読む。
+  `absent` は 0 件になったので、T9 で動くチェックリストの key は無い（全 77 key が期待値のまま維持されることの確認だけ）。PROGRESS の最新節 ≤ 40 行の検査が T9 (c) にあるので注意
+
+## turn 11 — impl — T9 最終判定（堅牢性格子 全セル + クリーン check + 受け入れ基準対応表 + push）
+- やったこと: (a) `scratch/turn-011-robust-grid.sh`（`turn-003` の写し、違いは `BIN` のパスと冒頭コメント）を `db-reset` 直後に実行 → examples **7 本**ビルド成功（turn 3 で `absent` だった `copy` / `pool` が実体に）、**126 セル全部 `unhandled_markers=0`**（`traceback` / `exception_ignored` も 0）。
+  rc は 0 が 39 / 1 が 73 / **141 が 14 = `run_epipe` の 7 本 × 2 入力ちょうど**（既知の SIGPIPE）。入力軸の追加分（配列リテラル不正 10 件 / バイナリヘッダ不正 6 件 / COPY 途中切断 2 件 / プール枯渇・死んだ接続 5 件）の所在を TRACE の表に。
+  (b) `db-reset` → `check` を**クリーン状態で 1 回**: `final_check: PASS`、**298 s**（21:15:26 → 21:20:24）。段ごとは 1/6 fmt 1 s（差分 0）/ 2/6 precompile 4 s / 3/6 docstring 3 s（欠落 0）/ 4/6 examples 20 s（7 本）/ 5/6 tests 264 s（54317 176 s（`test_leak` 89 s 含む）/ 54314 83 s）/ 6/6 0 件。
+  `PASS` 行 **1524 = turn 9 / 10 と同数**（T9 はテストを増やさない）、`FAIL` **0 = 既存テストの期待値変更 0 件**。`pixi run package` は 2/6 段が兼ねる（警告 0）、`fmt` 差分は 1/6 段が 0。
+  (c) チェックリスト **77 key すべて期待値・`absent` 0 件**（turn 10 との差は `trace_checklist_section` 6 → 7 → 8 の 1 key だけ。生値は TRACE「チェックリスト（turn 11）」）。PROGRESS 最新節は 40 行以内。
+  (d) TRACE に「受け入れ基準対応表」（REQ §4.1 4 行 / §4.2 8 行 / §4.3 8 行 / §4.4 6 行 → テスト名 + 完了基準番号）と「verify への申し送り」（P1〜P29 の grep パターン / 件数 / ファイルの 3 列 + 表に乗らない 5 項目）。測り方は `scratch/turn-011-pitfalls.sh` に残した。(e) branch push 済み
+- PLAN 訂正 2 件（詳細は TRACE「PLAN 訂正（turn 11）」）: ① T9 (a) の「配列リテラル不正 9 件」は実測 **10 件**（P7 の 9 件 + T2 が足した `test_malformed_dimension_prefix_without_equals`）→ 実測を正とし PLAN の件数を直した。
+  ② **T9 (b) の閾値 300 s は訂正しない**（turn 10 の申し送りは「超えるなら訂正を判断」だったが、クリーン実測 298 s が閾値内に収まった）
+- 想定外: (1) `check` が turn 10 の 423 s から **298 s に戻った**（−125 s）。テストもコードも増えていないので差は 1 サーバー目のコンパイル時間の揺れで、turn 11 は堅牢性格子が先に 7 本をビルドしてキャッシュを暖めていた分だけ速い。母数は **260〜425 s** のまま読む（1 回の測定で閾値を動かさない turn 7 の注意どおり、今回は閾値内なので据え置き）。
+  (2) `python3 -c "..."` に日本語とバックティックを混ぜた追記を Bash ツールから渡すと、二重引用符の中のバックティックがシェルのコマンド置換として走って本文が空に化けた（TRACE に 1 回書き損じ → 同じ節を scratch の `.md` ファイル経由で書き直した）。**長い本文は必ず Write でファイルに書いてから python3 で連結する**
+- やり直し: 1 回（上記 (2) の TRACE 追記。`## PLAN 訂正（turn 11）` 以降を切り落として `turn-011-plan-fix.md` から書き戻した。検証コマンドの赤は 0 回）
+- 陽性対照: T9 には新しい対照なし（格子の判定は「全セル 0」で、対照は T6 / T7 / T9 (a) の入力軸テスト側が持つ）。格子が「別経路を見ている」証拠は rc の分布（`run_epipe` の 14 セルだけが 141）で確認した
+- 次への注意: **全 9 タスク完了 → verify フェーズへ**（`phase: "verify"` / `next_command: "/gsd-lite-verify"`）。verify への申し送りは TRACE「verify への申し送り（turn 11 / T9 (d)）」に集約した（P1〜P29 の対応表 + 差し戻し対象にしない 2 項目 = `CopyOut` が `Iterator` でない（決めた事項 7）と REQ §4.3 の `copy_in` 未完了 drop の読み替え（決めた事項 20））。
+  **CI は未実施**（`ci.yml` は `pull_request` / `push(main)` のみ。T9 の branch push では run が起動しない）→ PR を作るのは verify。3 OS の赤は OS 固有の経路（`close(PQsocket)` の EBADF / `pg_stat_activity` の権限）から見る。`verify_round_max` は 4
+
+## turn 12 — verify — round 1: 差し戻し（指摘 3 件 → F1）、PR 未作成
+- やったこと: `db-reset` → `check` 6/6 PASS **291 s**（PASS 1524 / FAIL 0）、堅牢性格子 126 セル再実行（全セル 0、T9 と同一）、チェックリスト 77 key 不変、README 抜粋照合 0 missing、PROGRESS 15 行。
+  サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用）+ 親の読み（`copy.mojo` / `pool.mojo` / `connection.mojo` 差分 / 3 つのパーサ）。指摘 3 件はすべて source と probe（`scratch/turn-012-probe-failed-write{,-end}.mojo`）で親が再確認してから F1 にまとめた（VERIFICATION.md）。
+  セキュリティは HIGH / MEDIUM なし（2 GiB `write` の LOW は残留リスク）。決めた事項 7 / 20 は申し送りどおり差し戻し対象外
+- 想定外: (1) T8 の PLAN 訂正 ② が「handler を呼ぶのは `CopyIn.__deinit__`」と記録した挙動は、健全な接続への**誤報**だった（テスト ⑭ がそれを `>= 1` で固定）。impl が観測を正しく記録していたので verify はそこから拾えた = TRACE の記録が効いた例。
+  (2) ⑩ の「失敗した `write` の後は何もしない」設計（決めた事項 13）は、libpq が COPY 状態に残るため接続が `USAGE` で永久に塞がる。probe (b) で `PQputCopyEnd(0)` + drain が出口になることを確認して F1 (b) に書いた。
+  (3) `Read` ツールが未読ファイルに dedup 通知を返して中身を出さなかった（`copy.mojo` / `pool.mojo`）→ `cat -n` で代替
+- やり直し: 1 回（probe の `external_call` import 漏れ = コンパイルエラーで即判明）
+- 次への注意: F1 は 3 箇所とも同じ状態機械（`_check_not_copying` が入って変わった `execute` の失敗の仕方）なので、**修正前に ②③ のテストを書いて赤を見てから**直す（① は既存テストの期待値変更 1 件で PROGRESS に列挙）。
+  `reset()` は閉じた fd 番号を取り直すので ③ は `reset()` 後に普通に使える。決めた事項 13 の訂正を TRACE「PLAN 訂正（turn 13）」に。round 2 の verify は F1 の回帰 + `check` + 格子だけ（新クラスの探索はしない）、合格なら PR 作成 → `gh pr checks --watch`
+
+## turn 13 — impl — F1 Transaction × COPY の状態機械 3 件 + テスト 5 件
+- やったこと: 指摘 1 = `Transaction.commit` / `rollback` が `_check_not_copying()` を `_done = True` の**前**に呼ぶ（拒否してもブロックは開いたまま）。
+  指摘 2 = `CopyIn` / `CopyOut` の `__deinit__` は `PQtransactionStatus != PQTRANS_ACTIVE` なら何も送らない（誤報の除去）。
+  指摘 3 = `write` の失敗が `PQerrorMessage` を先に読んでから `PQputCopyEnd(0)` + drain で終端（`finish` / `abort` の `rc < 0` にも drain）。
+  `test_copy.mojo` 21 → **26 件**、helper 4 本（`_tx_commit_error` / `_tx_rollback_error` / `_tx_copy_out` / `_reset`）。docstring は `CopyIn.write` の Raises / `copy.mojo` の destruction 節 / `Transaction.copy_in` の order 段落 / `Pool.acquire` の Raises。
+  **陽性対照**: 5 件を修正前に走らせて 4 件が赤（26 tests / 5 failed、内訳は TRACE「陽性対照（turn 13）」）。修正後 26/26 green。
+  `db-reset` → `check` **280 s** `final_check: PASS`（6/6、PASS 1534 / FAIL 0）。チェックリスト 77 key は `test_copy_tests` 21 → 26 の 1 行だけ差分（`trace_checklist_section` は TRACE 追記で 8 → 9）
+- 既存テストの期待値変更（**1 件**、F1 (d) ① のみ）: `test_transaction_destroyed_before_its_copy_in` の
+  `getenv(HANDLER_CALLS_VAR).byte_length() >= 1` → `== ""`（handler 0 回）。理由 = 先に `Transaction` の ROLLBACK が COPY を終わらせた後の
+  `CopyIn.__deinit__` の中止は libpq の `no COPY in progress`（sqlstate 無し）を引き、健全な接続について `CONNECTION` を handler に誤報していた。
+  docstring も「reports that through the handler」→「leaves the connection alone」に書き換えた
+- 想定外: F1 (d) ④（`close` 後の `finish()`）は**修正前から green**だった。`PQputCopyEnd` が `rc >= 0` を返して既存の `_copy_final_result` が drain する経路に入るため、
+  指摘 3 の対照になっていない（対照は ③ 1 本）。④ は REQ §4.2 の未テスト分として残した。
+  ついでに `finish` / `abort` の `rc < 0` 側に足した drain は**どのテストも踏んでいない**（同期接続で `PQputCopyEnd` が負を返す形を作れなかった）
 - やり直し: 0 回
-- 次への注意: マージ・ブランチ保護・タグは人間（VERIFICATION §R4.7）。次マイルストーンの前に CHANGELOG 0.1.0 への Phase 6 追記と `.gsd-lite/` を main に残すかを決める。research は採用アクションの入力検証ソースを読む、plan は複数 OS CI のとき verify_round_max 4
+- 次への注意: round 2 の verify は F1 の回帰（`test_copy` 26 件 + 期待値変更 1 件が ① であること）+ クリーン `check` + 堅牢性格子 126 セルで足りる。
+  `check` の所要は同じ木で 280 s（クリーン）〜360 s（テスト直後）と揺れるので、閾値 300 s は**クリーン実測**で判定する（TRACE「`check` の所要（turn 13）」）。
+  未カバーの経路（`finish` / `abort` の `rc < 0` の drain）は指摘ではなく記録として残してある
+
+## turn 14 — verify — round 2: 合格（指摘 0 件）、PR #2 作成、CI 3 / 3 SUCCESS → reflect
+- やったこと: F1 差分（`transaction.mojo` / `copy.mojo` / `pool.mojo` docstring / `test_copy.mojo` 26 件）の回帰レビュー（親のみ、サブエージェントなし）、`db-reset` → `check` 6/6 PASS **288 s**（PASS 1534 / FAIL 0）、
+  堅牢性格子 126 / 126 セル unhandled 0（rc 分布は round 1 と完全一致）、チェックリスト 77 key は turn 13 基線と差分 0。VERIFICATION.md に round 2 節 → commit → push →
+  `gh pr create` で **PR #2**（https://github.com/6in/mojo-pg/pull/2）→ `gh pr checks 2 --watch` で run `39428167302` の 3 ジョブが SUCCESS（約 12.5 分、再実行なし）
+- 想定外: なし（`check` 288 s は閾値 300 s 内。CI は 40 分の上限に対して 12.5 分）
+- やり直し: 0 回
+- 次への注意: reflect は `.gsd-lite/reflect/` に書いてから DONE にする。振り返りの材料: (1) round 1 の 3 指摘はいずれも「T6 で `_check_not_copying` が入って変わった `execute` の失敗の仕方」を `Transaction` / `CopyIn` の状態機械が織り込んでいなかった同型の問題で、
+  impl の TRACE（T8 の PLAN 訂正 ②「handler を呼ぶのは `CopyIn.__deinit__`」）が誤報の観測を正しく記録していたから verify で拾えた。(2) F1 (d) ④ は修正前から green（陽性対照にならなかった）。
+  (3) `Read` ツールの dedup スタブ（turn 12）は今回は `Read(offset=)` で回避できた。マージ・タグ・Release は人間（Phase 6 D7 / D15）。ブランチは `gsd-lite/phase7-pool-copy-array` に残したまま終了する
+
+## turn 15 — reflect — phase7-pool-copy-array
+- やったこと: 振り返りを .gsd-lite/reflect/20261020-2228-phase7-pool-copy-array.md に作成（提案 10 件。Plus 8 / Minus 8 / Interesting 10）。
+  計測は turns.jsonl 14 行 + 生ログ 14 本の `result` 合算 + `turn-015-gaps.py`（record 間隔）で取った
+- 想定外: (1) turns.jsonl の turn 10 が 11,411 s（他の impl は 754〜2,535 s）で、生ログに 9,897 s の空白 + `EAI_AGAIN` の API エラーがあったのに PROGRESS turn 10 は停止に触れていない。
+  (2) turn 9 / 10 / 12 / 14 は `result` が複数（4 / 16 / 6 / 3）で、turns.jsonl の出力トークンは最後の 1 件だけ（Phase 5 / 6 提案のツール側修正は未反映）
+- やり直し: 0 回
+- 次への注意: ループに停止検知（record 間隔 > 15 分で WARN + `stall_s`）と複数 `result` の合算を足す（ツール側）。`Monitor` は deny に。ガードを N 箇所に足すタスクは「ガード × 状態遷移」の格子を完了基準に

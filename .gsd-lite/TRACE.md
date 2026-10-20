@@ -1,685 +1,1143 @@
-# TRACE — phase6-packaging-ci
+# TRACE — phase7-pool-copy-array
 
-PROGRESS.md は 1 ターン 40 行までなので、生の値（チェックリストの出力・所要・ログ名）はこのファイルに置く。
-節立ては PLAN.md「決めた事項 12」。
+PLAN.md の「追従先チェックリスト」の**生の値**と `pixi run check` の所要、PLAN の訂正をためる場所。
+PROGRESS.md は 1 ターン 40 行以内に収めるため、数字の全文はここに置く（Phase 6 の TRACE と同じ役割）。
 
-## PLAN 訂正（turn 3）
-
-- T1 (a) の引数名: `def _restore_collected(mut self, out: List[Notification])` → **`collected: List[Notification]`**
-  （根拠: `out` は Mojo 1.1.0 の引数規約キーワードで、`src/pq/async_conn.mojo:1582:41: error: expected argument name` でパースできない。
-  要件・決定は引数名に触れていない。チェックリストの key は `def _restore_collected` / `_restore_collected(` の 2 つで、どちらも影響なし）
-
-## PLAN 訂正（turn 4）
-
-- チェックリスト T2 行の `pixi_pkg_name_pq` の期待値: **1 → 2**
-  （根拠: key の実体は `grep -c '^name = "pq"' pixi.toml` で、RESEARCH §2.1 の差分には `[package]` と
-  `[package.build.config.pkg]` の両方に `name = "pq"` がある。実測 2。要件・決定に触れない数え方の誤り）
+- チェックリストのスクリプト: `.gsd-lite/logs/phase7-pool-copy-array/scratch/turn-002-checklist.sh`（**全 77 key**）
+- 基線（コミット `e7fdf6c` の木 = plan ターン終了時）: `scratch/turn-002-checklist.log`
+- 各ターンの生出力: `scratch/turn-<NNN>-checklist.log`
 
 ## チェックリスト（turn 3）
 
-`bash .gsd-lite/logs/phase6-packaging-ci/scratch/turn-002-checklist.sh` の出力（全文は
-`scratch/turn-003-checklist.log`）。T1 の行と、不変であるべき行を転記する。T2〜T5 の key はすべて
-`0` / `absent(...)`（未着手。基線 `turn-002-checklist.log` と同じ）。
+`scratch/turn-003-checklist.log` の全文（**全 77 key**）。T1 の行には期待値を添える。T2〜T8 の key は
+すべて基線のまま（未着手）。`absent(...)` はファイル未作成。
 
 ```
-## T1 持ち越し 2 件（E1 README / E2 _restore_collected）+ db-up 上限 + TRACE
-async_restore_collected_def=1            # 期待 1
-async_restore_collected_sites=3          # 期待 3（def + 2 呼び出し。P20）
-async_wait_readable_timeout_return=3     # 期待 3（不変）
-test_notify_tests=25                     # 期待 ≥ 25（24 → 25）
-test_notify_restore_collected=2          # 期待 ≥ 1（ヘルパ直叩き 2 箇所: 3 件と空リスト）
-readme_sigpipe=2                         # 期待 ≥ 1
-readme_rc_141=1                          # 期待 ≥ 1
-pixi_db_up_wait_timeout=1                # 期待 1
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3                        # 期待 ≥ 2（var 行 + _dl_sym[ + 名前文字列の 3 行）
+ffi_putcopyend=3                         # 期待 ≥ 2
+ffi_getcopydata=3                        # 期待 ≥ 2
+conn_reset_def=1                         # 期待 1
+conn_reset_session_setup=5               # 期待 ≥ 4（基線 3 = 定義 + _adopt の 2 箇所、+ reset の docstring / 呼び出し）
+conn_transaction_parts_def=1             # 期待 1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)   # T7 まで許容（connection.mojo 側は 2 箇所）
+test_connection_tests=33                 # 期待 ≥ 33（基線 31 + reset の 2 件）
 trace_exists=exists                      # 期待 exists（このファイル）
-trace_checklist_section=1                # 期待 ≥ 1
-## 全体（不変）
-src_def_ref_return=0
-test_file_count=24
-examples_mojo_count=7
+trace_checklist_section=1                # 期待 ≥ 1（この節）
+grid_script=exists                       # 期待 exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=0
+array_elem_oid_def=0
+array_oid_of_def=0
+parse_array_literal_def=0
+decode_text_array_def=0
+decode_text_list_branches=1
+decode_text_optional_branches=0
+test_decode_array_tests=absent(tests/test_decode_array.mojo)
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=0
+decode_binary_list_branches=1
+decode_binary_optional_branches=0
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=0
+params_list_implicit=1
+params_optional_list_implicit=0
+params_text_array_oid=0
+test_encode_binary_tests=26
+test_params_tests=33
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=absent(tests/test_array.mojo)
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1                        # 不変（期待 1）
+readme_h2=11                             # 不変（期待 11）
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
 final_check_examples=5
-tests_sh_bash4_only=0
-pixi_lock_changed_vs_main=0
-pixi_version_literal=1
-readme_dash_I_src=1
-readme_six_stages=1
-readme_compose_three=2
-readme_unverified_windows=3
-readme_h2=10                             # T5 で 11 になる
+## 全体（不変 / 件数）
+examples_mojo_count=7                    # 不変（T8 で 9）
+test_file_count=24                       # 不変（T7 までに 28）
+src_mojo_count=20                        # 不変（T7 までに 22）
+src_def_ref_return=0                     # 不変（期待 0。REQ §2.3）
+src_iterator_in_copy=absent(src/pq/copy.mojo)   # T6 で exists かつ 0（決めた事項 7）
+tests_sh_bash4_only=0                    # 不変（期待 0）
 ```
 
-（`trace_exists` / `trace_checklist_section` はこのファイルを書いた後の値。`turn-003-checklist.log` は
-このファイルより前に走らせたので `absent` と出ている）
-
-## `check` の所要
-
-| turn | タスク | コマンド | 開始 → 終了（`date -Iseconds`） | 所要 | 判定 |
-|---|---|---|---|---|---|
-| 3 | T1 | `pixi run check` | 2026-10-18T10:37:38+09:00 → 2026-10-18T10:40:47+09:00 | **189 s** | PASS 6/6（閾値 247 s / 見積もり 170〜220 s の内側） |
-
-基線（Phase 5 末の実測）: 165〜215 s。T1 で足したテストは 1 件（`test_restore_collected_puts_them_back_in_front` =
-11.2 ms）で、所要への影響は測定誤差の範囲。
-
-単体の実測（turn 3）:
-
-- `pixi run mojo run -I src tests/test_notify.mojo` → 25 tests / 25 passed / 0 failed / 0 skipped（3396 ms）
-- `pixi run mojo run -I src tests/test_async.mojo` → 31 tests / 31 passed / 0 failed / 0 skipped（3566 ms）
-- `pixi run test` → 54317 / 54314 の両サーバーで全ファイル PASS（54314 は `skipped 1` = PG14 で持たない 1 件、従来どおり）
-- `pixi run package` → 出力なし（警告ゼロ）
-- `pixi run db-reset` → rc 0（`--wait-timeout 180` 付きの `db-up` で 3 コンテナ Healthy）
+`trace_exists` / `trace_checklist_section` はこのファイルを書いた後の値（`turn-003-checklist.log` は
+このファイルを書く前に取ったので `absent` のまま。コミット前の再実行が上の 2 行の根拠で、
+生出力は `scratch/turn-003-checklist-after-trace.log`）。
 
 ## チェックリスト（turn 4）
 
-全文は `scratch/turn-004-checklist.log`。T2 の行と、不変であるべき行を転記する。T3〜T5 の key は
-すべて `0` / `absent(...)`（未着手。turn 3 と同じ）。
+`scratch/turn-004-checklist.log` の全文（**全 77 key**）。T2 の 8 行には期待値を添える
+（turn 3 からの差分は T2 の 8 行と `test_file_count` の 24 → 25 だけ。`diff` で確認）。
 
 ```
-## T2 pixi.toml [package] / pixi build / 利用側 smoke
-pixi_preview=1                 # 期待 1
-pixi_package_section=1         # 期待 1
-pixi_version_literal=1         # 期待 1（P4。`[package]` 側は { workspace = true } なので増えない）
-pixi_version_workspace=1       # 期待 1
-pixi_pkg_name_pq=2             # 期待 2（上の PLAN 訂正（turn 4））
-pixi_pkg_path=1                # 期待 1
-pixi_backend_mojo=1            # 期待 1
-pixi_mojo_compiler=3           # 期待 3（host / build / run）
-pixi_run_dep_libpq=2           # 期待 2（[dependencies] と [package.run-dependencies]）
-gitignore_dist=1               # 期待 1
-pixi_lock_changed_vs_main=0    # 期待 0（P3）
-## T1（不変）
-async_restore_collected_def=1 / _sites=3 / async_wait_readable_timeout_return=3 /
-test_notify_tests=25 / test_notify_restore_collected=2 / readme_sigpipe=2 / readme_rc_141=1 /
-pixi_db_up_wait_timeout=1 / trace_exists=exists / trace_checklist_section=1
-## 全体（不変）
-src_def_ref_return=0 / test_file_count=24 / examples_mojo_count=7 / final_check_examples=5 /
-tests_sh_bash4_only=0 / readme_dash_I_src=1 / readme_six_stages=1 / readme_compose_three=2 /
-readme_unverified_windows=3 / readme_h2=10
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=1
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=40
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=0
+decode_binary_list_branches=1
+decode_binary_optional_branches=0
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=0
+params_list_implicit=1
+params_optional_list_implicit=0
+params_text_array_oid=0
+test_encode_binary_tests=26
+test_params_tests=33
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=absent(tests/test_array.mojo)
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=25
+src_mojo_count=20
+src_def_ref_return=0
+src_iterator_in_copy=absent(src/pq/copy.mojo)
+tests_sh_bash4_only=0
 ```
 
-## `pixi build` の所要と生成物（turn 4）
+T2 の期待値との対応:
 
-| 回 | コマンド | 開始 → 終了 | 所要 | 結果 |
-|---|---|---|---|---|
-| 1 | `pixi build -o dist` | 2026-10-18T10:44:02+09:00 → 2026-10-18T10:44:19+09:00 | **17 s** | `dist/pq-0.1.0-he8cfe8b_0.conda` 1 個（recipe 本体は `took 2 seconds`。backend は turn 1 のプローブで取得済みのため初回 60 s 級にはならず） |
-
-- `pixi run check`: 2026-10-18T10:45:03+09:00 → 2026-10-18T10:48:06+09:00 = **183 s**、PASS 6/6（閾値 247 s）
-- `pixi run package` → 出力なし（警告ゼロ）、`pixi install --locked` → rc 0、`git diff --quiet main -- pixi.lock` → rc 0
-- `pixi workspace version get` = `0.1.0`
-- `.conda` の zip エントリ 3 個: `metadata.json` / `pkg-pq-0.1.0-he8cfe8b_0.tar.zst` / `info-pq-0.1.0-he8cfe8b_0.tar.zst`
-- `pkg-*.tar.zst` の中身（A3 / P2）: **`lib/mojo/pq.mojoc`（449.8 KiB）と `share/max/firstActivation` の 2 つだけ**。
-  `examples/` / `tests/` / `hello.mojo` は**無い**
-- `info/index.json` の `depends` = `["mojo-compiler >=1.1.0,<1.2", "libpq >=14"]`、`subdir` = `linux-aarch64`
-- `info/about.json` = `{"description": "mojo-libpq: PostgreSQL client for Mojo via libpq C FFI", "license": "Apache-2.0"}`
-  → `description` / `license` の `{ workspace = true }` 継承は**通ったので残した**（PLAN T2 (a) の「任意」部分）
-- 観測した警告: `pixi build` は「deprecated、`pixi publish --path . --target-dir dist` を使え」と出す（rc 0。
-  RESEARCH §2.1 で両者が同じ結果になることは確認済み。T3 / T4 のワークフローでどちらを書くかは次ターンの判断）
-
-## 利用側 smoke 2 経路（turn 4。REQ A2）
-
-どちらも同じ `main.mojo`（`from pq import Connection, PgError` → 閉じたポートへ接続）。
-ログは `scratch/turn-004-consumer-git.log` / `scratch/turn-004-consumer-dl.log`。
-
-| 経路 | 依存の書き方 | 出力 | 判定 |
+| key | 現在値 | 期待値 | 判定 |
 |---|---|---|---|
-| git | `pq = { git = "file:///home/parallels/workspaces/mojo-apps/pgcon", branch = "gsd-lite/phase6-packaging-ci" }` + `preview = ["pixi-build"]` | `pq import OK` / `expected failure: PgError(kind=Connection, message=connection to server at "127.0.0.1", port 1 failed: Connection refused` | PASS（`LibpqLoad` 無し。チェックアウト `…/git-v0/checkouts/cfb6b27deff335b2/3dfed07` = このブランチのコミット `3dfed07` を precompile） |
-| ダウンロード | `file://…/turn-004-dl-channel`（`rattler-index fs` 済み）を channels 先頭に + `pq = "==0.1.0"`（`preview` 不要） | 同上 | PASS（`pixi list` に `pq 0.1.0 he8cfe8b_0`（file チャンネル）と `libpq 18.6`（conda-forge）） |
+| `oid_array_consts` | 21 | 21 | ○ |
+| `array_elem_oid_def` | 1 | 1 | ○ |
+| `array_oid_of_def` | 1 | 1 | ○ |
+| `parse_array_literal_def` | 1 | 1 | ○ |
+| `decode_text_array_def` | 1 | 1 | ○ |
+| `decode_text_list_branches` | 35 | **35**（PLAN 41 を turn 4 に訂正） | ○ |
+| `decode_text_optional_branches` | 17 | **17**（PLAN 20 を turn 4 に訂正） | ○ |
+| `test_decode_array_tests` | 40 | ≥ 18 | ○ |
 
-verify は PR 後に GitHub の URL（`https://github.com/6in/mojo-pg.git`）で git 経路を再実測する（RESEARCH §6）。
+## PLAN 訂正（turn 4）
 
-## チェックリスト（turn 5）
+- 配列分岐の本数: **要素型は 20 ではなく 17**。`decode_text` のスカラ分岐は
+  `Bool` / `Int16` / `Int32` / `Int64` / `Int` / `Float32` / `Float64` / `String` / `List[UInt8]` /
+  `Decimal` / `UUID` / `Date` / `Timestamp` / `TimestampTz` / `Time` / `TimeTz` / `Interval` の
+  **17 本**で（`decode_text.mojo` の `comptime if` を数えた）、`String` が 6 つの配列 OID を、
+  `Int` / `Int64` が同じ 1016 を受けるため 21 の配列 OID を 17 型で覆う。REQ §2.1 が挙げる型名も
+  この 17（`Int64`/`Int` を 2 と数えて）で、要件には触れない。直した箇所:
+  チェックリスト `decode_text_list_branches` 41 → **35**（= 既存 `List[UInt8]` 1 + 17 + 17）/
+  `decode_text_optional_branches` 20 → **17**、同じ算術で `decode_binary_*` を 1 / 35 / 17、
+  `params_list_implicit` / `params_optional_list_implicit` を 35 / 17、
+  本文の「40 分岐」→ 34 分岐・「`@implicit` 40 本」→ 34 本・「20 要素型」→ 17 要素型
+  （T2 (d) / T3 (b) / T4 (b)(c) / T5 (a)(e) / 決めた事項 9 / 採否表 5 / 申し送り）
 
-全文は `scratch/turn-005-checklist.log`。T3 の行と、不変であるべき行を転記する。T4 / T5 の key は
-すべて `0` / `absent(...)`（未着手。turn 4 と同じ）。
+## `check` の所要
 
-```
-## T3 ci.yml + .github/scripts
-wf_ci_exists=exists            # 期待 exists
-ci_os_ubuntu_latest=1          # 期待 ≥ 1
-ci_os_ubuntu_arm=1             # 期待 ≥ 1
-ci_os_macos_latest=1           # 期待 ≥ 1
-ci_fail_fast_false=1           # 期待 1
-ci_timeout_minutes=1           # 期待 ≥ 1（ジョブ 1 つなので 1）
-ci_permissions=1               # 期待 ≥ 1（先頭 contents: read）
-ci_secrets_refs=0              # 期待 0（P14）
-ci_branches_main=2             # 期待 2（pull_request / push。P15）
-ci_pull_request=1              # 期待 1
-ci_setup_pixi_pinned=1         # 期待 1
-ci_pixi_version=1              # 期待 1
-ci_run_install_false=1         # 期待 1
-ci_locked_true=1               # 期待 1
-ci_pixi_run_check=3            # 期待 ≥ 1（step 名 / env コメント / run の 3 行）
-ci_pixi_build=1                # 期待 ≥ 1（`pixi build -o dist` を維持。下の「`pixi build` の deprecated」参照）
-ci_upload_artifact=2           # 期待 ≥ 2（.conda と final_check.log）
-ci_artifact_pq_conda=1         # 期待 ≥ 1
-ci_windows_reason=1            # 期待 ≥ 1（先頭コメント。B7）
-ci_conninfo_5432=1             # 期待 ≥ 1
-ci_retry_sh=4                  # 期待 ≥ 3（install / compose pull / build の 3 呼び出し + コメント 1）
-scripts_retry=exists / scripts_macos_pg=exists / scripts_blackhole=exists   # 期待 exists ×3
-macos_pg_scram=4               # 期待 ≥ 1
-macos_pg_ctl_wait=1            # 期待 ≥ 1（`-w -t 60`）
-macos_pg_wrong_password=3      # 期待 ≥ 1
-macos_pg_schema_sql=2          # 期待 ≥ 1
-macos_pg_reload=3              # 期待 ≥ 1
-blackhole_held=5               # 期待 ≥ 1（P8）
-tests_sh_bash4_only=0          # 期待 0（不変。final_check.sh / run_tests.sh は未変更）
-## T1 / T2（不変）
-async_restore_collected_def=1 / _sites=3 / async_wait_readable_timeout_return=3 /
-test_notify_tests=25 / test_notify_restore_collected=2 / readme_sigpipe=2 / readme_rc_141=1 /
-pixi_db_up_wait_timeout=1 / trace_exists=exists / trace_checklist_section=2（turn 3 / 4 の節で 2。T1 の期待は ≥ 1）/
-pixi_preview=1 / pixi_package_section=1 / pixi_version_literal=1 / pixi_version_workspace=1 /
-pixi_pkg_name_pq=2 / pixi_pkg_path=1 / pixi_backend_mojo=1 / pixi_mojo_compiler=3 /
-pixi_run_dep_libpq=2 / gitignore_dist=1 / pixi_lock_changed_vs_main=0
-## 全体（release.yml 待ち = T4）
-workflows_files=1              # 期待 2（T4 で release.yml を足して到達）
-all_timeout_minutes / all_permissions / all_secrets_refs / all_contents_write = absent(release.yml)
-src_def_ref_return=0 / test_file_count=24 / examples_mojo_count=7 / final_check_examples=5   # 不変
-```
-
-## `pixi build` の deprecated をワークフローに書くか（turn 5 の判断）
-
-turn 4 の「想定外 (1)」の宿題。**`pixi build -o dist` のまま書いた**（`pixi publish` に変えない）。根拠:
-
-- 警告は deprecation のみで rc 0、生成物は `pixi publish --path . --target-dir dist` と同じ（RESEARCH §2.1 で確認済み）
-- CI の pixi は `pixi-version: v0.82.0` に固定（決めた事項 5）＝ ローカルと同じ版なので、
-  ローカルで通った形がそのまま CI で通る。`pixi publish` に変えると「ローカルで検証していない形」を CI に置くことになる
-- チェックリストの key `ci_pixi_build` / `release_pixi_build` は `pixi build -o dist` を数えるので、
-  **PLAN 訂正は不要**（パターンも期待値も変わらない）
-- 警告は `pixi run check` の 6/6 段（`$LOG` の `warning:` 数え上げ）には入らない（`pixi build` は `final_check.sh` の外）
-
-## blackhole / retry のローカル陽性対照
-
-turn 5（T3）。親が自分で再実測した値（サブエージェントの報告とも一致）。ログは
-`scratch/turn-005-retry-{false,true}-parent.log` / `turn-005-blackhole-parent.log`。
-
-| 対照 | コマンド | 結果 | 判定 |
-|---|---|---|---|
-| retry 失敗 | `pixi run bash .github/scripts/retry.sh 2 1 false` | **rc 1**、`retry: attempt` 行 4 本（= 2 試行 × 「開始」「失敗」）、stderr 最終行 `retry: giving up after 2 tries` | PASS |
-| retry 成功 | `pixi run bash .github/scripts/retry.sh 2 1 true` | **rc 0**、`attempt` 行 1 本（1 回で即 return） | PASS |
-| blackhole 保持 | `python3 .github/scripts/blackhole.py 54398` を起動 → connect → `settimeout(0.5)` → `recv(1)` | **`TimeoutError`（= `socket.timeout`）を送出**。EOF の `b''` ではない = accept したソケットを閉じていない（P8） | PASS |
-| 構文 | `pixi run bash -n retry.sh macos-postgres.sh` / `python3 -m py_compile blackhole.py` | いずれも rc 0 | PASS |
-| actionlint | `pixi exec --spec actionlint actionlint .github/workflows/ci.yml` | 出力なし（指摘 0） | PASS |
-
-- ポートは **54398**（54399 は docker の `tests-blackhole-1` が使用中。CI の macOS では 54399 を使う:
-  `test_async.mojo:66` が 54399 固定で、macOS には compose が無いため衝突しない）
-- 後片付け: 起動した `blackhole.py` は停止済み（`pgrep -x python3` で残骸なし）
-- `macos-postgres.sh` は **macOS 専用のため実動作は未検証**（Linux 開発機では brew / `pg_ctl` / BSD `sed -i ''` が無い）。
-  静的検査は `bash -n` rc 0 + bash 3.2 互換（配列・`mapfile`・`declare -A`・`${x,,}` 不使用）のコードレビューまで。
-  実動作の初見は **verify の PR の macOS ジョブ**（陽性対照 2 件がスクリプト内で `exit 1` するので、
-  trust のまま通ってしまう事故はジョブの赤で検出できる）
-
-## `check` の所要（turn 5）
-
-| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
+| turn | タスク | コマンド | 時刻 | 所要 | 結果 |
 |---|---|---|---|---|---|
-| 5 | T3 | `pixi run check` | 2026-10-18T10:54:16+09:00 → 2026-10-18T10:57:09+09:00 | **173 s** | PASS 6/6（rc 0。閾値 247 s / 見積もり 170〜220 s の内側） |
+| 3 | T1 | `pixi run db-reset` → `pixi run check` | 2026-10-20T15:17:43+09:00 → 2026-10-20T15:22:06+09:00 | **263 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1252 件） |
+| 4 | T2 | `pixi run db-up` → `pixi run check` | 2026-10-20T15:38:44+09:00 → 2026-10-20T15:43:54+09:00 | **310 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1332 件） |
+| 5 | T3 | `pixi run check` | （PROGRESS turn 5 の実測。表への転記漏れ） | **368 s** | PASS 6/6 |
+| 6 | T4 | `pixi run db-up` → `pixi run check` | 2026-10-20T16:18:01+09:00 → 2026-10-20T16:23:19+09:00 | **318 s** | PASS 6/6（rc 0 / `final_check: PASS`、6/6 段 `matched lines: 0`、PASS 1392 件） |
 
-Mojo 側は T3 で未変更なので turn 3（189 s）/ turn 4（183 s）と同じ範囲。`-- 127.0.0.1:54314 skipped 1`
-（PG14 側の leak 1 件）は従来どおり。開始時刻は `build/final_check.log` の `=== [1/6 …]`、終了は `=== [6/6 …]` +
-summary の 1 s。
+turn 4（T2）は 310 s。足したのは `tests/test_decode_array.mojo` 40 件だけで、サーバーに触らないため
+実行は 0.065 s × 2 サーバー。差の ≈ 47 s はこのファイルの**コンパイル**（1 サーバーあたり ≈ 23 s。
+`check` は 1 ファイル 1 プロセスで両サーバー分コンパイルし直す）で、サーバーテストを持たない
+テストファイルでも 1 本 ≈ 47 s 増えるという値になる。閾値 380 s まで残り 70 s。
+
+turn 6（T4）は **318 s** で、turn 5 の 368 s より **50 s 短い**。足したのは新規ファイルではなく既存
+2 ファイルへの追記（`test_encode_binary` +3 件 = 0.006 s、`test_params` +4 件 = うち 3 件がサーバーで
+≈ 14 s × 2 サーバー）なので、単調に増えるはずの値が下がった = **この環境の `check` には ±50 s の
+揺れがある**。turn 5 の「残り 12 s」という読みは揺れの上側を母数にしたもので、実際の母数は
+310〜370 s とみるのが正しい。閾値 380 s は据え置き（T5〜T7 で超えたら PROGRESS に実測と内訳を書いて
+進める、という PLAN 55 行の扱いも据え置き）。
+
+**これが Phase 7 の見積もりの母数**（PLAN「検証コマンド」の所要見積もりの `前回末実測`）。
+
+内訳の確認: T1 が足したテストは 3 件。`test_connection.mojo` の 2 件（`test_reset_revives_…` 11.9 s /
+`test_reset_of_a_healthy_connection_…` 9.5 s）が**両サーバーで**走るので ≈ 43 s、`test_ffi.mojo` の
+`test_copy_symbols_resolve` は 0.005 s × 2。この環境では 1 接続の `open` が ≈ 3.5 s かかり（どのテストも
+最低 3.6 s）、reset のテストは 1 件で 3 接続を開くためこの値になる。Phase 6 末の 170〜190 s + 43 s =
+213〜233 s に対して実測 263 s なので、残り 30〜50 s は同時に走らせた docker / ビルドの揺れとみる
+（Phase 6 の記録でも 170〜190 s の 20 s 幅があった）。
+
+## PLAN 訂正（turn 3）
+
+- `check` の所要見積もり: 母数「Phase 6 末実測 169〜190 s」→ **turn 3 実測 263 s**、見積もり
+  「230〜275 s」→ **323〜348 s**、閾値「300 s」→ **380 s**。根拠: (1) T1 の `reset` テスト 2 件が
+  両サーバーで ≈ 43 s を足し、この分は PLAN の `+60〜85 s`（新テストファイル 4 本 + examples 2 本 +
+  leak 2 ループ）に入っていなかった。(2) この環境は 1 接続 `open` ≈ 3.5 s で、新規サーバーテストの
+  単価が PLAN の見積もり（`test_array` ≈ 3 s など）より高く出る余地がある。380 s は
+  263 + 85 = 348 s に 1 割の余裕。**超えたら PROGRESS に理由を書く**という扱いは変えない
 
 ## チェックリスト（turn 6）
 
-全文は `scratch/turn-006-checklist.log`。T4 の行と全体行を転記する。T5 の key は
-すべて `0`（未着手。`readme_h2=10` / `readme_dash_I_src=1` / `readme_six_stages=1` /
-`readme_compose_three=2` / `readme_unverified_windows=3` / `readme_windows_toolchain=1` は turn 5 と同じ）。
+`scratch/turn-006-checklist.log` の全文（**全 77 key**）。T4 の 6 行には期待値を添える
+（turn 4 からの差分は T3 の 3 行 + `test_decode_array_tests` 40 → 63（turn 5 の分）と、
+T4 の 6 行だけ。`diff turn-004-checklist-after-trace.log turn-006-checklist.log` で確認）。
+turn 5 のログは取り直していないので差分は 2 ターン分をまとめて載せる。
 
 ```
-## T4 release.yml + CHANGELOG + scripts
-wf_release_exists=exists       # 期待 exists
-release_tags_v=1               # 期待 1（`tags: ["v*"]` の 1 行だけ。下の「コメントが grep に当たる」参照）
-release_workflow_dispatch=1    # 期待 1
-release_version_check_sh=1     # 期待 ≥ 1
-release_notes_py=2             # 期待 ≥ 1（verify-version と release の 2 ジョブで呼ぶ）
-release_gh_release_create=1    # 期待 ≥ 1
-release_gh_token=1             # 期待 ≥ 1（P16）
-release_contents_write=1       # 期待 1（release ジョブのみ。P14）
-release_contents_read=1        # 期待 ≥ 1（先頭）
-release_timeout_minutes=3      # 期待 ≥ 3（10 / 45 / 15）
-release_secrets_refs=0         # 期待 0（P14）
-release_git_archive=1          # 期待 ≥ 1
-release_ref_type_tag=3         # 期待 ≥ 1（先頭コメント + verify-version のステップ + release ジョブ）
-release_pixi_build=1           # 期待 ≥ 1（`pixi build -o dist` = turn 5 の判断どおり）
-release_dup_check=1            # 期待 ≥ 1（P5）
-scripts_check_tag_version=exists  # 期待 exists
-scripts_release_notes=exists      # 期待 exists
-check_tag_version_pixi=2          # 期待 ≥ 1（コメント + 実行の 2 行）
-changelog_exists=exists        # 期待 exists
-changelog_010_heading=1        # 期待 1
-changelog_unreleased_heading=1 # 期待 1
-changelog_keep_a_changelog=1   # 期待 ≥ 1
-changelog_phase_lines=5        # 期待 ≥ 5（Phase 1〜5 各 1 行）
-## 全体
-workflows_files=2              # 期待 2（ci.yml / release.yml）
-all_timeout_minutes=4          # 期待 ≥ 4（ci 1 + release 3）
-all_permissions=3              # 期待 ≥ 3（ci 1 + release 2）
-all_secrets_refs=0             # 期待 0
-all_contents_write=1           # 期待 1
-## T1 / T2 / T3（不変）
-async_restore_collected_def=1 / _sites=3 / test_notify_tests=25 / readme_sigpipe=2 / pixi_db_up_wait_timeout=1
-pixi_preview=1 / pixi_package_section=1 / pixi_pkg_name_pq=2 / pixi_mojo_compiler=3 / pixi_lock_changed_vs_main=0
-wf_ci_exists=exists / ci_branches_main=2 / ci_secrets_refs=0 / ci_upload_artifact=2 / tests_sh_bash4_only=0
-src_def_ref_return=0 / test_file_count=24 / examples_mojo_count=7 / final_check_examples=5
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=2
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=absent(tests/test_array.mojo)
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=25
+src_mojo_count=20
+src_def_ref_return=0
+src_iterator_in_copy=absent(src/pq/copy.mojo)
+tests_sh_bash4_only=0
 ```
 
-**コメントが grep に当たる（turn 5 と同種の再発）**: `release.yml` の冒頭コメントに
-「a `v*` tag push」、`permissions` 上のコメントに「raises this to `contents: write`」と書いたため
-`release_tags_v=2` / `release_contents_write=2` / `all_contents_write=2`（期待はいずれも 1）になった。
-コメントを言い換えて 1 に戻した（YAML の実体は変えていない）。**PLAN 訂正ではない**（期待値は正しく、
-原因は実装側のコメント文言）。残るタスクでも「key のパターンと同じ文字列をコメントに書かない」。
+T4 の 6 行の期待値（PLAN 表 76-77 行）と実測:
 
-## `check-tag-version.sh` / `release-notes.py` のローカル陽性対照（turn 6）
+| key | 期待値 | 実測 |
+|---|---|---|
+| `encode_array_def` | 1 | **1** |
+| `params_list_implicit` | 35 | **35**（既存 `var v: List[UInt8]` 1 + 新規 34） |
+| `params_optional_list_implicit` | 17 | **17** |
+| `params_text_array_oid` | ≥ 1 | **3**（import 1 + `List[String]` / `List[Optional[String]]` の 2 本） |
+| `test_encode_binary_tests` | ≥ 29 | **29**（26 + 3） |
+| `test_params_tests` | ≥ 37 | **37**（33 + 4。既存 33 件の期待値変更 0） |
 
-`check-tag-version.sh`（`scratch/turn-006-check-tag.sh` 経由。下記注記）:
+他の 71 key は turn 5 のまま（`src_mojo_count` / `test_file_count` は新規ファイルを作らないので不変）。
 
-| 引数 | stdout / stderr | rc | 期待 |
-|---|---|---|---|
-| `v0.1.0` | `tag v0.1.0 matches pixi.toml version 0.1.0` | **0** | 一致で 0（C2） |
-| `v0.2.0` | `tag v0.2.0 != pixi.toml version 0.1.0`（stderr） | **1** | 不一致で 1 |
-| `0.1.0` | `tag 0.1.0 must start with "v" (expected form: v<version>)`（stderr） | **1** | `v` 無しは不一致扱い（境界値） |
+## P9 実測（turn 6）
 
-注記: スクリプトは `pixi` を **PATH から引く**（CI は `setup-pixi` が置く）。開発機では
-`~/.pixi/bin` が PATH に無く、`pixi run bash <script>` の中でも引けない（rc 127 を 1 回踏んだ）ので、
-PATH を足すだけのラッパ `scratch/turn-006-check-tag.sh` から 3 ケースを回した。
-**スクリプト側に PATH のフォールバックは入れていない**（契約外。CI の前提は setup-pixi）。
+`List[String]` を OID 1009（`text[]`）で送って 1015 / 3807 の位置に届くかは RESEARCH で未実測の
+1 件だった（決めた事項 9 / PLAN T4 (c)）。プローブ `scratch/turn-006-probe-p9.mojo`
+（ログ `turn-006-probe-p9.log`、PG17）の実測:
 
-`release-notes.py`:
+```
+select varchar[] OK -> {a,"b,c","d\"e"}
+select jsonb[] OK -> {"{\"k\": 1}","[1, 2]"}
+insert varchar[] OK -> {x,y}
+nul inside element FAILED -> 22021 / invalid byte sequence for encoding "UTF8": 0x00
+empty varchar[] OK -> {}
+int4[] with NULL OK -> {1,NULL,3}
+= ANY(int4[]) OK -> true
+```
 
-| 引数 | 出力 | rc | 期待 |
-|---|---|---|---|
-| `0.1.0` | 先頭行 `### Added` + Phase 1〜5 の 5 行（リンク定義行は含まない） | **0** | 非空・先頭が `### `（T4 (c)） |
-| `9.9.9` | `release-notes.py: no ## [9.9.9] section in CHANGELOG.md`（stderr） | **1** | 節が無い（P17） |
-| `Unreleased` | `release-notes.py: ## [Unreleased] section in CHANGELOG.md is empty`（stderr） | **1** | 本文が空（P17。空節の分岐を実際に通した） |
+- **`$1::varchar[]` / `$1::jsonb[]` / `varchar[]` 列への INSERT はすべて通る** → 決めた事項 9
+  （1009 固定 + サーバーの配列キャスト）をそのまま採用。PLAN の代替案（`Param` に `oid` 引数付き
+  ctor を足して 1015 で送る）には**切り替えない**。PLAN 訂正なし
+- **NUL 入り要素の sqlstate は `22021`**（`character_not_in_repertoire`、PG14 / PG17 同一）。
+  決めた事項 10 の「22021 想定」が実測で確定したので、`test_params.mojo` の
+  `test_nul_in_a_string_array_element_is_the_servers_call` は `kind == SERVER` だけでなく
+  `sqlstate == "22021"` も断言する（このファイルの方針「SQLSTATE / OID / 値だけを断言する」に沿う。
+  サブエージェントは未実測を前提に `!= ""` + `print` で書いていたのを親が差し替えた）
+- 併せて `= ANY($1)`（T5 (e)）と `List[Optional[Int32]]` の `{1,NULL,3}`（T5 (b)）も通ることを確認。
+  T5 はこの 2 つを本番のテストとして書く
 
-節の終端は「次の `## [` 見出し」または「`[x.y.z]: ` 形式のリンク定義行」の手前。見出し直後と節末の
-空行は落とすので、`## [0.1.0]` の次が空行でも出力の先頭は `### Added` になる。
+## 陽性対照（turn 6）
 
-静的検査: `actionlint .github/workflows/ci.yml .github/workflows/release.yml` 指摘 0（rc 0）、
-`bash -n .github/scripts/check-tag-version.sh` rc 0、`python3 -m py_compile .github/scripts/release-notes.py` rc 0
-（`__pycache__` はコミット前に削除）。
-
-## `check` の所要（turn 6）
-
-| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
-|---|---|---|---|---|---|
-| 6 | T4 | `pixi run check` | 2026-10-18T11:03:37+09:00 → 2026-10-18T11:06:27+09:00 | **170 s** | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
-
-T4 は YAML / Python / shell / Markdown のみで Mojo 側は未変更なので turn 3（189 s）/ 4（183 s）/
-5（173 s）と同じ範囲。`-- 127.0.0.1:54314 skipped 1`（PG14 側の leak 1 件）も従来どおり。
+`tests/test_params.mojo` の OID 表から `timetz[]` の 1 行だけを 1270 → 1266 に変えた写し
+（`scratch/turn-006-posctl-oid.mojo`、ログ `turn-006-posctl-oid.log`）を走らせると
+**`test_param_oids_of_the_array_types` 1 件だけが FAIL**（`reason: timetz[]: oid`、36 passed / 1 failed）。
+34 行の表が literal で固定されていて、転記ミスが検査されていることの証明（PLAN T4 (d)）。
+turn 4 の教訓（両方向マップだけでは循環で検査にならない）に従い、この表は `_array_oid_of` を呼ばずに
+数値を直書きしている。
 
 ## チェックリスト（turn 7）
 
-生出力は `.gsd-lite/logs/phase6-packaging-ci/scratch/turn-007-checklist.log`。
-turn 6 のログとの差分は **`readme_*` の 19 key + `readme_unverified_windows` + `trace_checklist_section` だけ**
-（後者は turn 6 が checklist を回した後に TRACE 節を書いたため 3 → 4）。
+`scratch/turn-007-checklist.log` の全文（**全 77 key**）。turn 6 からの差分は 3 行だけで、
+うち 2 行が T5 の到達分:
 
-### T5 README（D1〜D4 / B7 の README 側）
+```
+trace_checklist_section=2 -> 3   # turn 6 で追記した節の分（この節を足すと 4 になる）
+test_array_tests=absent(tests/test_array.mojo) -> 26   # T5 の期待値 >= 14
+test_file_count=25 -> 26         # tests は T7 で 28 になる見込み
+```
 
-| key | 値 | 期待値 | 判定 |
-|---|---|---|---|
-| `readme_en_heading` | 1 | 1 | OK |
-| `readme_git_dep` | 2 | ≥ 2 | OK（英語節 + 日本語節） |
-| `readme_tag_v010` | 3 | ≥ 2 | OK（英語節 1 + 日本語節 2 = TOML と「v0.1.0 リリース後に使える」の注記） |
-| `readme_preview_pixi_build` | 4 | ≥ 2 | OK（両節の TOML + 散文での言及 2） |
-| `readme_rattler_index` | 2 | ≥ 1 | OK（両節の `pixi exec --spec rattler-index rattler-index fs`） |
-| `readme_ci_heading` | 1 | 1 | OK |
-| `readme_job_name_ubuntu` / `_arm` / `_macos` | 2 / 2 / 2 | ≥ 1 ×3 | OK（CI 小節の表 + ブランチ保護の `contexts`） |
-| `readme_required_status_checks` | 1 | ≥ 1 | OK（`protection.json`） |
-| `readme_branch_protection` | 1 | ≥ 1 | OK（`### ブランチ保護（人間が設定）`） |
-| `readme_windows_toolchain` | 2 | ≥ 2 | OK（既存の「Windows の状態」+ CI 小節の不在理由） |
-| `readme_changelog` | 2 | ≥ 1 | OK（リリース手順 1. と 5.） |
-| `readme_release_workflow` | 2 | ≥ 1 | OK（CI 小節の `workflow_dispatch` + リリース手順 5.） |
-| `readme_wait_timeout_180` | 1 | ≥ 1 | OK（CI 小節の待ち上限 3 段階） |
-| `readme_pg_ctl_60` | 1 | ≥ 1 | OK（同上） |
-| `readme_fork` | 1 | ≥ 1 | OK（CI 小節。未検証と明記 = P24） |
-| `readme_h2` | 11 | 11 | OK（10 → 11。English 節 +1 だけ。CI / ブランチ保護 / リリース手順 / 自分のプロジェクトから使う は `###`） |
+T5 の行は 1 本だけ（`test_array_tests`）で、期待値 **>= 14** に対し **26**。
 
-### T5 の不変行
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=3
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=26
+src_mojo_count=20
+src_def_ref_return=0
+src_iterator_in_copy=absent(src/pq/copy.mojo)
+tests_sh_bash4_only=0
+```
 
-| key | 値 | 期待値 | 判定 |
-|---|---|---|---|
-| `readme_dash_I_src` | 2 | ≥ 1 | OK（経路 3 の見出し下 + コマンド） |
-| `readme_six_stages` | 1 | 1 | OK（**意図的に増やさなかった**: CI 小節では「6 段」を使わず「`tests/final_check.sh`」「1 工程」と書いた） |
-| `readme_compose_three` | 2 | 2 | OK（新規の「3 つです」を書いていない。待ち上限は「3 段階」、経路は「3 つあり」と表記） |
-| `readme_unverified_windows` | 4 | ≥ 3 | OK（3 → 4。CI 小節の fork 未検証が +1） |
-| `readme_sigpipe` / `readme_rc_141` | 2 / 1 | ≥ 1 ×2 | OK（T1 のまま不変） |
+## `check` の所要（turn 7 / T5 完了時点）
 
-### T1 / T2 / T3 / T4 / 全体（不変）
+`check` 1 回 = **298 s**（16:36:41 -> 16:41:39、閾値 380 s）。`PASS` 行は **1444**
+（turn 6 は 1392。+52 = 26 件 x 2 サーバー）。新ファイル `tests/test_array.mojo` の実測は
+**54317 で 17 s / 54314 で 4 s = 計 21 s**（1 本目はコンパイルを含む）。
 
-turn 6 のログと**完全一致**（上の差分のとおり `readme_*` 以外は 1 key も動いていない）。
-`pixi_lock_changed_vs_main=0` / `src_def_ref_return=0` / `test_file_count=24` / `examples_mojo_count=7` /
-`final_check_examples=5` / `tests_sh_bash4_only=0` / `workflows_files=2` / `all_secrets_refs=0` /
-`all_contents_write=1` も不変。
+PLAN 53-55 行の見積もり（`test_array` ≈ 3 s）は実行時間としては当たっているが、
+**1 サーバー目のコンパイル込みで 17 s** なので、新規テストファイルの単価は
+「コンパイル 13 s + 実行 4 s」で読むのが正しい。turn 6 の「±50 s の揺れ」も残るので、
+残る T6 / T7 の新ファイル 2 本は +40 s 程度を見込む（298 + 40 = 338 s < 380 s）。
 
-## `check` の所要（turn 7）
+`TestSuite` の `Summary [ N ]` の単位は**ミリ秒**（`turn-007-time.sh` で実測:
+サマリ 187 の回の `mojo run` 全体が 5 s、2 回とも同じ）。PROGRESS の turn 4 / 5 が
+「0.065 s」「0.126 s」と書いているのは秒として読んだもので、ターンの判断には影響しない。
 
-| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
-|---|---|---|---|---|---|
-| 7 | T5 | `pixi run check` | 2026-10-18T11:11:22+09:00 → 2026-10-18T11:14:18+09:00 | **176 s** | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
+## 陽性対照（turn 7）
 
-T5 は `README.md` 1 ファイルのみ（Mojo / YAML / スクリプト未変更）なので
-turn 3（189 s）/ 4（183 s）/ 5（173 s）/ 6（170 s）と同じ範囲。
-README は `check` の 6 工程いずれの入力でもない（`mojo format` の対象外、`build/final_check.log` に入らない）ため、
-6/6 工程の `matched lines in build/final_check.log: 0` も不変。
-`-- 127.0.0.1:54314 skipped 1`（PG14 側の leak 1 件）も従来どおり。
-生出力は `scratch/turn-007-check-stdout.log`。
+`scratch/turn-007-posctl-encode.sh` / `.log`。`src/pq` の**写し**（`.gsd-lite/logs/.../scratch/`、
+実行後に削除）で `encode_array` の `ndim` を「空なら 0」から常に 1 に変えた。
+空配列は次元語を持たない唯一のペイロードなので、これは**他のどの配列も往復し続ける中で
+送信経路だけが間違える**1 箇所:
 
-## README に書いたコマンドの実測根拠（turn 7。P18）
+- `tests/test_array.mojo`: **`test_array_param_empty_array_round_trips` 1 件だけ** FAIL（25 passed / 1 failed）
+- 対照として `tests/test_encode_binary.mojo`: `test_array_of_no_elements_is_three_int32s` 1 件だけ FAIL
 
-| README の記述 | 実測した turn / 証跡 |
-|---|---|
-| git 依存（`preview` + 2 チャンネル + `pq = { git = …, tag = … }`） | turn 4 の A2 git 経路（`scratch/turn-004-consumer-git/pixi.toml` + `turn-004-consumer-git.log`）。**実測は `branch = "gsd-lite/phase6-packaging-ci"`** で、README は `tag = "v0.1.0"` の形。タグは未作成なので「v0.1.0 のリリース後に使える」と注記した（決めた事項 13） |
-| Release `.conda` + `rattler-index fs` + `file://` チャンネル + `pq = "==0.1.0"` | turn 4 の A2 dl 経路（`scratch/turn-004-consumer-dl/pixi.toml` + `turn-004-consumer-dl.log`、`turn-004-dl-channel/`） |
-| `-I src`（開発時） | 既存（Phase 1〜5 から不変） |
-| `pixi run package` は配布手段でない | `pixi.toml:38`（`mojo precompile … -o build/pq.mojoc`）。REQ §2.1 |
-| CI のジョブ名 3 つ / 待ち上限 3 値 / artifact 名 | `.github/workflows/ci.yml:36,40,46,105,112,120` と `pixi.toml:32`、`macos-postgres.sh` の `pg_ctl -w -t 60`（turn 5） |
-| macOS で PG 14 が回らない / leak が SKIP | `run_tests.sh:37-38`（`PQ_TEST_CONNINFO` が 1 台に固定）、`test_leak.mojo:788`（`RSS sampling is Linux-only`） |
-| `workflow_dispatch` は既定ブランチ必須 | P13（RESEARCH。GitHub の仕様。実測はしていない = 仕様の引用と明記） |
-| `gh api … /branches/main/protection --input protection.json` | **未実行**（D15 / REQ §6「impl はリポジトリ設定を変えない」）。README にも「無人ターンは設定しません」と明記。verify / 人間が実行する |
+判別できた（どちらのファイルも 1 件に絞られる）ので差し替えは不要。
 
 ## チェックリスト（turn 8）
 
-生出力は `.gsd-lite/logs/phase6-packaging-ci/scratch/turn-008-checklist.log`（T6 = 全行の確認）。
-turn 7 のログとの差分は **`trace_checklist_section` の 4 → 5 だけ**（turn 7 が checklist を回した後に
-TRACE の turn 7 節を書いたため。他 100 key は 1 つも動いていない）。
+`scratch/turn-008-checklist.log` の全文（**全 77 key**）。turn 7 からの差分は 14 行で、
+うち 11 行が T6 の到達分（残り 3 行は `trace_checklist_section` と件数 2 本）:
 
-**全行が PLAN:66-101 の期待値に到達**（T1 10 key / T2 11 key / T3 31 key / T4 23 key / T5 22 key / 全体 9 key）。
-`≥` 行の実測値は T1 `test_notify_tests=25` / `readme_sigpipe=2`、T3 `ci_retry_sh=4` / `blackhole_held=5` /
-`macos_pg_scram=4`、T4 `release_timeout_minutes=3` / `release_ref_type_tag=3` / `changelog_phase_lines=5`、
-T5 `readme_h2=11`（= の行）など。`= N`（不変・0）の行も全部一致:
-`pixi_lock_changed_vs_main=0` / `pixi_version_literal=1` / `tests_sh_bash4_only=0` / `ci_secrets_refs=0` /
-`release_secrets_refs=0` / `all_secrets_refs=0` / `all_contents_write=1` / `src_def_ref_return=0` /
-`test_file_count=24` / `examples_mojo_count=7` / `final_check_examples=5` / `readme_six_stages=1` /
-`readme_compose_three=2` / `workflows_files=2`。
+```
+trace_checklist_section=3 -> 4
+copy_mojo=absent -> exists
+copyin_struct / copyout_struct / copy_drain_def=absent(src/pq/copy.mojo) -> 1 / 1 / 1
+conn_copy_parts_defs=0 -> 2
+conn_check_not_copying_def=0 -> 1
+check_not_copying_sites=0 -> 7          # 期待値 >= 7
+conn_docstring_copy_unsupported=1 -> 0  # 期待値 0
+init_export_copy=0 -> 1
+test_copy_tests=absent -> 21            # 期待値 >= 18
+src_iterator_in_copy=absent -> 0        # 不変（Iterator / Iterable を付けない）
+test_file_count=26 -> 27                # T7 で 28
+src_mojo_count=20 -> 21                 # T7 で 22
+```
 
-**PLAN 訂正（turn 8）: なし**（turn 4 の `pixi_pkg_name_pq` 1 → 2 が唯一の訂正で、以降は発生せず）。
+`copy_in_defs` / `copy_out_defs` / `conn_transaction_parts_sites` は `absent(src/pq/pool.mojo)`
+のまま（PLAN の「`absent(pool.mojo)` は T7 まで許容」）。`Connection` と `Transaction` の
+`def copy_in` はそれぞれ 1 本（`grep -cE 'def copy_in'` で確認）= T6 の期待値 2 / 2。
 
-## `check` の所要（turn 8。T6 = クリーン状態からの最終判定）
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=4
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=exists
+copyin_struct=1
+copyout_struct=1
+copy_drain_def=1
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=2
+conn_check_not_copying_def=1
+check_not_copying_sites=7
+conn_docstring_copy_unsupported=0
+init_export_copy=1
+test_copy_tests=21
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=27
+src_mojo_count=21
+src_def_ref_return=0
+src_iterator_in_copy=0
+tests_sh_bash4_only=0
+```
 
-| turn | タスク | コマンド | 開始 → 終了 | 所要 | 判定 |
-|---|---|---|---|---|---|
-| 8 | T6 | `pixi run db-reset` → `pixi run check` | 2026-10-18T11:17:19+09:00 → 2026-10-18T11:20:19+09:00 | **`check` 170 s**（db-reset 含め 180 s） | PASS 6/6（rc 0 / `final_check: PASS`。閾値 247 s） |
+## PLAN 訂正（turn 8）
 
-`db-reset` は compose 3 台を `-v` で落として再作成（`--wait-timeout 180` 付き、3 台とも `Healthy`）→
-フィクスチャ再適用。turn 3（189 s）/ 4（183 s）/ 5（173 s）/ 6（170 s）/ 7（176 s）と同じ範囲で、
-**クリーンな DB からでも 165〜215 s の見積もり内**（REQ F1）。生出力は `scratch/turn-008-check-stdout.log`。
+- T6 ⑩（COPY IN 途中切断）の「`write` が `CONNECTION`」は**どの `write` かを固定できない**:
+  `PQputCopyData` はバッファに積むだけで、実際に flush した呼び出しでしか `-1` を返さない。
+  4 byte 行では close 後 5 回の `write` と `PQputCopyEnd` が全部 `1` を返し、約 8.3 KB
+  チャンクでは close 直後の 1 本目が `1`、**2 本目**が `-1`（PG14 / PG17 同一）。
+  → テストは 1000 行（約 10 KB）チャンクを上限 64 回まで回して**最初に失敗した `write`** を
+  `CONNECTION` と断言し、その次の `write` と `finish` を `USAGE` と断言する形にした。
+  PLAN 215 行の括弧内「（測定: close 後の最初の `write` がすでに -1 を返す）」は turn 1 の
+  プローブが 1000 行チャンクだったときの観測で、チャンクサイズ依存のため契約にしない。
+- T6 ⑭（`Transaction` が `CopyIn` より先に死ぬ順序）の handler ≥ 1 は成立するが**理由が違う**:
+  `PQexec("ROLLBACK")` は COPY IN 中でも**成功する**（`PGRES_COMMAND_OK`。libpq が自前で
+  `CopyFail` を送り `57014` を飲んでから ROLLBACK を走らせる）ので `Transaction.__deinit__` は
+  handler に到達しない。handler を呼ぶのは**その後の `CopyIn.__deinit__`**で、その
+  `PQputCopyEnd` が `-1`（`no COPY in progress`、sqlstate 無し）を返し `57014` でないため
+  報告される。テストの docstring にこの経路を書いた（断言は PLAN どおり handler ≥ 1）。
 
-6 工程の内訳と `skipped` の実測（verify が CI ログと見比べるための基線）:
+## `check` の所要（turn 8 / T6 完了時点）
 
-| 工程 | 結果 |
-|---|---|
-| 1/6 fmt | 差分なし（`mojo format` = REQ F2） |
-| 2/6 precompile `src/pq` | 警告なし |
-| 3/6 docstring diagnostics | 警告なし |
-| 4/6 examples | 5 本（`final_check_examples=5` のまま） |
-| 5/6 tests 両サーバー | 54317 = 全 PASS + `skipped 1`、54314 = 全 PASS + `skipped 1` + `test_leak.mojo` はファイルごと skip（`PQ_TEST_LEAK_SERVERS=1`） |
-| 6/6 zero warnings | `matched lines in build/final_check.log: 0` |
+`check` 1 回 = **266 s**（17:13:00 -> 17:17:26、閾値 380 s）。`PASS` 行は **1486**
+（turn 7 は 1444。+42 = 21 件 x 2 サーバー）。`tests/test_copy.mojo` の実測は
+`final_check.log` の計測行で **54317 で 6 s / 54314 で 5 s**。
 
-**`skipped 1` の正体を特定した**（これまでの PROGRESS は 54314 の 1 件を「leak」と書いていたが実際は別物）:
-54317 は `SKIP test_interval_infinity_rejected_before_pg17: server 17+`、
-54314 は `SKIP test_interval_infinity_on_pg17_and_later: server < 17`。
-どちらもサーバー版差による対称な 1 件で、`test_leak.mojo` の skip は `run_tests.sh:117` の
-カウンタ（`^SKIP ` 行のみ）に入らない別行（`-- 127.0.0.1:54314 tests/test_leak.mojo skipped`）。
+turn 7 の 298 s より **32 s 短い**（足したのは新ファイル 1 本だけで増える方向しかない）。
+turn 6 の「±50 s の揺れ」の再現で、母数は依然 **260〜370 s** と読む。
+T7 の新ファイル 2 本（`src/pq/pool.mojo` / `tests/test_pool.mojo`）を足しても
+266 + 20 前後 = 290 s 程度の見込みで、閾値 380 s には余裕がある。
 
-## パッケージング再確認（turn 8）
+**注意**: サブエージェントの報告にあった「test_copy は 1 サーバー 334 s」は
+`TestSuite` の `Summary [ 334 ]` を秒として読んだもの（turn 7 で実測した**ミリ秒**が正しい）。
+`final_check.log` の `took 6s` が実測値。
 
-| 項目 | コマンド | 結果 |
-|---|---|---|
-| `.conda` 再生成 | `rm dist/pq-0.1.0-he8cfe8b_0.conda` → `pixi build -o dist` | rc 0。`dist/` に `pq-0.1.0-he8cfe8b_0.conda` **1 個**（ビルド ID も turn 4 と同一 = `he8cfe8b_0`） |
-| lock 不変 | `pixi install --locked` → `git diff --quiet main -- pixi.lock` | 両方 rc 0（P3） |
-| 作業ツリー | `git status --short` | 空（`dist/` `build/` は gitignore 済み） |
-| YAML 静的検査 | `pixi exec --spec actionlint actionlint .github/workflows/{ci,release}.yml` | 指摘 **0**（2 本とも） |
+## 陽性対照（turn 8）
 
-初回の `pixi build` は既存ファイルを `Skipping 'pq-0.1.0-he8cfe8b_0.conda' (already exists)` で再利用したため、
-**現在の木からのビルドを確かめるのに一度消してから回し直した**（deprecated 警告は turn 5 の判断どおり無視。rc 0）。
+`scratch/turn-008-posctl-copying.sh` / `.log`。`src/pq` の**写し**（実行後に削除）で
+`Connection._check_not_copying` の本体を `return` に差し替えた（シグネチャと 7 箇所の
+呼び出しはそのまま = T6 以前の状態）。
 
-## 受け入れ基準対応表
+libpq は COPY 中の `PQexec` を拒否せず、**書いた行を黙って捨ててから**新しいコマンドを
+成功させる（turn 1 の `probe-copy.log` case 5: `execute during COPY IN returned rows: 1` /
+`rows a>=800000: 0`）。なので対照の判定は「USAGE が出なくなる」だけでなく
+「その後の `finish()` が 2 行でなく 0 行を数える」でもある:
 
-REQ §4 の A1〜F2。「静的に確認（impl）」= このマイルストーン中にローカルで実測・grep した分、
-「**verify の PR で確認**」= GitHub Actions の run を見るまで埋まらない分（REQ §2.2c / B6）。
+- `tests/test_copy.mojo`: **`test_every_other_command_during_a_copy_is_usage` 1 件だけ** FAIL（20 passed / 1 failed）
+- 対照として `tests/test_transaction.mojo`: 13 件すべて PASS（0 failed）
 
-| 基準 | 担ったタスク | 証跡（impl が確認した分） | verify に残る分 |
-|---|---|---|---|
-| A1 `pixi build` 成功 + `.conda` 生成 | T2 / T6 | turn 4（17 s で `pq-0.1.0-he8cfe8b_0.conda`）+ turn 8（dist を消して再生成、1 個、rc 0） | なし（完了） |
-| A2 別プロジェクトから git / ローカルチャンネル依存で `mojo run` | T2 | turn 4 の 2 経路（`scratch/turn-004-consumer-git.log` / `turn-004-consumer-dl.log`。両方 `pq import OK` + `PgError(kind=Connection` で `LibpqLoad` 無し） | git 経路を `https://github.com/6in/mojo-pg.git` + `branch` で再実測（RESEARCH §6。PR 後） |
-| A3 `.conda` に `examples/` `tests/` `hello.mojo` が無い | T2 | turn 4（`pkg-*.tar.zst` の中身は `lib/mojo/pq.mojoc` + `share/max/firstActivation` だけ） | なし（完了） |
-| A4 `pixi run check` が従来どおり PASS | T2〜T6 | turn 4（183 s）/ 5（173 s）/ 6（170 s）/ 7（176 s）/ 8（170 s）すべて 6/6 PASS | なし（完了） |
-| B1 `ci.yml` が PR(main) / push(main) で 3 OS | T3 | `wf_ci_exists` / `ci_pull_request=1` / `ci_branches_main=2` / `ci_os_*` 3 key / `ci_fail_fast_false=1` + actionlint 0 | **verify の PR で確認**（3 ジョブが実際に起動すること） |
-| B2 Linux 2 ジョブが compose を立てて `final_check: PASS` | T3 | `ci.yml` の `db-up` / `docker compose pull` / `pixi run check` ステップ（`ci_pixi_run_check=3`）。ローカルでは同じ `pixi run check` が 6/6 PASS | **verify の PR で確認**（CI 上の緑） |
-| B3 macOS が brew PG17 + `PQ_TEST_CONNINFO` で緑 / blackhole 代替が無ければ SKIP 件数がログに出る | T3 | `macos-postgres.sh` の `bash -n` rc 0 と grep 5 key（`scram` / `pg_ctl -w -t 60` / `WRONG` 対照 / `schema.sql` / `reload`）、`blackhole.py` のローカル陽性対照（`recv` が `TimeoutError`）、`ci_conninfo_5432=1`。**brew / macOS 自体は開発機（linux-aarch64）で実行不能** | **verify の PR で確認**（`macos-postgres.sh` の初実行。skipped の見込みは下の申し送り 3 を参照） |
-| B4 各ジョブで `pixi build` 成功 + `.conda` を artifact 保存 | T3 | `ci_pixi_build=1` / `ci_upload_artifact=2` / `ci_artifact_pq_conda=1`（`pq-conda-${{ matrix.os }}`）+ ローカルの `pixi build` rc 0 | **verify の PR で確認**（3 artifact の実体とファイル名） |
-| B5 全ジョブに `timeout-minutes` / DB 待ちに上限 / secrets 参照なし / `permissions` 最小 | T3 / T4 | `all_timeout_minutes=4` / `all_permissions=3` / `all_secrets_refs=0` / `all_contents_write=1`、待ち上限 = `--wait-timeout 180`（`pixi.toml:32`）と `pg_ctl -w -t 60` と ジョブ 45 分 | なし（静的に確定） |
-| B6 PR 上で 3 ジョブが緑 | — | （impl は PR を作らない: D15 / 決めた事項 14） | **verify の PR で確認**（`gh pr checks --watch`） |
-| B7 Windows ジョブ不在の理由が YAML と README に | T3 / T5 | `ci_windows_reason=1`（`ci.yml` 先頭コメント）+ `readme_windows_toolchain=2` | なし（完了） |
-| C1 `release.yml` が `v*` タグ push で 3 プラットフォーム `.conda` + tarball を添付する構成 | T4 | `wf_release_exists` / `release_tags_v=1` / `release_pixi_build=1` / `release_git_archive=1` / `release_gh_release_create=1` / `release_gh_token=1` / `release_dup_check=1` + actionlint 0 | タグ push と Release 作成は **マイルストーン内で行わない**（REQ C3 の明示）。構成レビューのみ |
-| C2 タグと `version` の不一致で落ちるステップ | T4 | `check-tag-version.sh` のローカル陽性対照 3 値（`v0.1.0` rc 0 / `v0.2.0` rc 1 / `0.1.0` rc 1。turn 6）+ `release_version_check_sh=1` / `release_ref_type_tag=3` | なし（完了。CI 上の実行は `verify-version` ジョブで PR 外） |
-| C3 タグを使わない経路でビルド部分が確認済み | T3 / T4 | ローカル `pixi build` rc 0（turn 4 / 8）。`workflow_dispatch` は既定ブランチに無いと起動不可（P13） | **verify の PR で確認**（CI の `pq-conda-*` artifact が C3 の経路。REQ C3 の「CI 側の `pixi build` artifact」） |
-| C4 `CHANGELOG.md` に `0.1.0` 節 + Release 本文に使う | T4 | `changelog_010_heading=1` / `changelog_unreleased_heading=1` / `changelog_phase_lines=5` + `release-notes.py` の陽性対照 3 値（`0.1.0` 非空 / `9.9.9` rc 1 / 空節 rc 1。turn 6）+ `release.yml` の `--notes-file` | なし（完了。実際の Release 本文はタグ push 時） |
-| D1 英語の概要 + インストール節 | T5 | `readme_en_heading=1`（`## English summary and install`）+ `readme_git_dep` / `readme_rattler_index` が英語節にも | なし（完了） |
-| D2 日本語インストール節に git / `.conda` の依存指定 | T5 | `readme_git_dep=2` / `readme_tag_v010=3` / `readme_preview_pixi_build=4` / `readme_rattler_index=2` / `readme_dash_I_src=2` | なし（完了） |
-| D3 「テストの回し方」に CI の説明 | T5 | `readme_ci_heading=1` + `readme_job_name_{ubuntu,arm,macos}=2` 各 + `readme_wait_timeout_180` / `readme_pg_ctl_60` / `readme_fork` / `readme_windows_toolchain` | なし（完了） |
-| D4 ブランチ保護の手順（job 名を含む） | T5 | `readme_branch_protection=1` / `readme_required_status_checks=1`（`protection.json` の `contexts` にジョブ名 3 つ） | 設定自体は**人間 / verify**（impl はリポジトリ設定を変えない: D15） |
-| E1 SIGPIPE は README 明記（案 A）+ `check` PASS | T1 | `readme_sigpipe=2` / `readme_rc_141=1`、コード変更 0、`check` 6/6 PASS | なし（完了） |
-| E2 `wait_readable` の非 TIMEOUT 経路でも `out` を復元 + テスト 1 件 | T1 | `async_restore_collected_def=1` / `_sites=3`（def + 2 呼び出し）/ `test_notify_tests=25`（24 → 25）/ `test_notify_restore_collected=2` | なし（完了。経路自体は単一スレッドで到達不能なのでテストはヘルパ直叩き + `notifications()` 観測） |
-| F1 `check` PASS（247 s 以内） | T6 | turn 8 = **170 s**（クリーンな DB から。閾値 247 s、見積もり 170〜220 s の下端） | CI の所要は **verify の PR で確認**（3 OS、見込み 8〜13 分 + macOS brew 2〜4 分） |
-| F2 警告ゼロ / `mojo format` 差分なし | T6 | `check` 1/6 段で差分なし、6/6 段で `matched lines: 0`、`pixi run package` 警告ゼロ | なし（完了。CI も同じ `pixi run check` を回す） |
+判別できた（1 件に絞られ、無関係なファイルは無傷）ので差し替えは不要。
 
-## verify への申し送り
 
-1. **PR を作って CI を待つ**（impl は作っていない）。`gh pr create` → `gh pr checks <PR> --watch`（上限 **40 分**。
-   ジョブ `timeout-minutes: 45` + macOS brew 2〜4 分を見込む）。必須の 3 ジョブ名は
-   `check (ubuntu-latest)` / `check (ubuntu-24.04-arm)` / `check (macos-latest)`
-2. **artifact 名を VERIFICATION に写す**（P5 = release の `uniq -d` 重複検査の根拠）: `pq-conda-ubuntu-latest` /
-   `pq-conda-ubuntu-24.04-arm` / `pq-conda-macos-latest` の 3 つと、中の `.conda` の**ファイル名**
-   （linux-aarch64 は `pq-0.1.0-he8cfe8b_0.conda`。x86_64 / osx-arm64 のハッシュが互いに違えば flat な `dist/` で衝突しない）。
-   `final-check-log-<os>` の 3 artifact は `build/final_check.log` で、6 工程と `skipped` 行を読む用
-3. **macOS ジョブの `skipped` の見込みは 15 件**（turn 8 で内訳を特定した）: `test_leak.mojo` の
-   `_skip_on_macos` が **14 箇所**（`SKIP <name>: RSS sampling is Linux-only`）+ PG17 なので
-   `SKIP test_interval_infinity_rejected_before_pg17` **1 件**。`test_connect_blocking_times_out` は
-   blackhole が立てば **PASS が正**（立たなければ `SKIP … port 54399 refused` が 1 件増えて 16）。
-   PG14 は Linux だけなので `test_interval_infinity_on_pg17_and_later` の SKIP は macOS には出ない。
-   Linux 2 ジョブは 54317 / 54314 とも `skipped 1`（上の基線と同じ）
-4. **A2 の git 経路を再実測**（RESEARCH §6）: 別ディレクトリの最小 pixi プロジェクトから
-   `pq = { git = "https://github.com/6in/mojo-pg.git", branch = "gsd-lite/phase6-packaging-ci" }`
-   （`preview = ["pixi-build"]` + channels `https://conda.modular.com/max` と `conda-forge`）で
-   `pq import OK` + `PgError(kind=Connection` を確認する。turn 4 は `file://` の local path で実測済み
-5. **2 回目の run で setup-pixi のキャッシュ**（P12）: PR に 2 回目の push をしたら
-   `Cache restored` のログ行を確認する（1 回目は `Cache not found` が正）
-6. 任意: Phase 5 の堅牢性格子 `scratch/turn-012-robust-regress.sh` は期待値不変
-   （E1 が案 A = コード変更なしのため。`> >(exit 0)` 軸の rc 141 もそのまま）
+## チェックリスト（turn 9）
 
-## PLAN 訂正（turn 10）
+`scratch/turn-009-checklist.log` の全文（**全 77 key**）。turn 8 からの差分は 14 行で、
+全部 T7 の到達分（件数 2 本と `absent(pool.mojo)` の解消を含む）:
 
-1. チェックリスト `ci_locked_true` の期待値 **1 → 0**。`prefix-dev/setup-pixi@v0.11.2` は install を切った状態では
-   cache と lock の 2 入力を受け付けない（`src/options.ts:207-217`）ため、F1 で `ci.yml` から当該行を削除した。
-   PLAN:82 の表と「決めた事項 5」の記述も `cache: false`（lock 入力なし）に直した
-2. TRACE「verify への申し送り」の **5（2 回目の run で `Cache restored`）は無効**。setup-pixi のキャッシュは使わない
-   （毎 run で環境を取得。+1〜3 分の見込み）。verify round 2 はこの項目を確認対象から外す
+```
+pool_mojo=absent -> exists
+pool_struct / pooled_struct / pool_release_def=absent(src/pq/pool.mojo) -> 1 / 1 / 1
+pool_consume_input=absent(src/pq/pool.mojo) -> 5        # 期待値 >= 1
+pool_rollback=absent(src/pq/pool.mojo) -> 1             # 期待値 >= 1
+pool_monotonic=absent(src/pq/pool.mojo) -> 10           # 期待値 >= 1
+init_export_pool=0 -> 1
+test_pool_tests=absent -> 18                            # 期待値 >= 14
+test_leak_tests=20 -> 22                                # 期待値 >= 22
+test_leak_pool=0 -> 7                                   # 期待値 >= 2
+conn_transaction_parts_sites=absent(pool.mojo) -> 3     # 期待値 >= 3
+copy_in_defs=absent(pool.mojo) -> 3                     # 期待値 3
+copy_out_defs=absent(pool.mojo) -> 3                    # 期待値 3
+test_file_count=27 -> 28                                # 期待値 28（確定）
+src_mojo_count=21 -> 22                                 # 期待値 22（確定）
+```
 
-## F1 setup-pixi 入力の修正（turn 10）
+`absent(...)` は T7 の時点で **0 件**になった（残る `absent` は T8 の examples 2 本だけ）。
 
-- 変更箇所 **4 つ**（いずれも `with:` を `pixi-version: v0.82.0` / `cache: false` / `run-install: false` の 3 行に）:
-  `ci.yml` の `check` ジョブ 1 箇所、`release.yml` の `verify-version` / `build` / `release` の 3 箇所
-- 採った設計は **A（手動 install 維持）**: lock の強制は既存の `bash .github/scripts/retry.sh 3 15 pixi install --locked`
-  ステップが担う（REQ §2.5 のリトライ要件を満たしたまま）。B（action に install させる）は install にリトライが付かない
-- `verify-version` / `release` ジョブは install を呼ばない（`pixi workspace version get` のみ / `gh` のみ）が、入力は 3 ジョブで揃えた
-- コメントは key のパターン文字列（`locked: true` / `run-install: false` / `cache: true` / `cache: false`）を含まない言い回しに統一
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=3
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=5
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=exists
+copyin_struct=1
+copyout_struct=1
+copy_drain_def=1
+copy_in_defs=3
+copy_out_defs=3
+conn_copy_parts_defs=2
+conn_check_not_copying_def=1
+check_not_copying_sites=7
+conn_docstring_copy_unsupported=0
+init_export_copy=1
+test_copy_tests=21
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=exists
+pool_struct=1
+pooled_struct=1
+pool_release_def=1
+pool_consume_input=5
+pool_rollback=1
+pool_monotonic=10
+init_export_pool=1
+test_pool_tests=18
+test_leak_tests=22
+test_leak_pool=7
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=28
+src_mojo_count=22
+src_def_ref_return=0
+src_iterator_in_copy=0
+tests_sh_bash4_only=0
+```
 
-| 検査 | 結果 |
-|---|---|
-| `pixi exec --spec actionlint actionlint .github/workflows/ci.yml .github/workflows/release.yml` | 指摘 0 |
-| `grep -c 'cache: false'`（ci / release） | **1 / 3** |
-| `grep -c 'cache: true'` / `grep -c 'locked: true'`（2 本とも） | **0 / 0**（grep rc 1） |
-| `pixi run check` | **6/6 PASS = 175 s**（11:38:33 → 11:41:28。閾値 247 s）。`final_check: PASS`、6/6 段 `matched lines: 0`、Linux 両サーバー `skipped 1` |
+## PLAN 訂正（turn 9）
+
+- T7 (d) の陽性対照「`_release` が**捨てる経路**で `conn._conn = PGconnPtr(0)` してから
+  `_ = conn^`」は**判別しない**: `test_leak` の 2 ループはどちらも捨てる経路を通らない
+  （ループ 1 = `Pool.open(min_size=2)` の drop は `List[_Slot]` の deinit、ループ 2 =
+  `acquire` -> `execute` -> drop は park 経路）。
+  → 対照を **park 経路**に差し替えた（`_release` が `_idle.append` する直前に
+  `conn._conn = PGconnPtr(0)`）。park した handle の `PQfinish` が走らず、次の `acquire` が
+  その接続を捨てて（`PQfinish` なし）新規に開くので 1 反復 1 handle ずつ漏れる。
+  結果は下記「陽性対照（turn 9）」のとおり 1 件に絞れた。
+- T7 (a) の `Pool.set_rollback_failure_handler` は `for ref slot in self._idle` では
+  **コンパイルできない**（`List iteration requires the element to be 'Copyable'`。`_Slot` は
+  `Connection` を所有する）→ `for i in range(len(self._idle))` の添字形にした。
+- `_Slot` から `Connection` を取り出すのに `slot.conn^` は不可
+  （`field '...' destroyed out of the middle of a value`）。`var self` の消費メソッドでも同じ。
+  **`def take(deinit self) -> Connection`** だけが通る（`scratch/turn-009-probe-take.mojo` で実測）
+  → `_Slot.take()` を足し、`opened_at` は take の前に読む形にした。
+- `PooledConnection[origin: ImmOrigin]` の struct docstring には `Parameters:` 節が必要
+  （無いと 3/6 段と 6/6 段が `struct takes parameters, but has no 'Parameters' in doc string`
+  の warning 1 行で FAIL する）。`CopyIn` / `Transaction` と同じ 1 行を足した。
+
+## `check` の所要（turn 9 / T7 完了時点）
+
+`check` 1 回 = **321 s**（17:53:28 -> 17:58:49、閾値 380 s）。`PASS` 行は **1524**
+（turn 8 は 1486。+38 = `test_pool` 18 件 x 2 サーバー + `test_leak` の 2 件 x 1 サーバー）
+= **既存テストの期待値変更 0 件**。`FAIL` 行は 0。
+
+内訳の実測（`final_check.log` の計測行）: `tests/test_pool.mojo` は
+**54317 で 16 s（コンパイル込み）/ 54314 で 8 s**（`Summary` はミリ秒で 3363 / 3459 =
+`pg_sleep` 2.2 s + 切断反映待ち）。`tests/test_leak.mojo` は **94 s**（turn 8 は 83 s。
+pool 2 ループで +11 s = 見込み +10 s どおり。1 サーバーのみ）。
+
+turn 8 の 266 s から **+55 s**。内訳は新ファイル 2 本（約 +15 s）と `test_leak` の +10 s で
+約 25 s、残り 30 s は turn 6 以降ずっと見えている **±50 s の揺れ**の範囲。母数は **260〜370 s**
+のまま。T8 は examples 2 本（各 2 s x 2 サーバー）と文書だけなので閾値 380 s に余裕がある。
+
+## 陽性対照（turn 9）
+
+3 件すべて判別できた（差し替えたのは 1 件目の対象経路だけ。上記 PLAN 訂正）。
+
+1. **park した接続の `PQfinish` が走らない**（`src/pq` の写し、実行後に削除）:
+   `_release` の `_idle.append` の直前に `conn._conn = PGconnPtr(0)` を挿入
+   → built binary で `tests/test_leak.mojo` が
+   **`test_pool_acquire_and_release_does_not_leak` 1 件だけ** FAIL（21 passed / 1 failed）。
+   `test_pool_open_and_drop_does_not_leak` は PASS のまま（このループは park 経路を通らない
+   = 2 つのループが別の経路を見ている証明にもなった）。
+2. **`_stmt_counter` が接続とともに残ること**（同じ写し）: `_release` の park 直前に
+   `conn._stmt_counter[0] = 0` を挿入 → `tests/test_pool.mojo` が
+   **`test_the_statement_counter_rides_along_with_the_connection` 1 件だけ** FAIL
+   （17 passed / 1 failed）。サーバーは `42P05`（`prepared statement "pq_stmt_1" already exists`）。
+3. **P21 / T7 ⑰ の origin**（`scratch/turn-009-posctl-origin.mojo`、コンパイルのみ）:
+   `var a = pool.acquire(); var p2 = pool^; _ = a.execute("SELECT 1")` が
+   `error: use of uninitialized value 'pool'`（`turn-009-posctl-origin.mojo:30:18`）で
+   コンパイル失敗 = 貸し出し中のプールは move できない。
 
 ## チェックリスト（turn 10）
 
-`scratch/turn-010-checklist.log`（全 101 key）。**turn 9 のログとの差分は 1 行だけ**:
+`scratch/turn-010-checklist.log` の全文は 77 key。turn 9 からの差分は **18 行**で、
+全部 T8 の到達分。これで **`absent` は 0 件**（T8 の examples 2 本が最後の absent だった）:
 
 ```
-38c38
-< ci_locked_true=1
----
-> ci_locked_true=0
+readme_array_optional_row=0 -> 3                       # 期待値 >= 2
+readme_array_word=1 -> 8                               # 期待値 >= 8
+readme_copy_example=0 -> 2                             # 期待値 >= 2
+readme_pool_example=0 -> 2                             # 期待値 >= 2
+readme_out_of_scope_line=1 -> 0                        # 期待値 0
+readme_thread_unsafe=0 -> 5                            # 期待値 >= 2
+readme_en_arrays=0 -> 1                                # 期待値 >= 1
+changelog_phase7=0 -> 1                                # 期待値 >= 1
+changelog_phase_lines=6 -> 7                           # 期待値 7
+init_docstring_phase7=0 -> 1                           # 期待値 >= 1
+init_docstring_copy_in=0 -> 2                          # 期待値 >= 2
+examples_copy=absent -> exists
+examples_pool=absent -> exists
+examples_params_any=0 -> 1
+examples_copy_next=absent(examples/copy.mojo) -> 1
+pixi_example_tasks=5 -> 7                              # 期待値 7
+final_check_examples=5 -> 7                            # 期待値 7
+examples_mojo_count=7 -> 9                             # 期待値 9
 ```
 
-setup-pixi 周辺の現在値: `ci_setup_pixi_pinned=1` / `ci_pixi_version=1` / `ci_run_install_false=1` /
-`ci_locked_true=0` / `ci_retry_sh=4`（不変）。他の全行は turn 9 と同値。
+不変を確認した key（T8 で動かしてはいけないもの）: `readme_19_types`=1（スカラの型数。
+配列は別行にしたので真のまま）、`readme_h2`=11（新節は `###`）、`test_file_count`=28、
+`src_mojo_count`=22、`src_def_ref_return`=0、`src_iterator_in_copy`=0、`tests_sh_bash4_only`=0。
 
-- 途中経過: 最初のコメント案が `retry.sh` に 2 回触れて `ci_retry_sh` が 4 → 5 になったため、
-  「the install step below」に言い換えて 4 に戻した（turn 5 / 6 と同じ型の混入。検出はチェックリストの diff）
+## PLAN 訂正（turn 10）
 
-## CI 実測（turn 11 / verify round 2 / run 39091056281）
+1. **T8 (b) の「パラメータ表（`:141-159`）」は README に存在しない**。`README.md:141-159` は
+   「libpq の探索順」で、パラメータの説明は `### パラメータバインド` の散文（`:207-210`）。
+   PLAN の行番号は phase 5 時点の写しだった。要件・決定に触れないので**実物を正とし**、
+   `List[T]` / `List[Optional[T]]` のバイナリ送信・typarray・`List[String]`=1009・
+   名前付き `List` は `[ids^]` / `[ids.copy()]` を**同じ節の散文として**足した（表は作っていない）。
+   `src/pq/__init__.mojo` 側の `## Parameters` には表があるので、そちらは PLAN どおり行を追加した。
 
-生ログ: `scratch/turn-011-macos-artifact/final_check.log`（872 行）/ `turn-011-arm-artifact/` / `turn-011-x64-artifact/` /
-`turn-011-macos-job.log`（ジョブ全体、`gh api .../jobs/<id>/logs`）。`.conda` は `turn-011-conda-arm/` / `turn-011-conda-x64/`
+## `check` の所要（turn 10 / T8 完了時点）
 
-| ジョブ | 結果 | 所要 | 5/6 段 | skipped | `.conda` |
-|---|---|---|---|---|---|
-| `check (ubuntu-latest)` | ✅ | 9m52s | FAIL 0 | 1 / 1 | `pq-0.1.0-hb0f4dca_0.conda` 461,664 B |
-| `check (ubuntu-24.04-arm)` | ✅ | 8m26s | FAIL 0 | 1 / 1 | `pq-0.1.0-he8cfe8b_0.conda` 461,660 B |
-| `check (macos-latest)` | ❌ | 4m41s | FAIL 2（test_async 30/31、test_poll 10/11） | 15 | 未到達 |
+`check` 1 回 = **423 s**（18:14:06 -> 18:21:09）、`final_check: PASS`。テストケースの
+`PASS` 行は **1524**（turn 9 と同数 = T8 はテストを増やさないので正しい。`grep -c PASS` の
+生値 1525 は末尾の `final_check: PASS` を 1 行拾ったもの）。`FAIL` 行は 0 =
+**既存テストの期待値変更 0 件**。6/6 段の警告 0、3/6 段の docstring 欠落 0。
 
-macOS の段ごとの時刻（UTC）: setup-pixi 02:42:49 → install 02:42:50〜53（3 s）→ `macos-postgres.sh` 02:42:53〜05（12 s。brew bottle 17.11_1、initdb スキップ、
-scram 切替 + reload、陽性対照 2 つ OK）→ blackhole 02:43:05〜07（accepting）→ `pixi run check` 02:43:07〜02:47:14（247 s、5/6 で `--- FAIL`）。
-`LibpqLoad` 0 件。`test_connect_blocking_times_out` PASS 560 ms
+段ごとの実測: 1/6 fmt 1 s、2/6 precompile 4 s、3/6 docstring 3 s、
+**4/6 examples 26 s（7 本。copy / pool の 2 本増）**、**5/6 tests 389 s**、6/6 warnings 0 s。
+5/6 の内訳は **54317 で 290 s / 54314 で 91 s**（1 サーバー目が 28 本のコンパイルを全部払う）。
+`tests/test_leak.mojo` は **97 s**（turn 9 は 94 s。T8 は leak を触っていないので誤差）。
 
-macOS の赤 2 件（verify の読み）:
+**turn 9 の 321 s から +102 s だが、増えた実体は 4/6 の examples 2 本（約 +10 s）だけ**で、
+残り約 90 s は 1 サーバー目のコンパイル時間の揺れ。母数は turn 9 までの「260〜370 s」から
+**260〜425 s** に広げて読む必要がある。
 
-```
-FAIL [ 17.769 ] test_connect_failures_name_their_cause
-  At tests/test_async.mojo:1613:16: AssertionError: connection socket closed (POLLHUP/POLLERR)
-FAIL [ 0.033 ] test_socketpair_peer_close_sets_hangup_both_ways
-  At tests/test_poll.mojo:215:16: AssertionError: condition was unexpectedly False
-```
+**T9 への申し送り（判断は T9 が行う）**: PLAN T9 (b) の閾値 **300 s** は、green な
+turn 9（321 s）と turn 10（423 s）の 2 回とも超えている。T9 (b) は `db-reset` 後の
+クリーン計測なので本番の値はこれよりさらに重くなる見込み。T9 は計測してから
+閾値そのものを訂正するか判断すること（1 回の計測で決めない: PROGRESS turn 7 の注意）。
 
-- 共通の原因: macOS の poll(2) は POSIX どおり `POLLHUP` と `POLLOUT` を同時に立てない。Linux は socket で両方立てる（Phase 4 RESEARCH §2.3 の `20 = POLLOUT|POLLHUP`）
-- ① は `async_conn.mojo:787-793`（`wait_writable` の「要求方向ビット無し + hangup」→ 汎用 CONNECTION）に入る。Linux は `POLLOUT` があるので `:787` で return → `PQconnectPoll` が `Connection refused` を名乗る
-- ② は `poll_socket` の flags そのまま。`:213-214`（読み側 `POLLIN|POLLHUP`）は通過、`:215`（書き側 `POLLOUT`）が False
-- → PLAN **F2**（設計 A: hangup / error だけでも return して libpq に言わせる + test_poll の `writable` assert を Linux 限定）
+## 堅牢性格子 全セル（turn 11 / T9 (a)）
+
+`scratch/turn-011-robust-grid.sh`（`turn-003-robust-grid.sh` の写し。違いは `BIN` のパスと
+冒頭コメントだけ）を `db-reset` 直後に 1 回実行。ログ `scratch/turn-011-robust-grid.log`。
+
+- ビルド: `built: basic params binary async_query listen_notify copy pool` = **7 本**
+  （turn 3 では `copy` / `pool` が `absent` だった 2 本が実体になった。`build-failed` 0）
+- セル数 **126** = 7 本 ×（入力 6 + 出力 4 × 2 + 依存 4）。**全 126 セルが `unhandled_markers=0`**
+  （`traceback` / `exception_ignored` も全セル 0）
+- rc の分布: `rc=0` 39 / `rc=1` 73 / `rc=141` 14。**`rc=141` は 14 セルすべて `run_epipe`**
+  （7 本 × 入力 GOOD / MALFORMED）= Phase 5 からの既知の SIGPIPE 挙動で許容
+- 新 2 本の代表セル: `copy conninfo=GOOD` → `copied in = 1000` / `copied out = 1000 rows` /
+  `copied out bytes = 10780`（rc=0）、`pool conninfo=GOOD` → `size = 2` / `idle = 0` /
+  `borrowed = 2`（rc=0）、`copy dep=LIBC` → `PgError(kind=LibpqLoad, ...missing symbol PQconnectdb)`、
+  `pool dep=BADPW` → `PgError(kind=Connection, ...password authentication failed)`
+
+入力軸の追加分（REQ §2.4。conninfo / 環境変数では与えられないので examples ではなくテスト側が担う）:
+
+| REQ §2.4 の入力 | 所在 | 件数（実測） |
+|---|---|---|
+| 配列リテラルの不正形（閉じ括弧なし / 引用符の途中終端 / 空要素 / 括弧なし / 空文字 / `{` のみ / `}` のみ / 引用符で終端 / 次元接頭辞に `=` なし） | `tests/test_decode_array.mojo` の `test_malformed_*` | **10**（`grep -c '^def test_malformed_'`。P7 の 9 件 + `dimension_prefix_without_equals`） |
+| バイナリ配列ヘッダの不正（flags / elemtype 不一致 / 12 byte 未満 / dim と要素数の不一致 / 要素長の不一致 / 末尾のゴミ） | 同ファイルの `test_binary_array_rejects_*` | **6**（`rejects_*` は全 8 件。残り 2 件は多次元と int2 配列 OID） |
+| COPY の途中切断（クライアント側 `close(PQsocket)`） | `tests/test_copy.mojo` ⑩ = `test_copy_in_after_the_socket_is_closed` / `test_copy_out_after_the_socket_is_closed` | **2** |
+| プールの枯渇 / 死んだ接続の再利用 | `tests/test_pool.mojo` ① ⑦ ⑧ ⑨ = `test_two_guards_fill_the_pool_then_the_returned_one_is_reused` / `test_a_terminated_borrowed_connection_is_discarded` / `test_the_health_check_catches_a_kill_the_borrower_never_saw` / `test_a_kill_with_no_wait_is_only_seen_by_the_next_borrower` / `test_acquire_resets_a_connection_killed_while_it_was_idle` | **5** |
+
+## 受け入れ基準対応表（turn 11 / T9 (d)）
+
+REQ §4.1〜§4.4 の各行 → それを判定しているテスト名 / PLAN の完了基準番号。
+テスト名は `tests/` 配下の `def test_*`（`grep -n '^def test_' tests/<file>` で引ける）。
+
+### REQ §4.1 配列型
+
+| REQ §4.1 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| 19 型それぞれ text / binary で一致 + Phase 3 の境界値が要素としても往復 | `tests/test_array.mojo` の 15 件（`test_array_bool_matches_text_and_binary` 〜 `test_array_interval_matches_text_and_binary`、`test_array_int8_reads_as_int_and_int64`、`test_array_six_text_oids_decode_as_string_list`）+ 単体の境界値 `tests/test_decode_array.mojo` の `test_text_array_{numeric,float8}_specials` / `test_text_array_timestamp_infinities` / `test_binary_array_{numeric,interval,bool_and_bytea}_element*` | T5 (a) / T2 (e) / T3 (c) |
+| 空配列 `'{}'::int4[]` が空の `List` | `test_array_empty_is_empty_list_in_both_formats`、単体 `test_text_array_empty_is_empty_list` / `test_binary_array_*`（ndim 0）、送信側 `test_array_param_empty_array_round_trips` | T5 (b)(e) / T2 (e) / T3 (c) |
+| 配列 OID と `T` の不一致（`int2[]` を `List[Int32]`）は `TYPE_MISMATCH` | `test_array_element_oid_mismatch_in_both_formats`、単体 `test_text_array_rejects_int2_array_for_int32` / `test_binary_array_rejects_the_int2_array_oid_for_int32` / `test_binary_array_rejects_a_foreign_element_type` | T5 (c) / T2 (e) / T3 (c) |
+| 配列列を `String` で読むとテキスト形式ではリテラルがそのまま | `test_array_column_as_string_is_the_literal_in_text_only`、単体 `test_text_array_column_read_as_string_is_the_literal` / `test_binary_array_column_read_as_string_is_still_rejected` | T5 (d) |
+
+### REQ §4.2 COPY
+
+| REQ §4.2 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| text 10 万行 → `affected_rows() == 100000` + `count(*)` 一致 / CSV / binary 各 1 件 | `test_text_copy_in_takes_every_row` / `test_csv_copy_in_stores_quoted_fields` / `test_binary_copy_in_stores_both_rows` | T6 (d) ① ② ③ |
+| `copy_out` の行数と内容が `copy_in` のバイト列と一致 | `test_copy_out_returns_every_row_then_none` | T6 (d) ④ |
+| `abort()` / `finish()` なしの破棄で行が残らず、その後の `execute` が通る | `test_abort_discards_the_rows_without_raising` / `test_dropping_an_unfinished_copy_in_cancels_it_quietly` | T6 (d) ⑤ ⑥ |
+| `copy_out` を途中で破棄した後の `execute` が通る | `test_dropping_a_copy_out_mid_stream_leaves_the_connection_usable` | T6 (d) ⑦ |
+| COPY 中の `execute` / `transaction` / 2 つ目の `copy_*` は `USAGE`、サーバーには何も送られない | `test_every_other_command_during_a_copy_is_usage`（7 件の格子 + `finish()` が 2 行を数える）。陽性対照は TRACE「陽性対照（turn 8）」 | T6 (d) ⑧ |
+| 不正データは `finish()` が `22P04` 等の `SERVER`、接続はアイドルに戻る | `test_malformed_row_surfaces_from_finish` | T6 (d) ⑨ |
+| 途中切断で `write` / `next` / `finish` が `CONNECTION`、トレースバック無し | `test_copy_in_after_the_socket_is_closed` / `test_copy_out_after_the_socket_is_closed` | T6 (d) ⑩ |
+| `Transaction` 内の `copy_in` を `rollback()` すると行が残らない | `test_transaction_copy_in_rollback_loses_the_rows`（対照 `test_transaction_copy_in_commit_keeps_the_rows`、破棄順序 `test_transaction_destroyed_before_its_copy_in`） | T6 (d) ⑬ ⑭ |
+
+### REQ §4.3 プール
+
+| REQ §4.3 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| `max_size=2` で 2 回成功・3 回目 `USAGE`・`pg_stat_activity` = 2、drop 後の `acquire` が同じ `backend_pid` | `test_two_guards_fill_the_pool_then_the_returned_one_is_reused` | T7 (c) ① |
+| `min_size=2` で `open` 直後に `idle() == 2` / `size() == 2` / サーバーにも 2 本 | `test_min_size_opens_its_connections_before_open_returns` | T7 (c) ② |
+| commit せずガードを drop → 返却時に ROLLBACK、次の利用者が IDLE で変更も残らない | `test_a_dropped_transaction_block_is_rolled_back_before_reuse`（`Transaction` 側が先に ROLLBACK）/ `test_release_rolls_back_a_raw_begin_and_keeps_the_connection`（プールの `_release` の `INTRANS` 経路） | T7 (c) ③ ④ |
+| 未完了の `copy_in` を持つガードの drop | `test_an_unfinished_copy_in_is_cancelled_and_the_connection_kept`（**決めた事項 20 で文言を読み替え**: Mojo の破棄順では接続は捨てられず再利用される）+ 白箱 `test_a_connection_left_active_is_discarded_on_return`（`ACTIVE` なら捨てる分岐の証明） | T7 (c) ⑤ ⑥ |
+| 貸し出し中に `pg_terminate_backend` された接続を返却 → 捨てられ次の `acquire` は新規 | `test_a_terminated_borrowed_connection_is_discarded` / `test_the_health_check_catches_a_kill_the_borrower_never_saw` / `test_a_kill_with_no_wait_is_only_seen_by_the_next_borrower` / `test_acquire_resets_a_connection_killed_while_it_was_idle` | T7 (c) ⑦ ⑧ ⑨ |
+| `max_lifetime_s=1` の接続は返却時に閉じられ、次の `backend_pid` が変わる | `test_max_lifetime_retires_a_connection_on_return`（対照 `test_the_default_lifetime_never_retires_anything`） | T7 (c) ⑩ |
+| `close()` 後の `acquire` は `USAGE`、`Pool` の破棄で空き接続が `PQfinish` される | `test_close_drops_the_idle_connections_and_refuses_to_lend` + `tests/test_leak.mojo` の `test_pool_open_and_drop_does_not_leak` / `test_pool_acquire_and_release_does_not_leak`（RSS 判定 2 ループ） | T7 (c) ⑪ / T7 (d) |
+| `max_size <= 0` / `min_size > max_size` は `USAGE` でサーバーに接続しない | `test_bad_sizes_are_usage_errors_before_anything_is_dialled`（4 ケース + `pg_stat_activity` 不変） | T7 (c) ⑫ |
+
+### REQ §4.4 共通
+
+| REQ §4.4 の行 | 検証した場所 | 完了基準 |
+|---|---|---|
+| `pixi run check` 6/6 PASS（PG 14 / 17 両方）、`mojo build` 警告ゼロ | `scratch/turn-011-check.log`（`final_check: PASS`、5/6 段が 54317 → 54314 の 2 周）、`pixi run package` 警告ゼロ、6/6 段 `matched lines: 0` | T9 (b) |
+| CI 3 OS 緑 | **未実施**（`ci.yml` の `on:` は `pull_request` / `push(main)` → T9 の branch push では走らない）。PR 作成は verify の仕事 = P29 の申し送り | T9 (e) + verify |
+| README の型マッピング表・クイックスタート 2 節・「既知の制限」の書き換え、CHANGELOG `[Unreleased]` | チェックリスト key `readme_array_optional_row` / `readme_array_word` / `readme_copy_example` / `readme_pool_example` / `readme_thread_unsafe` / `readme_en_arrays` / `readme_out_of_scope_line`=0 / `changelog_phase7` / `changelog_phase_lines`=7 + 抜粋照合器（turn 10） | T8 (b)(c) |
+| `examples/copy.mojo` / `pool.mojo` 新設 + `pixi.toml` の `example-*`、配列は `params.mojo` に `= ANY($1)`、全 examples が単体で実行できる | `examples_copy`=exists / `examples_pool`=exists / `examples_params_any` / `pixi_example_tasks`=7 / `final_check_examples`=7 / `examples_mojo_count`=9。単体実行は `check` 4/6 段 7 本 + 堅牢性格子 126 セル | T8 (a) / T9 (a)(b) |
+| `Connection.execute` docstring の「COPY は未対応」を `copy_in` / `copy_out` の案内に | チェックリスト key `conn_docstring_copy_unsupported`=0、`check_not_copying_sites` ≥ 7 | T6 (c) |
+| state の `verify_round_max` は 4 | `.gsd-lite/state.json`（`verify_round_max: 4`） | T1 |
+| §2.4 の堅牢性 | `scratch/turn-011-robust-grid.log`（126 セル全部 `unhandled_markers=0`）+ 入力軸の追加分はテスト側（下表） | T9 (a) |
+
+## verify への申し送り（turn 11 / T9 (d)）
+
+落とし穴 P1〜P29（RESEARCH）を「どこで検証したか」に対応づけた表。測り方は
+`scratch/turn-011-pitfalls.sh`（`grep -cE <パターン> <ファイル>` を素のファイルに当てる。
+チェックリストと違いコメント行を除外しないので、`test_leak_pool`=7 と P24=12 のように
+同じ語でも値が違う）。出力は `scratch/turn-011-pitfalls.log`。
+
+| P | grep パターン（`grep -cE`） | 件数 | ファイル |
+|---|---|---|---|
+| P1 | `rejects_invalid_flags\|null_and_multibyte\|null_element_is_none_when_optional` | 3 | `tests/test_decode_array.mojo` |
+| P2 | `header_shorter_than_twelve_bytes\|foreign_element_type` | 2 | `tests/test_decode_array.mojo` |
+| P3 | `dimension_the_cell_cannot_fill\|element_of_the_wrong_width\|bytes_after_the_last_element` | 3 | `tests/test_decode_array.mojo` |
+| P4 | `multidimensional\|dimension_prefix\|lower_bound_is_dropped` | 12 | `tests/test_decode_array.mojo` + `tests/test_array.mojo` |
+| P5 | `int2_array\|element_oid_mismatch\|six_text_oids\|six_array_oids` | 6 | 同上 |
+| P6 | `nine_elements_unescaped\|bpchar_keeps_padding\|bytea_elements_decode_to_bytes\|lowercase_null_word` | 4 | `tests/test_decode_array.mojo` |
+| P7 | `^def test_malformed_` | 10 | `tests/test_decode_array.mojo` |
+| P8 | `array element ` | 8 | `src/pq/decode_text.mojo` + `src/pq/decode_binary.mojo` |
+| P9 | `varchar\[\]\|jsonb\[\]` | 2 | `tests/test_array.mojo` |
+| P10 | `^def test_`（既存の期待値変更 0 件の母数） | 51 | `tests/test_params.mojo` + `tests/test_binary.mojo` |
+| P11 | `after_the_socket_is_closed` | 2 | `tests/test_copy.mojo` |
+| P12 | `malformed_row_surfaces_from_finish` | 1 | `tests/test_copy.mojo` |
+| P13 | `every_other_command_during_a_copy_is_usage` | 1 | `tests/test_copy.mojo` |
+| P14 | `rejects_a_copy_to_stdout\|rejects_a_copy_from_stdin\|rejects_a_plain_select` | 3 | `tests/test_copy.mojo` |
+| P15 | `drains_the_statement_behind_it` | 1 | `tests/test_copy.mojo` |
+| P16 | `transaction_destroyed_before_its_copy_in\|transaction_copy_in_(commit\|rollback)` | 3 | `tests/test_copy.mojo` |
+| P17 | `dropping_a_copy_out_mid_stream\|dropping_an_unfinished_copy_in` | 2 | `tests/test_copy.mojo` |
+| P18 | `\.next\(\)`（`while` 形の例。`src_iterator_in_copy`=0 と対） | 1 | `examples/copy.mojo` |
+| P19 | `reset\(\)` | 5 | `tests/test_connection.mojo` |
+| P20 | `terminated_borrowed_connection_is_discarded\|health_check_catches_a_kill\|kill_with_no_wait` | 3 | `tests/test_pool.mojo` |
+| P21 | `two_guards_fill_the_pool\|every_forwarded_method_reaches`（陽性対照は TRACE「陽性対照（turn 9）」3） | 2 | `tests/test_pool.mojo` |
+| P22 | `statement_counter_rides_along` | 1 | `tests/test_pool.mojo` |
+| P23 | `max_lifetime_retires\|default_lifetime_never_retires` | 2 | `tests/test_pool.mojo` |
+| P24 | `Pool`（2 ループ + ヘルパ） | 12 | `tests/test_leak.mojo` |
+| P25 | `failed_implicit_rollback_reaches_the_handler_once` | 1 | `tests/test_pool.mojo` |
+| P26 | `examples/(copy\|pool)\.mojo` | 2 | `tests/final_check.sh` |
+| P27 | `unhandled_markers=0` | 126 | `scratch/turn-011-robust-grid.log` |
+| P28 | `warning:\|WARNING:\|implicit ROLLBACK failed` | **0** | `build/final_check.log` |
+| P29 | `P29`（この申し送り自体。CI 3 OS は未実施） | 0 → ≥ 1 | `.gsd-lite/TRACE.md` |
+
+verify への申し送り（上の表に乗らないもの）:
+
+1. **P29 / CI は未実施**。`ci.yml` の `on:` は `pull_request`（base main）と `push`（main）だけで、
+   T9 の branch push では run が起動しない（REQ §6: PR を作るのは verify）。OS 固有の経路は
+   `close(PQsocket)` の EBADF（`test_copy` ⑩）と `pg_stat_activity` / `pg_terminate_backend` の
+   権限（`test_pool` 全件）。macOS で赤くなったら `final-check-log-macos-latest` artifact の
+   `test_copy` / `test_pool` の PASS 行を見ること。`verify_round_max` は 4（D1）
+2. **REQ §4.3 の「未完了 `copy_in` のガードを drop → その接続は捨てられ `size()` が 1 減る」は
+   決めた事項 20 で読み替えた**（Mojo の破棄順では `CopyIn.__deinit__` が先に COPY を中止するので
+   接続は IDLE に戻り再利用される）。白箱の `test_a_connection_left_active_is_discarded_on_return` が
+   `ACTIVE` 分岐側を押さえている。README「既知の制限」に 1 行。**この項は差し戻し対象にしない**
+3. **`CopyOut` は `Iterator` ではない**（決めた事項 7。REQ §2.2 からの意図的な逸脱。
+   Mojo 1.1.0 の `Iterator.__next__` は `raises StopIteration` ちょうどでないと適合しない）。
+   README「既知の制限」に明記済み。**この項も差し戻し対象にしない**
+4. F 項目（見込みと実測の差）は `+/-` 単位で読む（Phase 5 reflect 提案 6）。`check` の母数は
+   **260〜425 s**（turn 9 321 s / turn 10 423 s / turn 11 298 s）
+5. 既存テストの期待値変更は **全ターンで 0 件**（T1〜T9。`check` の `FAIL` 行 0 が毎ターンの証拠）
+
+## `check` の所要（turn 11 / T9 完了時点・クリーン状態）
+
+`db-reset` → `check` を 1 回。**298 s**（`21:15:26` -> `21:20:24`、`scratch/turn-011-check-start.txt`
+/ `-check-end.txt`）、`final_check: PASS`。**PLAN T9 (b) の閾値 300 s を下回ったので訂正は不要**
+（turn 10 の申し送りは「超えるなら訂正を判断」だった。turn 10 の 423 s との差 125 s は
+1 サーバー目のコンパイル時間の揺れで、turn 11 は grid のビルドでキャッシュが暖まっていた分だけ速い）。
+
+- 段ごと: 1/6 fmt 1 s（差分 0）/ 2/6 precompile 4 s / 3/6 docstring 3 s（欠落 0）/
+  **4/6 examples 20 s（7 本）** / **5/6 tests 264 s** / 6/6 warnings 0 s（`matched lines: 0`）
+- 5/6 の内訳: **54317 で 176 s（`test_leak` 89 s を含む）/ 54314 で 83 s**、ファイル実行 55 回
+  （28 本 + 27 本。`test_leak` は 1 サーバー目のみ）
+- テストケースの `PASS` 行 **1524**（turn 9 / turn 10 と同数 = T9 はテストを増やさない）、
+  `FAIL` 行 **0** = 既存テストの期待値変更 0 件。`SKIP` は PG14 側の既知分のみ
 
 ## チェックリスト（turn 11）
 
-`scratch/turn-011-checklist.log`（全 101 key）。**turn 10 のログとの差分は 1 行だけ**（単調増加の性質）:
+`scratch/turn-011-checklist.log`、**全 77 key**。turn 10 からの差分は
+**`trace_checklist_section` の 6 → 7 の 1 行だけ**（turn 10 の TRACE 節が増えた分。期待値 ≥ 1）。
+`absent` **0 件**、他の 76 key は turn 10 と完全一致（`diff turn-010-checklist.log turn-011-checklist.log`）。
+この節を足した後は 8 になる（同じ key の `≥ 1` を維持）。
 
-```
-11c11
-< trace_checklist_section=6
----
-> trace_checklist_section=7
-```
+## PLAN 訂正（turn 11）
 
-F1 の回帰 grep: `cache: false` = 1 / 3、`cache: true` + `locked: true` = 0 / 0、actionlint 指摘 0。ローカル `check` 6/6 PASS = 170 s（11:46:32 → 11:49:22）
+1. **T9 (a) の「配列リテラル不正 9 件」は実測 10 件**。`grep -c '^def test_malformed_' tests/test_decode_array.mojo` = 10 で、
+   RESEARCH P7 が挙げた 9 件（`{1,2` / `{"abc}` / `{1,,2}` / `{1,2}}` / `1,2` / 空文字 / `{` / `}` / `{"a`）に
+   T2 が `test_malformed_dimension_prefix_without_equals` を 1 件足していた（P4 の `[..]=` 接頭辞の異常系）。
+   要件・決定に触れないので**実物と実測を正とし**、PLAN T9 (a) の件数を 10 に直した。
+2. **T9 (b) の閾値 300 s は訂正しない**。turn 10 の申し送りは「超えるなら訂正を判断」だったが、
+   クリーン状態の実測は **298 s** で閾値内に収まった（`scratch/turn-011-check-start.txt` / `-check-end.txt`）。
+   母数の揺れ（260〜425 s）は「`check` の所要（turn 11 / T9 完了時点・クリーン状態）」節に記録した。
 
-## F2 macOS の poll セマンティクスへの追従（turn 12）
+## 陽性対照（turn 13 / F1 (f)）
 
-設計 **A**（PLAN F2 の背景。B = OS 分岐 / C = テスト緩和は採らない）: `wait_readable` / `wait_writable` は poll が hangup / error
-だけを報告した場合も **raise せず return** し、切断の理由は次の libpq 呼び出しに名乗らせる。
+F1 のテスト 5 件を**先に書いて修正前のコードで 1 回走らせた**（`mojo run -I src tests/test_copy.mojo`、26 tests / 21 passed / **5 failed**）。
+赤の内容が 3 つの指摘にそのまま対応している:
 
-### (a) src の変更（`src/pq/async_conn.mojo` 2 メソッドのみ）
-
-| 変更 | 内容 |
-|---|---|
-| `wait_readable`（旧 `:756-760`） | `if events.hangup or events.error: raise CONNECTION ...` の 5 行を削除。`if events.readable: return` も不要になったので削除（timeout 以外は return で抜ける） |
-| `wait_writable`（旧 `:789-793`） | 同じ 5 行 + `if events.writable: return` を削除 |
-| docstring 2 本 | 本文に「hangup / error だけでも返る。理由は次の libpq 呼び出しが名乗る」の段落を追加。`Raises:` の `CONNECTION` は **socket が無いときだけ**に直した |
-| 残す挙動 | `fd < 0` → `CONNECTION "no socket: connection is closed"`、`events.timeout` → `TIMEOUT "wait_* timed out after N ms"`、`poll_socket` の `USAGE`（範囲外 `timeout_ms`）は不変 |
-| `src/pq/__init__.mojo:290` の表 | 触っていない（`TIMEOUT` / `CONNECTION` / `USAGE` の 3 種はいずれも残るため記述は正しい） |
-
-汎用メッセージは src から消えた: `grep -c 'POLLHUP/POLLERR' src/pq/async_conn.mojo` → **0**（rc 1）。
-
-### (b) 呼び出し側 3 箇所の busy loop 否定（コードレビュー。コード変更なし）
-
-| 呼び出し側 | return 直後の libpq 呼び出し | 失敗の報告のされ方 |
+| テスト | 修正前の赤 | 対応する指摘 |
 |---|---|---|
-| `_poll_to_ready`（`:830-834`。`while True` の connect 駆動） | ループ先頭に戻り `poll_connect()` → `PQconnectPoll` | `PQconnectPoll` が `SO_ERROR` を読んで `PGRES_POLLING_FAILED` → `poll_connect` が `CONNECTION`（libpq の `Connection refused`）を raise。1 周で終わる |
-| `_wait_for`（`:1466-1470`。`fetch_all` の `SENDING` 分岐 → `flush()`） | `flush()` → `PQflush` | 送信が失敗した接続では `PQflush` が `-1` → `flush` が `_connection_error()` を raise、`0` を返した場合は状態が `BUSY` に進み次周の `poll_result` → `PQconsumeInput` が 0 を返して `CONNECTION`。どちらでも 1〜2 周で終わる（`1` を返し続けるには送信可能であることが必要 = hangup のみの状態と両立しない） |
-| `_collect_notifications`（`:1658-1664`） | ループ先頭に戻り `notifications()` → `PQconsumeInput` | EOF / エラーの `recv` で `PQconsumeInput` が 0 → `_connection_error()`（`server closed the connection unexpectedly` 等）。`except` が `_restore_collected(out)` してから raise するので収集済み通知も失われない。1 周で終わる |
+| `test_commit_during_a_copy_is_refused_and_the_block_stays_open` | `finish()` 後の `tx.commit()` が `USAGE transaction already ended` | 1（`_done` が送信前に立つ） |
+| `test_rollback_during_a_copy_is_refused_and_the_block_stays_open` | 同上（`tx.rollback()`） | 1 |
+| `test_transaction_destroyed_before_its_copy_in` | handler 1 回（`c` = `CONNECTION`）、期待は 0 回 | 2（既に終わった COPY に中止を送る誤報） |
+| `test_transaction_destroyed_before_its_copy_out` | handler 1 回（`c`）、期待は 0 回 | 2（`CopyOut` 側） |
+| `test_a_failed_write_leaves_a_connection_that_reports_connection` | 失敗 `write` の後の `execute` が `USAGE`（期待は `CONNECTION`） | 3（`-1` の後に COPY 状態が残る） |
 
-### (c) テストの変更（`tests/test_poll.mojo` 1 テスト）
+- **`test_finish_after_the_socket_is_closed_is_connection` は修正前から green**。`close` 後の `finish()` は
+  `PQputCopyEnd` が `rc >= 0` を返す経路に入り、既存の `_copy_final_result` が drain していたため。
+  これは陽性対照ではなく REQ §4.2「途中切断で `finish` が `CONNECTION`」の未テスト分の追加（F1 (d) ④）。
+  `finish` / `abort` の `rc < 0` 側に足した drain（F1 (b)）はこの経路に入らないので、テストでは踏めていない
+- 修正後は **26 tests 全 green**（`check` の 5/6 段でも PG17 / PG14 両方 green）
 
-`test_socketpair_peer_close_sets_hangup_both_ways`: `readable.readable` / `readable.hangup` / `writable.hangup` の 3 assert は両 OS 共通のまま、
-`assert_true(writable.writable)` だけを `if CompilationTarget.is_linux():` の下に置いた（`test_leak.mojo:77,787` と同じ import / 判定の形）。
-macOS では `writable` を assert しない。テスト数 **11 不変**、既存テストの期待値変更は **0 件**。
+## `check` の所要（turn 13 / F1 完了時点・クリーン状態）
 
-### (e) 期待結果の実測（PLAN F2 (e) の表）
+`db-reset` → `check` を 1 回。**280 s**（`21:53:36` -> `21:58:16`、`build/final_check.log` の `=== [1/6` と `=== [6/6` の時刻）、
+`final_check: PASS`。**T9 (b) の閾値 300 s 内なので訂正は不要**（turn 11 の 298 s から -18 s。テストは 5 件増えているが
+母数の揺れの範囲内）。
 
-| 条件 | 結果 |
-|---|---|
-| `grep -c 'POLLHUP/POLLERR' src/pq/async_conn.mojo` | **0**（rc 1） |
-| `grep -c 'is_linux' tests/test_poll.mojo` | **1**（≥ 1） |
-| `pixi run mojo run -I src tests/test_poll.mojo` | **11 tests run: 11 passed, 0 failed** |
-| `pixi run mojo run -I src tests/test_async.mojo`（54317） | **31 tests run: 31 passed, 0 failed**（`test_connect_failures_name_their_cause` PASS） |
-| `pixi run check`（`db-reset` の後） | **6/6 PASS = 190 s**（12:02:54 → 12:06:04、閾値 247 s）、6/6 段 `matched lines in build/final_check.log: 0`、`final_check: PASS`、両サーバー `SKIP` 1 件ずつ（`test_interval_infinity_*` の PG 版差） |
-| `pixi run package` | 警告 0（出力は pixi のタスク行のみ） |
-| checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | **0 / 24 / 1・3・3（不変）** |
+- 段ごと: 1/6 fmt 1 s（差分 0）/ 2/6 precompile 3 s / 3/6 docstring 3 s / 4/6 examples 18 s（7 本）/
+  **5/6 tests 255 s** / 6/6 warnings 0 s（`matched lines: 0`）
+- テストケースの `PASS` 行 **1534**（turn 11 / turn 12 の 1524 + 新規 5 件 × 2 サーバー）、`FAIL` 行 **0**
+- 参考: テスト直後の**非クリーン**な 1 回目は 360 s（`21:46:18` -> `21:52:18`）。同じ木で 280 / 360 s なので、
+  所要はコンパイルキャッシュと同時負荷に支配される（turn 11 の「母数の揺れ 260〜425 s」と同じ性質）
 
-**macOS の `test_connect_failures_name_their_cause` の PASS はローカル（Linux）では観測できない**（Linux は `POLLOUT` を伴うので (a) の分岐に入らず経路差が出ない）。
-CI の macOS ジョブでの判定は verify round 3。
+## チェックリスト（turn 13）
 
-## チェックリスト（turn 12）
+`scratch/turn-013-checklist.log`、**全 77 key**。turn 12 からの差分は
+**`test_copy_tests` の 21 → 26 の 1 行だけ**（`diff turn-012-checklist.log turn-013-checklist.log`）。
+`absent` **0 件**、他の 76 key は turn 12 と完全一致。この節を足した後に回し直すと `trace_checklist_section` が
+8 → 9 になるだけ（`scratch/turn-013-checklist-after-trace.log`。期待値 `≥ 1` を維持）。
 
-`scratch/turn-012-checklist.log`（全 101 key。この節を書く前に採取）。**turn 11 のログとの差分は 1 行だけ**
-（turn 11 が「チェックリスト（turn 11）」の見出しを足した分の単調増加。この節を足した後は 9 になる）:
+## PLAN 訂正（turn 13）
 
-```
-11c11
-< trace_checklist_section=7
----
-> trace_checklist_section=8
-```
-
-PLAN 訂正は **0 件**（F2 の期待結果は表のとおり実測と一致）。
-
-## F3 `poll_connect` の初回 `NEED_WRITE` + `is_leaking` の段除外（turn 14）
-
-### (a) src の変更（`src/pq/async_conn.mojo` フィールド 1 + `poll_connect` のみ）
-
-| 箇所 | 変更 |
-|---|---|
-| フィールド（`_single_row_allowed` の手前） | `var _connect_polled: Bool` を追加（docstring 付き。libpq の「`PQconnectStart` 直後は `PGRES_POLLING_WRITING` が返ったものとして扱え」の契約と、先に `PQconnectPoll` を呼ぶと拒否記録前の `SO_ERROR` を読んで multi-host の乗り換えを失うことを書いた） |
-| `__init__` | `self._connect_polled = False`（`_setup_pending` の次の行） |
-| `poll_connect` 本体 | `_setup_pending` の分岐の直後に `if not self._connect_polled: self._connect_polled = True; return PollState.NEED_WRITE`（3 行）。`PQconnectPoll` 以降は不変 |
-| `poll_connect` docstring | 「The first answer is not fixed -- libpq may want either direction…」を「最初の答えは常に `NEED_WRITE`。libpq は `PQconnectStart` 直後を `PGRES_POLLING_WRITING` として定義しており、その待ちの前に `PQconnectPoll` を呼ぶとカーネルが拒否を記録する前に `SO_ERROR` を読む（macOS で実測。拒否が次ホストへの乗り換えでなく read の失敗として出る）」に書き換え |
-
-`wait_readable` / `wait_writable` / `_poll_to_ready` / `connect_blocking` / `src/pq/__init__.mojo` は**触っていない**（`__init__.mojo:205` の「`start` then `poll_connect` until it answers READY」は依然正しい）。
-
-### (b) テストの変更（`tests/test_async.mojo` 2 件 / `tests/test_leak.mojo` 3 件）
-
-| ファイル | 変更 | 種類 |
-|---|---|---|
-| `test_async.mojo` `test_manual_connect_polling` | 最初の assert を `step == PollState.NEED_WRITE` に締め、コメントを契約の説明に差し替え | **既存テストの期待値の変更 1 件** |
-| `test_async.mojo` | 新 `test_first_poll_connect_is_need_write_even_when_refused`（port 1 → 初回 `NEED_WRITE` で raise せず、続く `_poll_connect_to_failure` が `CONNECTION` + `Connection refused`）。31 → **32** | 追加 |
-| `test_leak.mojo` `is_leaking` | 総成長が許容超えのとき、**上昇がちょうど 1 回 + その後 2 サンプル以上**なら False（段の形で除外）。単調増加の規則は不変。tail が段を超えないことは「上昇 1 回」が含意するので別ループは置かない（コメントに明記） | 規則追加 |
-| `test_leak.mojo` docstring 2 箇所 | `is_leaking` に 3 つ目の説明、`TOLERANCE_PAGES` の「256 pages (1 MiB) clears two such steps」を「段は大きさでなく形で除外。x86_64 ランナーで 513 ページの段を実測（run `39092567451`）。aarch64 は 84、開発機は 1」に更新 | 文書 |
-| `test_leak.mojo` | 単体 2 件（`test_is_leaking_accepts_a_single_step_plateau` = `[100 ×4, 613 ×5]` tol 16 → False / `test_is_leaking_detects_two_steps_beyond_tolerance` = `[100, 100, 300 ×3, 520 ×4]` tol 16 → True）。18 → **20** | 追加 |
-
-既存 4 件の `is_leaking` 単体は**不変で PASS**（`[100, 100, 100, 120]` は段の後のサンプルが 0 なので従来どおり True）。
-
-### 陽性対照（実装前に 1 回走らせた）
-
-新テストを**先に**足して旧コードで `pixi run mojo run -I src tests/test_async.mojo` を実行 → `FAIL [ 0.080 ] test_first_poll_connect_is_need_write_even_when_refused` /
-`PgError(kind=Connection, message=Connection refused …)`（**Linux では初回 `poll_connect` が既に `SO_ERROR` を読んで raise していた** = 契約違反がローカルでも観測できる）。
-同じ run で `test_manual_connect_polling` は締めた assert のまま PASS 済み（Linux の初回は元から `NEED_WRITE`）。(a) 実装後は 32 PASS。
-
-### (d) 期待結果の実測（PLAN F3 (d) の表）
-
-| 条件 | 結果 |
-|---|---|
-| `grep -c 'PGRES_POLLING_WRITING' src/pq/async_conn.mojo` | **4**（≥ 1。定数 3 + docstring 1） |
-| `grep -c '^def test_' test_async / test_leak / test_poll` | **32 / 20 / 11** |
-| `pixi run mojo run -I src tests/test_async.mojo`（54317） | **32 tests run: 32 passed, 0 failed** |
-| `pixi run mojo run -I src tests/test_leak.mojo`（54317） | **20 tests run: 20 passed, 0 failed**（72.9 s）。`connect/query/close RSS pages: [47947, 47948, 47948, 47948, 47948, 47948, 47948, 47948, 47948]`（開発機は 1 ページの上昇 1 回 = 許容内で段の規則に届かない） |
-| `pixi run check`（`db-reset` の後） | **6/6 PASS = 188 s**（12:32:49 → 12:35:57、閾値 247 s）、6/6 段 `matched lines in build/final_check.log: 0`、`final_check: PASS`、両サーバー `skipped 1` |
-| `pixi run package` | 警告 0（出力は pixi のタスク行のみ） |
-| F2 / F1 の回帰 grep | `POLLHUP/POLLERR` **0** / `is_linux` **1** / `cache: false` **1 + 3** / `locked: true`・`cache: true` **0 + 0**（すべて不変） |
-| checklist `src_def_ref_return` / `test_file_count` / `async_*` 4 key | **0 / 24 / 1・3・3（不変）** |
-
-**F3 ① の受け入れはローカル（Linux）では完結しない**: multi-host の乗り換えが競合で壊れるのは macOS だけなので、`test_multi_host_conninfo_reaches_the_second_host` の判定は CI の macOS ジョブ（verify round 4）。
-② は x86_64 ランナーの非決定的な段なので、**round 4 で赤が出なくても「段が出なかっただけ」の可能性がある**（段が出た系列は CI ログの `connect/query/close RSS pages:` 行で判別できる）。
-
-## チェックリスト（turn 14）
-
-`scratch/turn-014-checklist.log`（全 101 key。この節を書く前に採取）。**turn 13 のログとの差分は 0 行**
-（`trace_checklist_section=10`。この節と「F3」節を足した後は 12 になる）。
-
-PLAN 訂正は **0 件**（F3 の期待結果は表のとおり実測と一致）。
+1. **決めた事項 13 の「`-1` の後は libpq を呼ばない」を「`PQerrorMessage` を先に 1 回読んでから `PQputCopyEnd(0)` + drain で終端する」に訂正**。
+   根拠は verify turn 12 の probe（`scratch/turn-012-probe-failed-write{,-end}.mojo`）と F1 (b) の実測: 呼ばないままだと libpq が
+   COPY 状態（`PQTRANS_ACTIVE`）に残り、以後の `execute` / `transaction()` / `prepare` が全部 `USAGE a COPY is in progress` になって
+   `reset()` 以外に出口が無い。P11（`PQerrorMessage` の追記肥大）は「終端の**前に**読む」で回避できるので、要件・決定に反しない。
+   PLAN の「決めた事項 13」の本文を直した
+2. **F1 (f) の「陽性対照は不要」は、④ については成立しなかった**（上の「陽性対照（turn 13 / F1 (f)）」節）。
+   ④ は修正前から green で、指摘 3 の対照は ③ 1 本だけ。PLAN 側の表記は変えていない（④ は REQ §4.2 の未テスト分として残す価値がある）

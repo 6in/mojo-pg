@@ -5,13 +5,18 @@ Phase 2 adds `params`, `prepared`, `transaction`. Phase 3 adds
 `decode_binary`, `types_numeric`, `types_datetime` and `types_uuid` -- the
 binary decoders and the value types for PostgreSQL types Mojo has no
 built-in for. Phase 4 adds `_platform/poll` and `async_conn` -- the
-non-blocking connection and the one `poll(2)` call it waits on.
+non-blocking connection and the one `poll(2)` call it waits on. Phase 7 adds
+`copy` and `pool` -- the two `COPY` streams and the single-threaded
+connection pool; the array codecs needed no module of their own and went
+into `decode_text`, `decode_binary` and `encode_binary` beside the scalars.
 
 Everything needed to open a connection, run a statement and read the rows
 back is re-exported here, so `from pq import Connection, PgError` is enough:
 `Connection`, `Result`, `Row`, `ResultFormat` for the `result_format`
 argument, `PgError`, `PgErrorKind`, `Param` for `execute(sql, params)`,
-`PreparedStatement`, `Transaction`, `AsyncConnection` with its `AsyncState`,
+`PreparedStatement`, `Transaction`, `CopyIn` and `CopyOut` for the two
+`COPY` directions, `Pool` with the `PooledConnection` guard its `acquire`
+hands out, `AsyncConnection` with its `AsyncState`,
 `PollState` and `Notification`, the `Decimal`, `UUID`, `Date`, `Timestamp`,
 `TimestampTz`, `Time`, `TimeTz` and `Interval` value types for the
 PostgreSQL types that have no Mojo equivalent, the `CONNECTION_OK` /
@@ -59,7 +64,17 @@ arrives whole. What `pq` still does not do is set `client_encoding`; see
 | json | 114 | `String` | as-is, UTF-8 checked | same |
 | jsonb | 3802 | `String` | as-is, UTF-8 checked | same, leading version byte (1) stripped before the check |
 | bytea | 17 | `List[UInt8]` | `\\x` hex form only | the raw bytes |
+| T[] (1-D array of any row above) | the element's typarray (int4[] = 1007) | `List[T]` / `List[Optional[T]]` | array literal `{1,2}`, with quoting and `\\` escapes | `array_send`: ndim / flags / elemtype / dim / lbound, then the elements |
 | anything else | -- | `String` in text, nothing in binary | as-is | `TYPE_MISMATCH`, pointing at `ResultFormat.TEXT` |
+
+Arrays are **one-dimensional only**: a column holding more dimensions is a
+`TYPE_MISMATCH`, as is an element OID that does not match `T` exactly -- an
+`int2[]` column read as `List[Int32]` fails the same way an `int2` column
+read as `Int32` does. A text-format `[0:1]=` lower-bound prefix is dropped.
+A problem inside an element reads `array element N: <the element's own
+message>` with N counted from 0, and a NULL element asked for through
+`List[T]` rather than `List[Optional[T]]` is `NULL_VALUE` reading `array
+element N is NULL`.
 
 `pq.decode_text.decode_text` and `pq.decode_binary.decode_binary` implement
 one column of the table each, and are the two places to change when a type
@@ -156,6 +171,7 @@ wire format and the OID sent in `paramTypes`:
 | `Interval` | binary, 8 + 4 + 4 byte BE | 1186 | µs, days, months |
 | `String`, `StringLiteral` | text, NUL-terminated | 0 | server infers |
 | `List[UInt8]` | binary, with length | 17 | empty / NUL-containing ok |
+| `List[T]`, `List[Optional[T]]` | binary, `array_send` form | the element's typarray | `List[String]` is 1009 (`text[]`), `List[Int]` is 1016 |
 | NULL | NULL | 0, or the given OID | see below |
 
 A SQL NULL is `Param.null()` when the statement determines the type, and
@@ -163,6 +179,11 @@ A SQL NULL is `Param.null()` when the statement determines the type, and
 `Optional[T]` of any row of the table converts implicitly as well, but a
 bare `None` literal does not, so write the type out:
 `Optional[Int](None)`, or `var x: Optional[Int] = None` and pass `x`.
+
+A `List` parameter built as a literal inside the call needs nothing special,
+but a **named** list has to be handed over: `execute(sql, [ids^])` moves it,
+`execute(sql, [ids.copy()])` keeps it usable afterwards, and a bare `[ids]`
+does not compile. An empty `List` is a valid empty array, not a NULL.
 
 `PreparedStatement.execute(params)` is stricter about width than
 `Connection.execute(sql, params)`: the types were fixed when the server
@@ -181,6 +202,31 @@ enclosing scope -- which is where the implicit `ROLLBACK` or the
 `commit()` or `rollback()`, or write `_ = tx^` / `_ = stmt^`, and only
 *after* that line inspect the outcome with `conn.execute`. `_ = x^` is a
 "keep it alive until here" marker, not an eager free.
+
+## COPY
+
+`Connection.copy_in(sql)` / `Transaction.copy_in(sql)` start a `COPY ...
+FROM STDIN` and return a `CopyIn[origin]`: `write` the rows, then `finish()`
+for the `Result` whose `affected_rows()` is the count, or `abort(message)`
+to cancel. `copy_out(sql)` returns a `CopyOut[origin]` read with `next()`
+until it answers None -- it is deliberately **not** an `Iterator`, because
+Mojo 1.1.0's `Iterator` cannot raise `PgError`. Both guards end the `COPY`
+when they drop, like `Transaction`. `pq` never inspects the bytes, so a
+malformed row only surfaces at `finish()`, and every other command on the
+connection is `USAGE` while a `COPY` is in progress.
+
+## Connection pool
+
+`Pool.open(conninfo, max_size)` (or the `Dict` overload) keeps up to
+`max_size` connections; `acquire()` hands out a `PooledConnection[origin]`
+that returns its connection when it drops, and forwards `execute`,
+`prepare`, `transaction`, `copy_in` and `copy_out` to it. Asking past
+`max_size` is `USAGE` (`pool exhausted: ...`) rather than a wait: the pool
+is **not thread-safe** and there is no thread to wait on. A returned
+connection is rolled back if it is in a transaction, and dropped rather than
+reused if it is unhealthy or older than `max_lifetime_s`; what a session
+leaves behind otherwise -- `SET`, prepared statements, temp tables,
+`LISTEN`, advisory locks -- stays. `close()` closes every idle connection.
 
 ## Asynchronous use
 
@@ -335,8 +381,10 @@ from ._ffi.types import (
 )
 from .async_conn import AsyncConnection, AsyncState, Notification, PollState
 from .connection import Connection
+from .copy import CopyIn, CopyOut
 from .errors import PgError, PgErrorKind
 from .params import Param
+from .pool import Pool, PooledConnection
 from .prepared import PreparedStatement
 from .result import Result, ResultFormat, Row
 from .transaction import Transaction

@@ -28,9 +28,15 @@ from pq._ffi.types import (
     MutRawPtr,
     OidPtr,
     PGconnPtr,
+    PGRES_COMMAND_OK,
+    PGRES_COPY_IN,
+    PGRES_COPY_OUT,
+    PGRES_TUPLES_OK,
     PGresultPtr,
+    PQTRANS_ACTIVE,
     PQTRANS_IDLE,
 )
+from pq.copy import CopyIn, CopyOut, _drain_copy_out, _drain_results
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param, _ParamBuffers
 from pq.prepared import PreparedStatement
@@ -263,10 +269,12 @@ struct Connection(Movable):
         an earlier statement fails, that statement's error is raised and no
         result is returned.
 
-        `COPY ... TO STDOUT` and `COPY ... FROM STDIN` are not supported: they
-        raise `PgErrorKind.SERVER` with `unexpected result status 3` or `4`,
-        and libpq brings the connection back to a usable state on the next
-        `execute`.
+        `COPY ... FROM STDIN` and `COPY ... TO STDOUT` belong to `copy_in` and
+        `copy_out`. Passed here they still raise `PgErrorKind.SERVER` with
+        `unexpected result status 4` or `3`, but the COPY the server had
+        started is cancelled and drained before the raise -- the same path a
+        wrong-direction `copy_in` takes -- so the connection is idle again and
+        the next `execute` works.
 
         Results always come back in text form here: `PQexec` has no
         `resultFormat` argument, so this overload takes no `result_format`
@@ -286,9 +294,10 @@ struct Connection(Movable):
 
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
-                byte, `PgErrorKind.CONNECTION` when libpq returns no result at
-                all, or when the connection was lost while running `sql` and
-                libpq reported it without an SQLSTATE, or
+                byte, `PgErrorKind.USAGE` when a COPY is in progress on this
+                connection, `PgErrorKind.CONNECTION` when libpq returns no
+                result at all, or when the connection was lost while running
+                `sql` and libpq reported it without an SQLSTATE, or
                 `PgErrorKind.SERVER` when the server reports a diagnostic. (A
                 disconnect the server announced as a FATAL *with* an SQLSTATE
                 is therefore still `SERVER` for that statement, and the next
@@ -297,11 +306,13 @@ struct Connection(Movable):
                 `context` when libpq supplies them.
         """
         _reject_nul(sql, "sql")
+        self._check_not_copying()
         var res = self._pq[].PQexec(
             self._conn,
             CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
         )
         _ = sql^
+        self._discard_copy_state(res)
         return self._take_result(res)
 
     def execute(
@@ -371,9 +382,10 @@ struct Connection(Movable):
 
         Raises:
             PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
-                byte, `PgErrorKind.USAGE` when the value of a `String`
-                parameter contains a NUL byte (`embedded NUL byte in
-                parameter $N`; nothing is sent to the server), and
+                byte, `PgErrorKind.USAGE` when a COPY is in progress on this
+                connection or when the value of a `String` parameter contains
+                a NUL byte (`embedded NUL byte in parameter $N`; nothing is
+                sent to the server in either case), and
                 `PgErrorKind.CONNECTION` or `PgErrorKind.SERVER` under
                 exactly the classification `_take_result` applies --
                 `CONNECTION` when libpq returns no result at all or the
@@ -383,6 +395,7 @@ struct Connection(Movable):
                 `position` and `context` when libpq supplies them.
         """
         _reject_nul(sql, "sql")
+        self._check_not_copying()
         var buffers = _ParamBuffers(params)
         var res = self._pq[].PQexecParams(
             self._conn,
@@ -396,6 +409,7 @@ struct Connection(Movable):
         )
         _ = buffers^
         _ = sql^
+        self._discard_copy_state(res)
         return self._take_result(res)
 
     def _next_stmt_name(self) -> String:
@@ -526,8 +540,12 @@ struct Connection(Movable):
 
         Raises:
             PgError: Exactly what `prepare` documents, for either round trip.
+                The COPY guard lives here rather than in `prepare`, so
+                `Transaction.prepare` is refused while a COPY is in progress
+                too.
         """
         _reject_nul(sql, "sql")
+        self._check_not_copying()
         var name = self._next_stmt_name()
         # One dummy element past the hints, so `unsafe_ptr()` is a valid
         # non-NULL address even for an empty list -- the same rule
@@ -702,6 +720,45 @@ struct Connection(Movable):
         """
         return Int(self._pq[].PQstatus(self._conn))
 
+    def reset(self) raises PgError:
+        """Reconnect with `PQreset` and pin the session settings again.
+
+        `PQreset` closes the socket and reconnects with the parameters the
+        connection was opened with, so the `PGconn*` -- and therefore every
+        `Transaction`, `PreparedStatement`, `CopyIn` or `CopyOut` origin bound
+        to it -- stays valid while the backend behind it is replaced.
+
+        Three consequences are worth knowing before calling this:
+
+        * It reconnects **unconditionally**, so calling it on a healthy
+          connection also replaces the backend: `pg_backend_pid()` reports a
+          different value afterwards. Nothing here tests `PQstatus` first.
+        * The new session starts with the server's own `DateStyle`, which is
+          why `_SESSION_SETUP_SQL` is re-sent: measured on PG14 and PG17, a
+          bare `PQreset` leaves `DateStyle` at `ISO, MDY`, and the text date
+          decoders only read `ISO, YMD`.
+        * Server-side state is gone with the old backend. Prepared statements
+          no longer exist, so the `DEALLOCATE` a live `PreparedStatement`
+          sends on destruction fails and is silently ignored, and temporary
+          tables, `LISTEN` registrations and any open transaction are lost.
+
+        Raises:
+            PgError: `PgErrorKind.CONNECTION` when the reconnect failed,
+                carrying libpq's own `PQerrorMessage` text; the connection is
+                left open (and bad) so the caller may retry. Otherwise
+                whatever `execute` raises for the session setup `SET`, under
+                the classification `_take_result` applies.
+        """
+        self._pq[].PQreset(self._conn)
+        if self._pq[].PQstatus(self._conn) != CONNECTION_OK:
+            raise PgError(
+                PgErrorKind.CONNECTION,
+                String(
+                    unsafe_from_utf8_ptr=self._pq[].PQerrorMessage(self._conn)
+                ),
+            )
+        _ = self.execute(String(_SESSION_SETUP_SQL))
+
     def transaction_status(self) -> Int:
         """Return the transaction status as reported by `PQtransactionStatus`.
 
@@ -752,9 +809,33 @@ struct Connection(Movable):
                 `CONNECTION_BAD`, carrying libpq's own `PQerrorMessage` text;
                 `PgErrorKind.USAGE` when the connection is not idle
                 (`transaction() requires an idle connection (transaction
-                status N)`, `N` being the `PQTRANS_*` value); otherwise
-                whatever `execute("BEGIN")` raises.
+                status N)`, `N` being the `PQTRANS_*` value, or `a COPY is in
+                progress on this connection`); otherwise whatever
+                `execute("BEGIN")` raises.
         """
+        self._transaction_parts()
+        return Transaction[origin_of(self)](
+            Pointer(to=self), self._rollback_failure_handler
+        )
+
+    def _transaction_parts(self) raises PgError:
+        """Run the checks and the `BEGIN` that `transaction()` needs.
+
+        This is the whole of `transaction()` except the final construction,
+        split out for the same reason `_prepare_parts` is: the origin a
+        `Transaction` is parameterised on has to be written by whoever holds
+        the borrow, so `Pool`'s `PooledConnection.transaction` builds the
+        value itself from these parts rather than calling `transaction()`
+        through a `Pointer`.
+
+        `self` is borrowed immutably -- nothing here writes a field -- so it
+        is callable through the immutable borrow a `PooledConnection` holds.
+
+        Raises:
+            PgError: Exactly what `transaction()` documents, plus
+                `PgErrorKind.USAGE` when a COPY is in progress.
+        """
+        self._check_not_copying()
         if self._pq[].PQstatus(self._conn) == CONNECTION_BAD:
             raise PgError(
                 PgErrorKind.CONNECTION,
@@ -774,7 +855,265 @@ struct Connection(Movable):
                 ),
             )
         _ = self.execute("BEGIN")
-        return Transaction[origin_of(self)](
+
+    def _check_not_copying(self) raises PgError:
+        """Refuse a command while a COPY is in progress on this connection.
+
+        libpq does not refuse it: a `PQexec` issued during a COPY silently
+        ends the COPY first -- **discarding every row written so far** -- and
+        then runs the new command successfully. Measured on PG14 and PG17, a
+        `SELECT 1` sent after two `copy_in` writes returns its row and the two
+        rows are gone. Turning that silent data loss into an error is the
+        whole point of this check, which is why it guards `execute`,
+        `_prepare_parts`, `_transaction_parts`, `_copy_in_parts`,
+        `_copy_out_parts` and `PreparedStatement.execute`.
+
+        A synchronous connection reports `PQTRANS_ACTIVE` only while a COPY is
+        open -- `PQexec` does not return until the command it sent is
+        finished -- so no extra state is tracked here.
+
+        `escape_literal` and `escape_identifier` are not guarded: they are
+        client-side and send nothing.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` (`a COPY is in progress on this
+                connection`) while a `CopyIn` or `CopyOut` is open on this
+                connection.
+        """
+        if self._pq[].PQtransactionStatus(self._conn) == PQTRANS_ACTIVE:
+            raise PgError(
+                PgErrorKind.USAGE,
+                "a COPY is in progress on this connection",
+            )
+
+    def _discard_copy_state(self, res: PGresultPtr):
+        """End a COPY that `execute` was handed by mistake, before it raises.
+
+        A `COPY` statement passed to `execute` comes back as `PGRES_COPY_IN`
+        or `PGRES_COPY_OUT`, which `adopt_result` rejects -- but libpq has
+        already put the connection into the COPY state, and until something
+        ends it the connection is not idle. Historically the next `execute`
+        cleaned it up silently; ending it here instead means the error
+        `execute` is about to raise leaves the connection exactly as usable
+        as any other failed statement does.
+
+        The result itself is left alone, so `_take_result` still classifies it
+        as `unexpected result status 4` or `3`.
+
+        Args:
+            res: The result `PQexec` or `PQexecParams` just returned, as-is
+                including NULL.
+        """
+        if res.is_null():
+            return
+        var status = self._pq[].PQresultStatus(res)
+        if status == PGRES_COPY_IN:
+            var message = String("COPY not supported by execute()")
+            _ = self._pq[].PQputCopyEnd(
+                self._conn, Int(message.as_c_string_span().ptr())
+            )
+            _ = message^
+            _drain_results(self._pq, self._conn)
+        elif status == PGRES_COPY_OUT:
+            _ = _drain_copy_out(self._pq, self._conn)
+            _drain_results(self._pq, self._conn)
+
+    def _copy_in_parts(self, var sql: String) raises PgError:
+        """Send `sql` and confirm the server is waiting for COPY input.
+
+        This is the whole of `copy_in` except the final construction, split
+        out for the same reason `_prepare_parts` is: the origin a `CopyIn` is
+        parameterised on has to be written by whoever holds the borrow, so
+        `Transaction.copy_in` builds the value itself from these parts.
+
+        Anything other than `PGRES_COPY_IN` leaves no COPY behind: a
+        `PGRES_COPY_OUT` -- the caller asked for `TO STDOUT` through the wrong
+        method -- is drained here, and a statement that simply ran is drained
+        too, so the `USAGE` error this raises leaves an idle connection. A
+        *failed* statement is not the caller's misuse of the API, so it is
+        classified by `_take_result` instead: `COPY nonexistent FROM STDIN` is
+        `PgErrorKind.SERVER` with `42P01`, not `USAGE`.
+
+        Args:
+            sql: The `COPY ... FROM STDIN` statement to send. Further
+                statements may follow it, separated by semicolons; their
+                results are drained when the stream ends.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte; `PgErrorKind.USAGE` when a COPY is already in progress,
+                or when `sql` was not a `COPY ... FROM STDIN`
+                (`copy_in() requires a COPY ... FROM STDIN statement (result
+                status N)`, `N` being the `PGRES_*` value seen); otherwise
+                whatever `_take_result` raises for the statement.
+        """
+        _reject_nul(sql, "sql")
+        self._check_not_copying()
+        var res = self._pq[].PQexec(
+            self._conn,
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+        )
+        _ = sql^
+        if res.is_null():
+            # `_take_result` raises CONNECTION for a NULL result, and libpq
+            # allocated nothing to clear.
+            _ = self._take_result(res)
+            return
+        var status = self._pq[].PQresultStatus(res)
+        if status == PGRES_COPY_IN:
+            self._pq[].PQclear(res)
+            return
+        if status == PGRES_COPY_OUT:
+            self._pq[].PQclear(res)
+            _ = _drain_copy_out(self._pq, self._conn)
+            _drain_results(self._pq, self._conn)
+        elif status == PGRES_TUPLES_OK or status == PGRES_COMMAND_OK:
+            self._pq[].PQclear(res)
+            _drain_results(self._pq, self._conn)
+        else:
+            # A failure the server or libpq reported. Every such status makes
+            # `adopt_result` raise, so this is the error the caller sees.
+            _ = self._take_result(res)
+        raise PgError(
+            PgErrorKind.USAGE,
+            String(
+                "copy_in() requires a COPY ... FROM STDIN statement ",
+                "(result status ",
+                Int(status),
+                ")",
+            ),
+        )
+
+    def _copy_out_parts(self, var sql: String) raises PgError:
+        """Send `sql` and confirm the server is sending COPY output.
+
+        The mirror image of `_copy_in_parts`, including why it exists and why
+        a failed statement is `SERVER` rather than `USAGE`. A `PGRES_COPY_IN`
+        -- the caller asked for `FROM STDIN` through the wrong method -- is
+        cancelled with `PQputCopyEnd` before being drained, since there is no
+        data to read in that direction.
+
+        Args:
+            sql: The `COPY ... TO STDOUT` statement to send. Further
+                statements may follow it, separated by semicolons; their
+                results are drained when the stream ends.
+
+        Raises:
+            PgError: `PgErrorKind.TYPE_MISMATCH` when `sql` contains a NUL
+                byte; `PgErrorKind.USAGE` when a COPY is already in progress,
+                or when `sql` was not a `COPY ... TO STDOUT`
+                (`copy_out() requires a COPY ... TO STDOUT statement (result
+                status N)`, `N` being the `PGRES_*` value seen); otherwise
+                whatever `_take_result` raises for the statement.
+        """
+        _reject_nul(sql, "sql")
+        self._check_not_copying()
+        var res = self._pq[].PQexec(
+            self._conn,
+            CStr(unsafe_from_address=Int(sql.as_c_string_span().ptr())),
+        )
+        _ = sql^
+        if res.is_null():
+            _ = self._take_result(res)
+            return
+        var status = self._pq[].PQresultStatus(res)
+        if status == PGRES_COPY_OUT:
+            self._pq[].PQclear(res)
+            return
+        if status == PGRES_COPY_IN:
+            self._pq[].PQclear(res)
+            var message = String("wrong direction")
+            _ = self._pq[].PQputCopyEnd(
+                self._conn, Int(message.as_c_string_span().ptr())
+            )
+            _ = message^
+            _drain_results(self._pq, self._conn)
+        elif status == PGRES_TUPLES_OK or status == PGRES_COMMAND_OK:
+            self._pq[].PQclear(res)
+            _drain_results(self._pq, self._conn)
+        else:
+            _ = self._take_result(res)
+        raise PgError(
+            PgErrorKind.USAGE,
+            String(
+                "copy_out() requires a COPY ... TO STDOUT statement ",
+                "(result status ",
+                Int(status),
+                ")",
+            ),
+        )
+
+    def copy_in(
+        ref self, var sql: String
+    ) raises PgError -> CopyIn[origin_of(self)]:
+        """Start `sql` as a `COPY ... FROM STDIN` and return its input stream.
+
+        Write rows to the returned `CopyIn` and end it with `finish()`, which
+        returns the `Result` whose `affected_rows()` is the row count. The
+        bytes are not interpreted here at all: they must already be in the
+        format the `COPY` command named, text by default.
+
+        Nothing else may be done with this connection until the stream ends:
+        `execute`, `prepare`, `transaction`, `copy_in` and `copy_out` all
+        raise `PgErrorKind.USAGE` meanwhile, because libpq would otherwise
+        discard the rows written so far without saying so.
+
+        The returned value borrows the connection immutably, so it is bound to
+        the connection's origin: using it after the connection has been
+        **moved away** (`var c2 = conn^`, or passing `conn^` to a function) is
+        a compile error. Destroying it without `finish()` or `abort()` cancels
+        the COPY, so no row is stored and the connection is left idle; see the
+        `pq.copy` module docstring for when Mojo destroys it.
+
+        Args:
+            sql: A `COPY ... FROM STDIN` statement, optionally followed by
+                further statements separated by semicolons.
+
+        Returns:
+            A `CopyIn` bound to this connection's origin, holding a copy of
+            the current rollback-failure handler.
+
+        Raises:
+            PgError: Exactly what `_copy_in_parts` documents --
+                `PgErrorKind.USAGE` for a statement that is not a `COPY ...
+                FROM STDIN` or for a COPY already in progress,
+                `PgErrorKind.SERVER` with `42P01` for a COPY naming a table
+                that does not exist.
+        """
+        self._copy_in_parts(sql^)
+        return CopyIn[origin_of(self)](
+            Pointer(to=self), self._rollback_failure_handler
+        )
+
+    def copy_out(
+        ref self, var sql: String
+    ) raises PgError -> CopyOut[origin_of(self)]:
+        """Start `sql` as a `COPY ... TO STDOUT` and return its output stream.
+
+        Read rows from the returned `CopyOut` with `next()` until it answers
+        `None`. It is deliberately not an `Iterator`; the `pq.copy` module
+        docstring explains why `for` is not available.
+
+        Nothing else may be done with this connection until the stream ends,
+        exactly as for `copy_in`. Destroying the stream early reads the rest
+        of it and discards it, which is what leaves the connection usable.
+
+        The returned value borrows the connection immutably, with the same
+        origin consequences `copy_in` documents.
+
+        Args:
+            sql: A `COPY ... TO STDOUT` statement, optionally followed by
+                further statements separated by semicolons.
+
+        Returns:
+            A `CopyOut` bound to this connection's origin, holding a copy of
+            the current rollback-failure handler.
+
+        Raises:
+            PgError: Exactly what `_copy_out_parts` documents.
+        """
+        self._copy_out_parts(sql^)
+        return CopyOut[origin_of(self)](
             Pointer(to=self), self._rollback_failure_handler
         )
 
@@ -784,9 +1123,14 @@ struct Connection(Movable):
         A `Transaction` destructor cannot raise, so when the `ROLLBACK` it
         sends fails it calls this handler instead.
 
-        The handler is **copied when `transaction()`** is called, so replacing
-        it later does not affect existing `Transaction` values -- install it
-        before opening the block it should cover.
+        A `CopyIn` and a `CopyOut` destructor report through the same handler,
+        for the same reason: ending a COPY stream can fail and a destructor
+        has nowhere to raise it.
+
+        The handler is **copied when `transaction()`**, `copy_in()` or
+        `copy_out()` is called, so replacing it later does not affect existing
+        values -- install it before opening the block or stream it should
+        cover.
 
         The default handler writes one line to stderr. A replacement must not
         raise, which is what the `thin` function type enforces.

@@ -1,16 +1,20 @@
 """Binary-format encoding of Mojo values into PostgreSQL wire bytes.
 
-Holds fourteen encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
+Holds fifteen encoders -- `encode_bool`, `encode_int16`, `encode_int32`,
 `encode_int64`, `encode_float32`, `encode_float64`, `encode_numeric`,
 `encode_date`, `encode_timestamp`, `encode_timestamptz`, `encode_time`,
-`encode_timetz`, `encode_interval` and
-`encode_uuid` -- each returning the value's PostgreSQL binary
-representation as a `List[UInt8]` in network byte order (big-endian).
-Lengths are fixed for all but one: 1 byte for `bool`, 2 for `int2`, 4 for
+`encode_timetz`, `encode_interval`,
+`encode_uuid` and `encode_array` -- each returning the value's PostgreSQL
+binary representation as a `List[UInt8]` in network byte order
+(big-endian).
+Lengths are fixed for all but two: 1 byte for `bool`, 2 for `int2`, 4 for
 `int4`, `float4` and `date`, 8 for `int8`, `float8`, `timestamp`,
 `timestamptz` and `time`, 12 for `timetz`, 16 for `interval` and `uuid`.
-Only `numeric` is variable: an 8 byte
-header plus two bytes per base-10000 digit group.
+`numeric` is variable: an 8 byte
+header plus two bytes per base-10000 digit group. So is `encode_array`,
+which takes the elements already encoded -- it is the one encoder that
+does not look at a Mojo value at all, so it serves every element type
+without being generic.
 
 There is no `Int` encoder on purpose: callers widen with `Int64(v)` and use
 `encode_int64`, so the wire width is always chosen explicitly.
@@ -268,6 +272,62 @@ def encode_interval(v: Interval) -> List[UInt8]:
     var out = encode_int64(v.micros)
     out.extend(encode_int32(v.days))
     out.extend(encode_int32(v.months))
+    return out^
+
+
+def encode_array(
+    elems: List[Optional[List[UInt8]]], elem_oid: UInt32
+) -> List[UInt8]:
+    """Encode already-encoded elements as a one-dimensional array.
+
+    The layout is the one `array_recv` reads and `array_send` writes: a
+    twelve byte header of `ndim`, `flags` and the element type OID,
+    followed -- only when there is a dimension at all -- by the `dim` and
+    `lbound` pair and then the elements, each a four byte length and that
+    many bytes. A None element is the length `-1` and no bytes.
+
+    An empty array is the header alone with `ndim` 0, which is what the
+    server sends for `'{}'`: no dimension words follow, so a reader must
+    not look for them. `flags` is 1 exactly when some element is None,
+    matching the server's "has nulls" bit; readers here ignore it and
+    trust the per-element length, but a server reading these bytes does
+    use it.
+
+    The lower bound is always 1, so a value built here round-trips as a
+    plain one-based PostgreSQL array even if it came from a slice that
+    had been printed as `[0:1]={...}`.
+
+    Args:
+        elems: The per-element encodings in order, None for a SQL NULL
+            element.
+        elem_oid: The PostgreSQL type OID of the elements.
+
+    Returns:
+        The array's binary wire bytes, twelve of them for an empty array.
+    """
+    var has_nulls = False
+    for i in range(len(elems)):
+        if not elems[i]:
+            has_nulls = True
+            break
+
+    var out = List[UInt8](capacity=12 + 8 * len(elems))
+    out.extend(encode_int32(Int32(0) if len(elems) == 0 else Int32(1)))
+    out.extend(encode_int32(Int32(1) if has_nulls else Int32(0)))
+    out.extend(encode_int32(bitcast[DType.int32, 1](elem_oid)))
+    if len(elems) == 0:
+        return out^
+
+    out.extend(encode_int32(Int32(len(elems))))
+    out.extend(encode_int32(Int32(1)))
+    for i in range(len(elems)):
+        if elems[i]:
+            ref bytes = elems[i].value()
+            out.extend(encode_int32(Int32(len(bytes))))
+            for j in range(len(bytes)):
+                out.append(bytes[j])
+        else:
+            out.extend(encode_int32(Int32(-1)))
     return out^
 
 

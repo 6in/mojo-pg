@@ -1,9 +1,12 @@
 """Query parameters and the libpq argument arrays built from them.
 
 `Param` is the single value type accepted by the parameterised execute
-APIs. Thirty-five `@implicit` constructors make a plain list literal --
+APIs. Sixty-nine `@implicit` constructors make a plain list literal --
 `[1, "a", 1.5, True, Param.null()]` -- convert to `List[Param]`, so the
-caller never names the type. Each constructor **encodes at construction
+caller never names the type. Thirty-four of them are the array forms,
+`List[E]` and `List[Optional[E]]` for each of the seventeen element
+types, which send the PostgreSQL array of that element's type.
+Each constructor **encodes at construction
 time**: the Mojo value is turned into its PostgreSQL wire bytes right
 there and only those bytes are kept. That keeps `Param` free of a type
 tag the executor would have to re-dispatch on, and it means the value's
@@ -29,7 +32,9 @@ Two NUL-byte rules meet here and they are **not** symmetric:
 
 Binary parameters (`List[UInt8]`, and every numeric/`Bool` encoding) may
 contain 0 bytes freely: they are passed with an explicit length, so there
-is nothing to truncate. SQL NULLs are not inspected at all.
+is nothing to truncate. SQL NULLs are not inspected at all. An array of
+text is binary too, so a 0 byte inside a `List[String]` element is *not*
+a `USAGE` error here -- it reaches the server, which rejects it.
 
 `_ParamBuffers` is the second half of the module. It turns a
 `List[Param]` into the five parallel arrays `PQexecParams` /
@@ -50,22 +55,40 @@ from std.ffi import c_int
 from pq._ffi.types import CStrArray, IntPtr, OidPtr
 from pq.decode_text import (
     OID_BOOL,
+    OID_BOOL_ARRAY,
     OID_BYTEA,
+    OID_BYTEA_ARRAY,
     OID_DATE,
+    OID_DATE_ARRAY,
     OID_FLOAT4,
+    OID_FLOAT4_ARRAY,
     OID_FLOAT8,
+    OID_FLOAT8_ARRAY,
     OID_INT2,
+    OID_INT2_ARRAY,
     OID_INT4,
+    OID_INT4_ARRAY,
     OID_INT8,
+    OID_INT8_ARRAY,
     OID_INTERVAL,
+    OID_INTERVAL_ARRAY,
     OID_NUMERIC,
+    OID_NUMERIC_ARRAY,
+    OID_TEXT,
+    OID_TEXT_ARRAY,
     OID_TIME,
+    OID_TIME_ARRAY,
     OID_TIMESTAMP,
+    OID_TIMESTAMP_ARRAY,
     OID_TIMESTAMPTZ,
+    OID_TIMESTAMPTZ_ARRAY,
     OID_TIMETZ,
+    OID_TIMETZ_ARRAY,
     OID_UUID,
+    OID_UUID_ARRAY,
 )
 from pq.encode_binary import (
+    encode_array,
     encode_bool,
     encode_date,
     encode_float32,
@@ -363,6 +386,729 @@ struct Param(Copyable, Movable):
             v: The bytes to send.
         """
         self = Param(OID_BYTEA, True, False, v^)
+
+    @implicit
+    def __init__(out self, var v: List[Bool]):
+        """Encode `v` as a binary `bool[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_bool(v[i]))
+        self = Param(
+            OID_BOOL_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_BOOL),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Bool]]):
+        """Encode `v` as a binary `bool[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_bool(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_BOOL_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_BOOL),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Int16]):
+        """Encode `v` as a binary `int2[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_int16(v[i]))
+        self = Param(
+            OID_INT2_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT2),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Int16]]):
+        """Encode `v` as a binary `int2[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_int16(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_INT2_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT2),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Int32]):
+        """Encode `v` as a binary `int4[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_int32(v[i]))
+        self = Param(
+            OID_INT4_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT4),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Int32]]):
+        """Encode `v` as a binary `int4[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_int32(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_INT4_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT4),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Int64]):
+        """Encode `v` as a binary `int8[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_int64(v[i]))
+        self = Param(
+            OID_INT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Int64]]):
+        """Encode `v` as a binary `int8[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_int64(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_INT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Int]):
+        """Encode `v` as a binary `int8[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_int64(Int64(v[i])))
+        self = Param(
+            OID_INT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Int]]):
+        """Encode `v` as a binary `int8[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_int64(Int64(v[i].value())))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_INT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Float32]):
+        """Encode `v` as a binary `float4[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_float32(v[i]))
+        self = Param(
+            OID_FLOAT4_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_FLOAT4),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Float32]]):
+        """Encode `v` as a binary `float4[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_float32(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_FLOAT4_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_FLOAT4),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Float64]):
+        """Encode `v` as a binary `float8[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_float64(v[i]))
+        self = Param(
+            OID_FLOAT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_FLOAT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Float64]]):
+        """Encode `v` as a binary `float8[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_float64(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_FLOAT8_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_FLOAT8),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[String]):
+        """Encode `v` as a binary `text[]` parameter.
+
+        `List[String]` goes out as `text[]`, the array type of the OID the
+        scalar `String` parameter leaves to the server. A `varchar[]`,
+        `bpchar[]`, `name[]`, `json[]` or `jsonb[]` column is reached by
+        the server's own array cast -- `$1::varchar[]` -- exactly as a
+        scalar `String` reaches a `varchar` column. An element holding a
+        0 byte is not rejected here: array elements travel with explicit
+        lengths, so the byte reaches the server and the server's own
+        rejection is what the caller sees.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(_text_bytes(v[i]))
+        self = Param(
+            OID_TEXT_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TEXT),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[String]]):
+        """Encode `v` as a binary `text[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(_text_bytes(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_TEXT_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TEXT),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[List[UInt8]]):
+        """Encode `v` as a binary `bytea[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(v[i].copy())
+        self = Param(
+            OID_BYTEA_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_BYTEA),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[List[UInt8]]]):
+        """Encode `v` as a binary `bytea[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(v[i].value().copy())
+            else:
+                elems.append(None)
+        self = Param(
+            OID_BYTEA_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_BYTEA),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Decimal]):
+        """Encode `v` as a binary `numeric[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_numeric(v[i]))
+        self = Param(
+            OID_NUMERIC_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_NUMERIC),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Decimal]]):
+        """Encode `v` as a binary `numeric[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_numeric(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_NUMERIC_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_NUMERIC),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[UUID]):
+        """Encode `v` as a binary `uuid[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_uuid(v[i]))
+        self = Param(
+            OID_UUID_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_UUID),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[UUID]]):
+        """Encode `v` as a binary `uuid[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_uuid(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_UUID_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_UUID),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Date]):
+        """Encode `v` as a binary `date[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_date(v[i]))
+        self = Param(
+            OID_DATE_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_DATE),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Date]]):
+        """Encode `v` as a binary `date[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_date(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_DATE_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_DATE),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Timestamp]):
+        """Encode `v` as a binary `timestamp[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_timestamp(v[i]))
+        self = Param(
+            OID_TIMESTAMP_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMESTAMP),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Timestamp]]):
+        """Encode `v` as a binary `timestamp[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_timestamp(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_TIMESTAMP_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMESTAMP),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[TimestampTz]):
+        """Encode `v` as a binary `timestamptz[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_timestamptz(v[i]))
+        self = Param(
+            OID_TIMESTAMPTZ_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMESTAMPTZ),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[TimestampTz]]):
+        """Encode `v` as a binary `timestamptz[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_timestamptz(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_TIMESTAMPTZ_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMESTAMPTZ),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Time]):
+        """Encode `v` as a binary `time[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_time(v[i]))
+        self = Param(
+            OID_TIME_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIME),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Time]]):
+        """Encode `v` as a binary `time[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_time(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_TIME_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIME),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[TimeTz]):
+        """Encode `v` as a binary `timetz[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_timetz(v[i]))
+        self = Param(
+            OID_TIMETZ_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMETZ),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[TimeTz]]):
+        """Encode `v` as a binary `timetz[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_timetz(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_TIMETZ_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_TIMETZ),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Interval]):
+        """Encode `v` as a binary `interval[]` parameter.
+
+        Args:
+            v: The elements to send, in order. An empty list is an empty
+                array, never a SQL NULL.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            elems.append(encode_interval(v[i]))
+        self = Param(
+            OID_INTERVAL_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INTERVAL),
+        )
+
+    @implicit
+    def __init__(out self, var v: List[Optional[Interval]]):
+        """Encode `v` as a binary `interval[]` parameter with NULL elements.
+
+        A None element is a SQL NULL *inside* the array, which is not the
+        same thing as the whole parameter being NULL: the array itself is
+        always present.
+
+        Args:
+            v: The elements to send, None for a NULL element.
+        """
+        var elems = List[Optional[List[UInt8]]](capacity=len(v))
+        for i in range(len(v)):
+            if v[i]:
+                elems.append(encode_interval(v[i].value()))
+            else:
+                elems.append(None)
+        self = Param(
+            OID_INTERVAL_ARRAY,
+            True,
+            False,
+            encode_array(elems, OID_INTERVAL),
+        )
 
     @implicit
     def __init__(out self, v: Optional[Bool]):

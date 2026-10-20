@@ -1,134 +1,170 @@
-# REQUIREMENTS — phase6-packaging-ci
+# REQUIREMENTS — phase7-pool-copy-array
 
-マイルストーン: `phase6-packaging-ci`（ブランチ `gsd-lite/phase6-packaging-ci`、base `main`）
-前提: Phase 0〜5 完了。リポジトリは公開 GitHub `6in/mojo-pg`（Actions 有効、`gh` 認証済み、`main` は origin と同期）。
-開発機は linux-aarch64 / Mojo 1.1.0 / pixi 0.82.0。
+HANDOFF §3 で「対象外（今回はやらない）」としていた 3 件（コネクションプール / COPY プロトコル /
+配列型）を `pq` に追加する。対象リポジトリは in-repo（`.`）、base は `main`（`v0.1.0` タグ済み、PR #1 マージ済み）。
 
 ## 1. 目的（WHAT）
 
-1. **配布物を作る**: `pq` を他プロジェクトから `pixi` で依存指定できる conda パッケージにする（`pixi build`）。
-2. **CI を置く**: GitHub Actions で Linux x86_64 / Linux aarch64 / macOS arm64 の 3 プラットフォームを回し、
-   既存の受け入れゲート（`pixi run check` 相当）を自動化する。HANDOFF §2「Linux と macOS は CI 必須」を満たす。
-3. **リリース**: タグから GitHub Release を作り、ソース tarball と各プラットフォームの `.conda` を添付する。
-4. **README**: 「自分のプロジェクトから使う」を pixi 依存指定の書き方（git 依存 / Release 添付の `.conda`）で拡充する。
-5. **持ち越し 2 件**（Phase 5 VERIFICATION §6.3）を同梱する: examples の SIGPIPE rc 141、`_collect_notifications` の `out` 復元。
+- `Row.get[T]` / `Param` で PostgreSQL の配列型を扱えるようにする（§2.1）
+- `COPY ... FROM STDIN` / `COPY ... TO STDOUT` を libpq の COPY API で扱えるようにする（§2.2）
+- 同期 `Connection` を再利用するコネクションプールを追加する（§2.3）
+- 既存の受け入れ条件（`pixi run check` 6/6 PASS、CI 3 OS 緑、警告ゼロ）を維持する
 
 ## 2. 要求
 
-### 2.1 パッケージング（conda / pixi build）
-- `pixi.toml` に `[package]` と pixi-build-mojo バックエンドの設定を追加し、`pixi build` が `.conda` を生成する。
-- パッケージは `src/pq`（`__init__.mojo` を持つディレクトリ）を含む。`hello.mojo` / `examples/` / `tests/` は含めない。
-- 利用側の確認: 別ディレクトリの最小 pixi プロジェクトから依存指定（git 依存または生成した `.conda` のローカルチャンネル）で
-  `from pq import Connection` が通ることを検証する（research で手段の実在と Mojo 1.1.0 との相性を確認してから plan）。
-- 既存の `pixi run package`（`.mojoc`）は残してよいが、README の配布手段としては conda パッケージを主にする。
+### 2.1 配列型
 
-### 2.2 CI（GitHub Actions）
-- マトリクス: `ubuntu-latest`（x86_64）/ `ubuntu-24.04-arm`（aarch64）/ `macos-latest`（arm64）。Windows ジョブは置かない（理由を明記）。
-- 環境構築は `prefix-dev/setup-pixi` + `pixi.lock`（ロック尊重）。
-- Linux: `tests/docker-compose.yml`（PG 17 / PG 14 / blackhole）をそのまま使い、`pixi run check` を回す。
-- macOS: ジョブ内で Homebrew の PostgreSQL（17 系 1 本）を起動し `tests/fixtures/schema.sql` を適用、`PQ_TEST_CONNINFO` でそこを指して
-  テストと examples を実行する。PG 14 は macOS では回さない。blackhole（接続を受けて何も返さない listener）は `socat` か `nc` で
-  ジョブ内に代替を立てる。立てられない場合は接続タイムアウトのテストだけ SKIP（`SKIP` 行として数える）。
-- Linux のゲートは `pixi run check` をそのまま 1 ジョブで回す（ローカルと CI の判定を同じスクリプトに揃える）。
-  macOS も可能な限り `final_check.sh` を流用する（compose を呼ばない形で同じ 6 段を通す。差分は research / plan で決める）。
-- トリガー: `pull_request`（base `main`）と `push`（`main`）。
-- CI ジョブは `pixi build` も実行し、生成した `.conda` をジョブの artifact として保存する（リリース経路のビルド部分を PR ごとに検証するため）。
-- Windows ジョブは置かない。ワークフローのコメントと README に理由（Mojo の Windows ツールチェーン未提供）を書く。
+- **受信**: `Row.get[List[T]](col)` / `get_optional[List[T]]` で 1 次元配列を取得できる。
+  `T` は既存の型マッピング表の 19 型すべて（`Bool`, `Int16`, `Int32`, `Int64`/`Int`, `Float32`, `Float64`,
+  `String`（text/varchar/bpchar/name/json/jsonb）, `List[UInt8]`（bytea）, `Decimal`, `UUID`, `Date`, `Time`,
+  `TimeTz`, `Timestamp`, `TimestampTz`, `Interval`）。要素のデコードは既存の `decode_text` / `decode_binary` を再利用する
+- 配列の OID は要素 OID と 1:1 で対応づける（`_int4` = 1007 など。`pg_type.typarray` の値を定数表にする）。
+  列 OID が `List[T]` の `T` に対応する配列 OID と一致しない場合は `TYPE_MISMATCH`（既存の「拡張変換なし」規則を踏襲）
+- 表現は Mojo 標準の `List[T]`（自前の配列 struct は作らない）。空配列 `{}` は空の `List`
+- **受信形式**: テキストとバイナリの両方。既存 19 型と同じく届いた形式（`PQfformat`）でデコーダを選ぶ。
+  テキストは配列リテラル（`{1,2,3}`、引用符 `"..."` と `\` エスケープ、区切り文字は `,`。`box` 型の `;` は対象外）のパーサ、
+  バイナリは `array_send` 形式（int32 ndim / flags / elemtype OID、各次元の dim / lbound、要素ごとに int32 長（-1 = NULL）+ 要素バイト列）
+- **NULL 要素**: `get[List[T]]` は NULL 要素があれば `NULL_VALUE`。`get[List[Optional[T]]]` は NULL 要素を `None` として返す
+  （列 NULL を扱う `get_optional` とは別軸。`get_optional[List[Optional[T]]]` で両方 NULL 許容）
+- **多次元**: ndim ≥ 2（テキストの `{{...}}` / バイナリの ndim）は `TYPE_MISMATCH`。非 1 始まりの添字（テキストの `[0:1]=` 接頭辞 /
+  バイナリの lbound ≠ 1）は読み飛ばして要素だけ返す（データは失わない）
+- **送信**: `Param(List[T])` と `Param(List[Optional[T]])` を 19 型分追加し、既存の単体型と同じくバイナリで送る
+  （`paramTypes` に配列 OID、`paramFormats` = 1、`array_recv` が受ける形式で組み立てる。ndim = 1、lbound = 1、NULL 要素は長さ -1）。
+  要素が `String` の配列もバイナリで送る（配列ヘッダが必要なため）。空 `List` は ndim = 0 の空配列として送る
 
-### 2.2b リリースワークフロー
-- `v*` タグの push で動く release ワークフロー: 3 プラットフォームで `pixi build` → GitHub Release を作成し、`.conda` とソース tarball を添付。
-- タグ名（`v0.1.0`）と `pixi.toml` の `version`（`0.1.0`）が一致しないときは失敗させる。
-- **タグは人間が打つ**。マイルストーン内ではワークフローの整備と、タグを使わない経路（CI の artifact / `workflow_dispatch`）での動作確認まで。
-  v0.1.0 の Release 作成はマージ後に人間が行う。
+### 2.2 COPY
 
-### 2.2c verify と PR
-- verify は `gsd-lite/phase6-packaging-ci` を push して PR を作り、**PR 上の CI が緑になることを合格条件に含める**
-  （`gh pr checks <PR> --watch` 等で完了を待ち、赤なら差し戻す）。マージは人間が行う。
+- **方向**: `COPY ... FROM STDIN`（COPY IN）と `COPY ... TO STDOUT`（COPY OUT）の両方。同期 `Connection` のみ
+  （`AsyncConnection` の COPY はスコープ外 §3）
+- **低レベル**: `PQputCopyData`, `PQputCopyEnd`, `PQgetCopyData` を `LibpqFFI` に追加（`libpq-fe.h` のシグネチャどおり 1:1）
+- **データ**: バイト列の素通し。利用側が text / CSV / binary 形式の行を `Span[UInt8]`（または `String`）で渡し、
+  ライブラリは転送・終端・エラー回収だけを行う。`WITH (FORMAT ...)` は SQL 側で指定する。行の型付きエンコード / デコードはしない
+- **API**（RAII。`Transaction[origin_of(self)]` と同じ origin パターン）:
+  - `conn.copy_in(sql) raises -> CopyIn[origin]`: `PQexec(sql)` の結果が `PGRES_COPY_IN` でなければ `PgErrorKind.USAGE`
+    （通常の結果なら解放してから投げる）。`write(bytes: Span[UInt8])` / `write(s: String)` は `PQputCopyData`（同期接続では 1 を返すまで完了。
+    -1 は `PgError`）。`finish() raises -> Result` は `PQputCopyEnd(NULL)` → `PQgetResult` で `PGRES_COMMAND_COMPLETE` を回収し
+    `affected_rows()` が COPY 行数。`abort(message: String) raises` は `PQputCopyEnd(message)` → サーバの `57014` 相当エラーを回収して握りつぶす
+    （接続はアイドルに戻る）
+  - `conn.copy_out(sql) raises -> CopyOut[origin]`: 結果が `PGRES_COPY_OUT` でなければ `USAGE`。`next() raises -> Optional[List[UInt8]]` は
+    `PQgetCopyData(async=0)` で 1 行（改行を含む生バイト）を返し、-1（終端）で `None` を返したあと `PQgetResult` を回収して完了。
+    -2 は `PgError`。`PQfreemem` を必ず呼ぶ。`Iterator` としても使える
+  - 未完了のまま `__del__` された場合: `CopyIn` は `PQputCopyEnd("aborted by pq")` と残り結果の回収、`CopyOut` は残り行の読み捨てと結果回収を行い、
+    接続を使える状態に戻す。失敗は `Connection.set_rollback_failure_handler` と同じフックに通知する（`__del__` から投げられないため）
+  - COPY 中の `Connection` は他の `execute` / `transaction` / `copy_*` を `PgErrorKind.USAGE` で拒否する（`transaction()` の二重開始と同じ客側検査）
+- **トランザクション内 COPY**: `Transaction` の中で `copy_in` を使えること（`tx.connection()` 経由か、`Transaction` に同名メソッドを足すかは plan が既存の
+  `Transaction.execute` の形に合わせる）
 
-### 2.3 持ち越し 2 件
-- examples の SIGPIPE: 対応方針（README 明記のみ / examples 側で検知して rc 1）は plan が選ぶ。stdlib の挙動は変えない。
-- `_collect_notifications`: `wait_readable` が `CONNECTION` で抜ける経路でも `out` を復元する（1 分岐 + テスト 1 件程度）。
+### 2.3 コネクションプール
+
+- **スレッドモデル**: 単一スレッド前提、ロックなし。`Connection` と同じく `Movable` のみで、スレッド安全でないことを docstring と README に明記する
+  （事実: Mojo 1.1.0 の標準ライブラリにスレッド / mutex / `parallelize` は無く `std.atomic` だけ。discuss でプローブ済み）
+- **生成**: `Pool.open(conninfo: String, max_size: Int) raises -> Pool` と `Pool.open(params: Dict[String, String], max_size: Int)`
+  （`Connection.open` の 2 オーバーロードに揃える）。接続は遅延で開く（`acquire` 時に空きが無ければ `Connection.open`）。
+  `max_size` ≤ 0 は `USAGE`
+- **貸し出し**: `acquire()`。空きがあれば再利用、無ければ総数 < `max_size` の間は新規に開き、`max_size` に達していれば**即座に** `PgErrorKind.USAGE`
+  （単一スレッドでは返却を待てない）
+- **健全性**: 貸し出す前に `PQstatus` を見て `CONNECTION_OK` でなければ `PQreset`、それでも駄目なら捨てて新規に開く
+  （`PQreset` を `LibpqFFI` から使う。`Connection` に `reset()` を足すかは plan が決める。`Connection.open` が固定する `DateStyle` / `IntervalStyle` は
+  reset 後に再設定が必要）。往復（`SELECT 1`）はしない
+- **返却時の後始末**: `PQtransactionStatus` が `INTRANS` / `INERROR` なら `ROLLBACK` を送ってから戻す。`ACTIVE`（COPY 途中等）/ `UNKNOWN` /
+  `PQstatus != OK` の接続は捨てる（`PQfinish`）。`SET` した GUC、prepared statement、一時テーブルは残る（README の既知の制限に明記）
+- **終了**: `close()` と `__del__` で保持中の空き接続を `PQfinish`。貸し出し中の接続が `Pool` より長生きしないことは origin（`Pool` を借りる guard）で
+  コンパイル時に保証する（`Transaction[origin_of(self)]` と同じ）
+- **貸し出し API**: `acquire(ref self) raises -> PooledConnection[origin_of(self)]`。RAII ガードで、`__del__` 時に後始末（上記）をして
+  プールへ自動返却する。`PooledConnection` は `Connection` の公開メソッド（`execute` 2 種 / `prepare` / `transaction` / `copy_in` / `copy_out` /
+  `escape_literal` / `escape_identifier` / `server_version` / `status` / `transaction_status`）を同じシグネチャで転送する。
+  `ref` や `Connection` そのものは返さない（README「`pq` が `ref` を返すことはありません」の維持）。`Movable` のみ
+- **オプション**（`Pool.open` のキーワード引数。既定値は括弧内）:
+  - `min_size: Int`（0）: `open` 時にこの本数を先に開く。`min_size > max_size` は `USAGE`。open 失敗はそのまま `PgError` を投げ `Pool` は作られない
+  - `max_lifetime_s: Int`（0 = 無期限）: 開いた時刻（`std.time`）から超過した接続は返却時に `PQfinish` して保持しない
+  - 統計: `size()`（保持 + 貸し出し中の総数）/ `idle()`（空き）/ `borrowed()`（貸し出し中）
+
+### 2.4 堅牢性（受け入れ基準に含める）
+
+- どの入力・出力状態でもトレースバックを出さず、既存データを失わない。plan は堅牢性格子
+  （入力 × 出力 × 依存の 3 軸。Phase 5 reflect の雛形 `archive/phase5-polish-bench-readme` 配下の scratch を参照）を
+  初回タスクに含め、verify は該当指摘で差し戻せる
+- 今回の「入力」軸に足すもの: 配列リテラルの不正形（閉じ括弧なし / 引用符の途中終端 / 要素 NULL / 多次元 / 空）、
+  バイナリ配列ヘッダの不正（ndim 異常 / elemtype 不一致 / 長さ超過）、COPY の途中切断（クライアント側 `close(PQsocket)` 方式）、
+  プールの枯渇 / 死んだ接続の再利用
 
 ## 3. スコープ外（やらないこと）
-- modular-community チャンネルへの recipe 提出（外部リポジトリへの PR。採らない）
-- Windows 実機検証・Windows CI ジョブ（ツールチェーン無し。README の「未検証」明記は維持）
-- 新しい型・新しい API の追加、HANDOFF §3 の対象外（プール、COPY、配列型 ほか）
-- ベンチマークの再計測
 
-### 2.3b ブランチ保護
-- main の保護（PR の CI を required status checks にする）は**設定しない**。README（または `docs/`）に `gh api` / 画面での設定手順を書くだけ。
-  リポジトリ設定の変更は人間が行う。
-
-### 2.4 配布名・ドキュメント・変更履歴
-- conda パッケージ名は **`pq`**（import 名と同じ）。research で conda-forge / modular-community に同名パッケージが無いことを確認し、
-  衝突があれば `mojo-pq` に落とす（その場合 DECISIONS に追記して plan へ）。バージョンは `pixi.toml` の `0.1.0` を単一の出所にする。
-- README は日本語のまま。先頭近くに**英語の短い概要 + インストール（pixi 依存指定）節**を 1 つ置く。全訳はしない。
-- `CHANGELOG.md` を Keep a Changelog 形式で新設し、`0.1.0` の節に Phase 1〜5 の成果の要約を書く。release ワークフローは
-  該当版の節を Release 本文に使う。
-
-### 2.5 堅牢性（受け入れ基準に含める）
-- 全ジョブに `timeout-minutes` を置く。DB の起動待ちは上限付きで、超えたら明示的に失敗する（ハングしない）。
-- `setup-pixi` 等のネットワーク依存ステップは失敗時にリトライする（アクションのオプションか再試行ステップ）。
-- ワークフローは **secrets を要求しない**（fork からの PR でも CI が動く。Release 作成は `GITHUB_TOKEN` の既定権限で足りる範囲にし、
-  `permissions` を最小にする）。
-- CI の判定はローカルの `pixi run check` と同じ基準（同じスクリプト）で、CI だけ緩める・厳しくすることをしない。
+- パイプラインモード（`PQenterPipelineMode`）
+- Mojo 言語の `async` / `await` への統合
+- Windows 実機 / CI（ツールチェーン待ち。コードパスは従来どおり「書くが未検証」）
+- modular-community recipe（Phase 6 D2 で却下済み）
+- 多次元配列の形状保持（ndim ≥ 2 は `TYPE_MISMATCH`。D6）、`box` 型など区切り文字が `,` でない配列
+- `AsyncConnection` の COPY（D9）。COPY の型付き行エンコーダ / デコーダ（D10）
+- スレッド安全なプール、返却待ち（ブロッキング）の `acquire`、非同期プール（D12 / D13）
+- 返却時の `DISCARD ALL`（D15）
+- `.gsd-lite/` の履歴整理（このまま追跡する。D19）
 
 ## 4. 受け入れ基準
 
-### 4.1 パッケージング
-- A1. `pixi build` がこのリポジトリで成功し、`pq-0.1.0-*.conda` が生成される（開発機 linux-aarch64 で実測）。
-- A2. 別ディレクトリの最小 pixi プロジェクト（`channels` に conda.modular.com/max + conda-forge）から `pq` を依存指定
-  （git 依存、または生成した `.conda` を置いたローカルチャンネル。どちらも検証する）して `pixi install` が通り、
-  `from pq import Connection` を使う 1 ファイルが `mojo run` で動く（DB 接続は不要。`PgErrorKind.LIBPQ_LOAD` 以外で落ちない）。
-- A3. 生成パッケージに `examples/` `tests/` `hello.mojo` が含まれない。
-- A4. `pixi run check` が従来どおり PASS（`[package]` 追加で既存タスクが壊れない）。
+### 4.1 配列型
 
-### 4.2 CI
-- B1. `.github/workflows/ci.yml` が `pull_request`（base main）と `push`（main）で動き、Linux x86_64 / Linux aarch64 / macOS arm64 の 3 ジョブを持つ。
-- B2. Linux 2 ジョブは `docker compose`（PG17 / PG14 / blackhole）を立てて `pixi run check` を実行し、`final_check: PASS` で緑になる。
-- B3. macOS ジョブは Homebrew の PostgreSQL（17 系）を起動して fixtures を適用し、`PQ_TEST_CONNINFO` でテストと examples を実行して緑になる。
-  blackhole 代替が立てられない場合は接続タイムアウトのテストだけ SKIP とし、SKIP 件数がログに出る。
-- B4. 各ジョブで `pixi build` が成功し `.conda` が artifact として保存される。
-- B5. 全ジョブに `timeout-minutes` があり、DB 起動待ちに上限がある。ワークフローは secrets を参照しない。`permissions` が最小。
-- B6. **このマイルストーンの PR 上で 3 ジョブが緑**（verify の合格条件。`gh pr checks` で確認）。
-- B7. Windows ジョブが無い理由がワークフローのコメントと README にある。
+- 19 型それぞれについて、`SELECT ARRAY[...]::<type>[]` をテキスト形式とバイナリ形式で取得した `List[T]` が一致し、
+  Phase 3 の境界値（最小 / 最大 / 0 / 負数 / NaN / ±Infinity / `infinity` 日時 / numeric の大きな桁）が要素としても往復する
+- 空配列 `'{}'::int4[]` が空の `List` になる
+- 配列 OID と `T` の不一致（`int2[]` を `List[Int32]` で読む）は `TYPE_MISMATCH`
+- 配列列を `String` で読むと、テキスト形式ではリテラルがそのまま返る（既存のワイルドカード規則の維持）
 
-### 4.3 リリース
-- C1. `.github/workflows/release.yml` が `v*` タグの push で動き、3 プラットフォームの `.conda` とソース tarball を Release に添付する構成になっている。
-- C2. タグと `pixi.toml` の `version` の不一致で失敗するステップがある。
-- C3. タグを使わない経路（`workflow_dispatch`、または CI 側の `pixi build` artifact）でビルド部分の動作が確認されている。
-  タグ push と Release 作成はマイルストーン内で**行わない**。
-- C4. `CHANGELOG.md` に `0.1.0` の節があり、release ワークフローがその節を Release 本文に使う。
+### 4.2 COPY
 
-### 4.4 README
-- D1. 英語の概要 + インストール節（pixi 依存指定の例）が README 先頭近くにある。
-- D2. 日本語の「インストール」節に pixi 依存指定（git / Release の `.conda`）の書き方がある。
-- D3. 「テストの回し方」に CI の説明（どこで何が回るか、macOS の差分、Windows が無い理由）が追記されている。
-- D4. main のブランチ保護を人間が設定する手順（required checks にする job 名を含む）が書かれている。
+- `copy_in` で text 形式 10 万行（`int4, int8, float8, text, timestamp` の 5 列。bench と同じ形）を流し込み、`finish().affected_rows()` が 100000、
+  `SELECT count(*)` が一致する。CSV 形式（`WITH (FORMAT csv)`）と binary 形式（PGCOPY ヘッダを利用側が組み立てる）でも各 1 件往復する
+- `copy_out` で同じテーブルを取り出し、行数と内容が `copy_in` に渡したバイト列と一致する
+- `abort()` した COPY IN はテーブルに行を残さない。`finish()` を呼ばずに `CopyIn` を破棄した場合も同じで、その後の `execute` が通る
+- `copy_out` を途中で破棄した後の `execute` が通る
+- COPY 中の `execute` / `transaction` / 2 つ目の `copy_*` は `USAGE` で、サーバには何も送られない
+- 不正なデータ（text 形式で列数が足りない行）は `finish()` が SQLSTATE `22P04` 等の `PgError.SERVER` を投げ、接続はアイドルに戻る
+- 途中切断（クライアント側 `close(PQsocket)`）で `write` / `next` / `finish` が `PgErrorKind.CONNECTION` を投げ、トレースバックを出さない
+- `Transaction` 内の `copy_in` を `rollback()` すると行が残らない
 
-### 4.5 持ち越し
-- E1. examples の SIGPIPE: plan が選んだ方針（README 明記のみ / examples で検知して rc 1）が実装され、`check` が PASS。
-- E2. `_collect_notifications` が `wait_readable` の `CONNECTION` 経路でも `out` を復元する。テスト 1 件追加。
+### 4.3 プール
 
-### 4.6 共通
-- F1. `pixi run check` が PASS（所要は前回末 165〜215 s + 新テスト分。247 s を大きく超えたら PROGRESS に理由を書く）。
-- F2. 警告ゼロ。`mojo format` 差分なし。
+- `max_size=2` のプールから `acquire` を 2 回成功、3 回目が `USAGE`（サーバに接続は 2 本だけ。`pg_stat_activity` で確認）。
+  1 つを drop した後の `acquire` が成功し、`backend_pid` が drop した接続と同じ（再利用の証明）
+- `min_size=2` で `open` 直後に `idle() == 2`、`size() == 2`、`pg_stat_activity` にも 2 本
+- `transaction()` を commit せずにガードを drop → 返却時に ROLLBACK され、次の利用者の `transaction_status()` が IDLE、変更が残っていない
+- `copy_in` を未完了のままガードを drop → その接続は捨てられ `size()` が 1 減り、次の `acquire` は新規接続（`backend_pid` が変わる）
+- 貸し出し中にサーバ側から `pg_terminate_backend` された接続を返却 → 捨てられ、次の `acquire` は新規接続で `execute` が通る
+- `max_lifetime_s=1` で 1 秒以上経った接続は返却時に閉じられ、次の `acquire` の `backend_pid` が変わる
+- `close()` 後の `acquire` は `USAGE`。`Pool` の `__del__` で空き接続が `PQfinish` される（test_leak 相当の RSS 判定を 1 ケース足す）
+- `max_size <= 0` / `min_size > max_size` は `USAGE` で、サーバに接続しない
+
+### 4.4 共通
+
+- `pixi run check` 6/6 PASS（PG 14 / 17 両方）、CI 3 OS 緑、`mojo build` 警告ゼロ
+- README: 型マッピング表に配列の行（`T[]` → `List[T]` / `List[Optional[T]]`、両形式）、クイックスタートに COPY とプールの節、
+  「既知の制限」から「配列型・COPY・コネクションプールは対象外」を外して残る制限（多次元 / 非同期 COPY / スレッド安全性 / GUC が残る）に書き換える。
+  CHANGELOG `[Unreleased]` に Phase 7 として追記（タグは人間。Phase 6 D7 を継続）
+- `examples/`: `copy.mojo`（COPY IN → COPY OUT の往復）と `pool.mojo`（`max_size` と再利用）を新設し、`pixi.toml` の `example-*` タスクに足す。
+  配列は `examples/params.mojo` か `binary.mojo` に `= ANY($1)` と `List[T]` の受信を追記する。全 examples が単体で実行できること
+- `Connection.execute` の docstring の「COPY は未対応」の記述（`src/pq/connection.mojo:266-269` 付近）を `copy_in` / `copy_out` への案内に書き換える
+- state の `verify_round_max` は 4（D1）
+- §2.4 の堅牢性
 
 ## 5. 用語集
-- **check**: `tests/final_check.sh`（`pixi run check`）。fmt / precompile / docstring / examples / tests / zero-warnings の 6 段
-- **配布物**: `pixi build` が生成する `.conda`（プラットフォーム別）とソース tarball
-- **持ち越し**: Phase 5 VERIFICATION §6.3 の残留リスクのうち本マイルストーンで引き取る 2 件
+
+- **配列 OID**: `pg_type.typarray`。要素型 OID ごとに 1 つ（例: int4 = 23 → `_int4` = 1007）
+- **要素デコーダ**: 既存の `decode_text[T]` / `decode_binary[T]`。配列デコーダは要素ごとにこれを呼ぶ
+- **COPY IN / COPY OUT**: libpq の `PGRES_COPY_IN`（`COPY ... FROM STDIN`）/ `PGRES_COPY_OUT`（`COPY ... TO STDOUT`）
+- **プール**: 同期 `Connection` を保持して貸し出す器。詳細は §2.3
 
 ## 6. フェーズ横断の注意（plan / impl / verify 向け）
-- **外向きの操作の線引き**: 無人ターンが行ってよいのは `gsd-lite/phase6-packaging-ci` の push と PR 作成・更新だけ。
-  タグ push、Release 作成、リポジトリ設定（ブランチ保護・Actions 設定）の変更、main への push はしない。
-- **verify の CI 待ち**: PR 作成後 `gh pr checks <PR> --watch`（または `gh run watch`）で 3 ジョブの完了を待つ。上限はおおよそ 40 分。
-  赤なら失敗ジョブのログ（`gh run view --log-failed`）の要点を VERIFICATION に写して差し戻す。CI の再実行は `gh run rerun --failed` を 1 回まで。
-- **PR 上で CI が走る前提**: ワークフローは PR のブランチ側にあれば `pull_request` で動く（default branch に無くてもよい）。
-  `workflow_dispatch` は default branch にファイルが無いと起動できない場合があるので、タグ無し経路の確認は CI 側の `pixi build` artifact を主にする（research で確認）。
-- **research のプローブ**: 採る前に実在を確かめる（Phase 5 reflect）。最低限 (1) `pixi build` を実際に 1 回通す（pixi-build-mojo + Mojo 1.1.0）、
-  (2) conda-forge / modular-community に `pq` が無いことを確認、(3) `ubuntu-24.04-arm` で docker compose が使えること、(4) macOS ランナーでの PostgreSQL 起動手順の前例。
-- **ローカルの開発機は linux-aarch64**。x86_64 と macOS は CI でしか検証できないので、impl は PR 作成前にローカルで `pixi run check` と `pixi build` を通し、
-  CI 固有の失敗は verify の差し戻しで直す（impl が CI を待つ必要はない。ただし impl が push して CI を先に見ることは妨げない）。
-- **Phase 5 reflect の運用提案を引き継ぐ**: チェックリスト期待値は `≥` で書く／VERIFICATION の指摘表に grep パターン・件数・ファイルの 3 列／
-  TRACE.md に「チェックリスト（turn N）」節／PROGRESS の最新ターン節は 40 行以内／サブエージェント完了待ちは `sleep` か完了通知で（mtime ループ禁止）。
+
+- **外向きの操作の線引き**（Phase 6 D15 を継続）: 無人ターンが行ってよいのは `gsd-lite/phase7-pool-copy-array` の push と
+  PR 作成・更新だけ。タグ push、Release 作成、リポジトリ設定変更、main への push はしない
+- **verify の CI 待ち**: PR 作成後 `gh pr checks <PR> --watch` で 3 ジョブを待つ（上限約 40 分）。再実行は `gh run rerun --failed` 1 回まで。
+  自分が起動していない run は `gh run view <id> --json event,headSha,createdAt` を写してから判断する
+- **research のプローブ**: 採る前に実在を確かめる。最低限 (1) `std.atomic` 以外の並行プリミティブが Mojo 1.1.0 に無いことの再確認
+  （discuss のプローブ: `std.threading` / `std.sync` / `parallelize` は不在、`std.atomic.Atomic[T]` は存在）、
+  (2) `PQputCopyData` / `PQputCopyEnd` / `PQgetCopyData` のシグネチャを `libpq-fe.h` で確認、
+  (3) 配列のバイナリ形式を `array_send` / `array_recv`（`src/backend/utils/adt/arrayfuncs.c`）で確認、
+  (4) 19 型の `typarray` OID を `SELECT oid, typname, typarray FROM pg_type` で実測
+- **ローカルの開発機は linux-aarch64**。x86_64 と macOS は CI でしか検証できない
+- **Phase 5 / 6 reflect の運用提案を引き継ぐ**: チェックリスト期待値は `≥` で書く／VERIFICATION の指摘表に grep パターン・件数・ファイルの 3 列／
+  TRACE.md に「チェックリスト（turn N）」節／PROGRESS の最新ターン節は 40 行以内／サブエージェント完了待ちは `sleep` か完了通知で／
+  YAML / sh の key を数えるときはコメント行を除外／サブエージェントの依頼文に親の待ち合わせファイル名を書かない

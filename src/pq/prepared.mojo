@@ -169,11 +169,13 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
             The `Result` of the statement, owning the `PGresult*`.
 
         Raises:
-            PgError: `PgErrorKind.USAGE` when `len(params)` differs from
-                `param_count()` (`prepared statement "<name>" takes K
-                parameters, got M`) or when a `String` parameter contains a
-                NUL byte (`embedded NUL byte in parameter $N`); nothing is
-                sent to the server in either case. Otherwise
+            PgError: `PgErrorKind.USAGE` when a COPY is in progress on the
+                connection (`a COPY is in progress on this connection`), when
+                `len(params)` differs from `param_count()` (`prepared
+                statement "<name>" takes K parameters, got M`) or when a
+                `String` parameter contains a NUL byte (`embedded NUL byte in
+                parameter $N`); nothing is sent to the server in any of those
+                cases. Otherwise
                 `PgErrorKind.CONNECTION` when libpq returns no result at all
                 or the connection was lost and libpq reported it without an
                 SQLSTATE, or `PgErrorKind.SERVER` when the server reports a
@@ -182,6 +184,7 @@ struct PreparedStatement[origin: ImmOrigin](Movable):
                 `detail`, `hint`, `position` and `context` when libpq supplies
                 them.
         """
+        self._conn[]._check_not_copying()
         if len(params) != len(self._param_types):
             raise PgError(
                 PgErrorKind.USAGE,

@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Phase 7: 19 種の配列型をテキスト・バイナリ両形式でデコードし、`List[T]` / `List[Optional[T]]` として受信・送信できるようにした。`COPY` を扱う `copy_in` / `copy_out`（`CopyIn` / `CopyOut`）、単一スレッド前提のコネクションプール `Pool` / `PooledConnection`、接続の状態を捨てる `Connection.reset()` を追加。
+
 ## [0.1.0] - 2026-10-18
 
 ### Added

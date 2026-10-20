@@ -179,6 +179,28 @@ struct LibpqFFI(Movable):
         "C"
     ) -> PGnotifyPtr  # libpq-fe.h:544
 
+    # --- COPY -----------------------------------------------------------
+    #
+    # `PQputCopyEnd`'s second argument is the optional error message, a
+    # `const char *` that is NULL for a normal end of COPY. It is typed `Int`
+    # rather than `OptCStr` so a caller can pass a plain 0 for that case and
+    # the address of its own buffer otherwise.
+    #
+    # `PQgetCopyData`'s second argument is an out-parameter: libpq writes the
+    # address of a buffer it malloc'd into it, which the caller must release
+    # with `PQfreemem`. `Pointer[Int, MutUntrackedOrigin]` is that `char **`.
+    var PQputCopyData: def(PGconnPtr, CStr, c_int) thin abi(
+        "C"
+    ) -> c_int  # libpq-fe.h:547
+    var PQputCopyEnd: def(PGconnPtr, Int) thin abi(
+        "C"
+    ) -> c_int  # libpq-fe.h:548
+    var PQgetCopyData: def(
+        PGconnPtr, Pointer[Int, MutUntrackedOrigin], c_int
+    ) thin abi(
+        "C"
+    ) -> c_int  # libpq-fe.h:549
+
     def __init__(out self, path: String) raises:
         comptime FLAGS = RTLD.NOW | RTLD.GLOBAL | RTLD.NODELETE
         self._lib = OwnedDLHandle(path, FLAGS)
@@ -365,3 +387,15 @@ struct LibpqFFI(Movable):
         self.PQnotifies = _dl_sym[def(PGconnPtr) thin abi("C") -> PGnotifyPtr](
             self._lib, "PQnotifies"
         )
+
+        self.PQputCopyData = _dl_sym[
+            def(PGconnPtr, CStr, c_int) thin abi("C") -> c_int
+        ](self._lib, "PQputCopyData")
+        self.PQputCopyEnd = _dl_sym[def(PGconnPtr, Int) thin abi("C") -> c_int](
+            self._lib, "PQputCopyEnd"
+        )
+        self.PQgetCopyData = _dl_sym[
+            def(
+                PGconnPtr, Pointer[Int, MutUntrackedOrigin], c_int
+            ) thin abi("C") -> c_int
+        ](self._lib, "PQgetCopyData")
