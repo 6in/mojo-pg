@@ -152,3 +152,19 @@
 - 次への注意: T9 は最終判定（堅牢性格子の全セル + `db-reset` からの `check` + 受け入れ基準対応表 + branch push）。`scratch/turn-003-robust-grid.sh` を `turn-011-robust-grid.sh` に写し `copy.mojo` / `pool.mojo` / `params.mojo` の行を有効化する。
   **PLAN T9 (b) の閾値 300 s は green な 2 回（turn 9 = 321 s、turn 10 = 423 s）とも超えている**。T9 は `db-reset` 後に計測してから、閾値そのものを訂正するか判断すること（1 回の計測で決めない）。母数は **260〜425 s** で読む。
   `absent` は 0 件になったので、T9 で動くチェックリストの key は無い（全 77 key が期待値のまま維持されることの確認だけ）。PROGRESS の最新節 ≤ 40 行の検査が T9 (c) にあるので注意
+
+## turn 11 — impl — T9 最終判定（堅牢性格子 全セル + クリーン check + 受け入れ基準対応表 + push）
+- やったこと: (a) `scratch/turn-011-robust-grid.sh`（`turn-003` の写し、違いは `BIN` のパスと冒頭コメント）を `db-reset` 直後に実行 → examples **7 本**ビルド成功（turn 3 で `absent` だった `copy` / `pool` が実体に）、**126 セル全部 `unhandled_markers=0`**（`traceback` / `exception_ignored` も 0）。
+  rc は 0 が 39 / 1 が 73 / **141 が 14 = `run_epipe` の 7 本 × 2 入力ちょうど**（既知の SIGPIPE）。入力軸の追加分（配列リテラル不正 10 件 / バイナリヘッダ不正 6 件 / COPY 途中切断 2 件 / プール枯渇・死んだ接続 5 件）の所在を TRACE の表に。
+  (b) `db-reset` → `check` を**クリーン状態で 1 回**: `final_check: PASS`、**298 s**（21:15:26 → 21:20:24）。段ごとは 1/6 fmt 1 s（差分 0）/ 2/6 precompile 4 s / 3/6 docstring 3 s（欠落 0）/ 4/6 examples 20 s（7 本）/ 5/6 tests 264 s（54317 176 s（`test_leak` 89 s 含む）/ 54314 83 s）/ 6/6 0 件。
+  `PASS` 行 **1524 = turn 9 / 10 と同数**（T9 はテストを増やさない）、`FAIL` **0 = 既存テストの期待値変更 0 件**。`pixi run package` は 2/6 段が兼ねる（警告 0）、`fmt` 差分は 1/6 段が 0。
+  (c) チェックリスト **77 key すべて期待値・`absent` 0 件**（turn 10 との差は `trace_checklist_section` 6 → 7 → 8 の 1 key だけ。生値は TRACE「チェックリスト（turn 11）」）。PROGRESS 最新節は 40 行以内。
+  (d) TRACE に「受け入れ基準対応表」（REQ §4.1 4 行 / §4.2 8 行 / §4.3 8 行 / §4.4 6 行 → テスト名 + 完了基準番号）と「verify への申し送り」（P1〜P29 の grep パターン / 件数 / ファイルの 3 列 + 表に乗らない 5 項目）。測り方は `scratch/turn-011-pitfalls.sh` に残した。(e) branch push 済み
+- PLAN 訂正 2 件（詳細は TRACE「PLAN 訂正（turn 11）」）: ① T9 (a) の「配列リテラル不正 9 件」は実測 **10 件**（P7 の 9 件 + T2 が足した `test_malformed_dimension_prefix_without_equals`）→ 実測を正とし PLAN の件数を直した。
+  ② **T9 (b) の閾値 300 s は訂正しない**（turn 10 の申し送りは「超えるなら訂正を判断」だったが、クリーン実測 298 s が閾値内に収まった）
+- 想定外: (1) `check` が turn 10 の 423 s から **298 s に戻った**（−125 s）。テストもコードも増えていないので差は 1 サーバー目のコンパイル時間の揺れで、turn 11 は堅牢性格子が先に 7 本をビルドしてキャッシュを暖めていた分だけ速い。母数は **260〜425 s** のまま読む（1 回の測定で閾値を動かさない turn 7 の注意どおり、今回は閾値内なので据え置き）。
+  (2) `python3 -c "..."` に日本語とバックティックを混ぜた追記を Bash ツールから渡すと、二重引用符の中のバックティックがシェルのコマンド置換として走って本文が空に化けた（TRACE に 1 回書き損じ → 同じ節を scratch の `.md` ファイル経由で書き直した）。**長い本文は必ず Write でファイルに書いてから python3 で連結する**
+- やり直し: 1 回（上記 (2) の TRACE 追記。`## PLAN 訂正（turn 11）` 以降を切り落として `turn-011-plan-fix.md` から書き戻した。検証コマンドの赤は 0 回）
+- 陽性対照: T9 には新しい対照なし（格子の判定は「全セル 0」で、対照は T6 / T7 / T9 (a) の入力軸テスト側が持つ）。格子が「別経路を見ている」証拠は rc の分布（`run_epipe` の 14 セルだけが 141）で確認した
+- 次への注意: **全 9 タスク完了 → verify フェーズへ**（`phase: "verify"` / `next_command: "/gsd-lite-verify"`）。verify への申し送りは TRACE「verify への申し送り（turn 11 / T9 (d)）」に集約した（P1〜P29 の対応表 + 差し戻し対象にしない 2 項目 = `CopyOut` が `Iterator` でない（決めた事項 7）と REQ §4.3 の `copy_in` 未完了 drop の読み替え（決めた事項 20））。
+  **CI は未実施**（`ci.yml` は `pull_request` / `push(main)` のみ。T9 の branch push では run が起動しない）→ PR を作るのは verify。3 OS の赤は OS 固有の経路（`close(PQsocket)` の EBADF / `pg_stat_activity` の権限）から見る。`verify_round_max` は 4
