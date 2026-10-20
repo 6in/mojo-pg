@@ -73,6 +73,7 @@ from pq._ffi.types import (
     PGRES_COMMAND_OK,
 )
 from pq.connection import Connection
+from pq.copy import CopyIn, CopyOut
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.params import Param
 from pq.prepared import PreparedStatement
@@ -479,3 +480,57 @@ struct Transaction[origin: ImmOrigin](Movable):
         var types = List[UInt32]()
         var name = self._conn[]._prepare_parts(sql^, param_types, types)
         return PreparedStatement[Self.origin](self._conn, name^, types^)
+
+    def copy_in(self, var sql: String) raises PgError -> CopyIn[Self.origin]:
+        """Start a `COPY ... FROM STDIN` inside the block.
+
+        The rows are part of the transaction, so `commit()` keeps them and
+        `rollback()` -- including the implicit one a destroyed `Transaction`
+        sends -- loses them. The stream borrows the same connection this
+        transaction borrows, so it carries this transaction's `origin`.
+
+        Both values are destroyed by Mojo right after their last use, and
+        **the order matters**: if the transaction's last use comes first, its
+        `ROLLBACK` is sent while the COPY is still open and cancels it. Put
+        `commit()` after `finish()`, or keep the stream alive with `_ = c^`.
+
+        The `COPY` command itself goes through `Connection._copy_in_parts`,
+        shared with `Connection.copy_in`; only the final value is built here,
+        on this transaction's own borrow.
+
+        Args:
+            sql: A `COPY ... FROM STDIN` statement.
+
+        Returns:
+            A `CopyIn` bound to the borrowed connection's origin, holding this
+            transaction's rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when the block was already ended,
+                otherwise whatever `Connection.copy_in` raises.
+        """
+        self._check_open()
+        self._conn[]._copy_in_parts(sql^)
+        return CopyIn[Self.origin](self._conn, self._handler)
+
+    def copy_out(self, var sql: String) raises PgError -> CopyOut[Self.origin]:
+        """Start a `COPY ... TO STDOUT` inside the block.
+
+        The read sees the transaction's own snapshot, so rows written earlier
+        in the block are included. Everything `copy_in` says about origins and
+        destruction order applies here too.
+
+        Args:
+            sql: A `COPY ... TO STDOUT` statement.
+
+        Returns:
+            A `CopyOut` bound to the borrowed connection's origin, holding
+            this transaction's rollback-failure handler.
+
+        Raises:
+            PgError: `PgErrorKind.USAGE` when the block was already ended,
+                otherwise whatever `Connection.copy_out` raises.
+        """
+        self._check_open()
+        self._conn[]._copy_out_parts(sql^)
+        return CopyOut[Self.origin](self._conn, self._handler)

@@ -187,7 +187,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T3, T4
   - 並列サブ作業: なし（推奨 0 本。テスト 1 ファイルのみ、親が直接書く）
 
-- [ ] T6: `src/pq/copy.mojo`（`CopyIn` / `CopyOut`）+ `Connection` / `Transaction` / `PreparedStatement` の結線 + `_check_not_copying` + `tests/test_copy.mojo`
+- [x] T6: `src/pq/copy.mojo`（`CopyIn` / `CopyOut`）+ `Connection` / `Transaction` / `PreparedStatement` の結線 + `_check_not_copying` + `tests/test_copy.mojo`
   - 完了基準:
     - (a) `src/pq/copy.mojo` 新設（決めた事項 11〜13）: `struct CopyIn[origin: ImmOrigin](Movable)`（`_conn: Pointer[Connection, origin]`, `_done: Bool`, `_handler: def(PgError) thin`）に
       `write(mut self, bytes: Span[UInt8]) raises PgError` / `write(mut self, s: String) raises PgError`（`s.as_bytes()` で前者へ）/ `finish(mut self) raises PgError -> Result` / `abort(mut self, var message: String) raises PgError` / `__deinit__`。

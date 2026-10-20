@@ -335,6 +335,7 @@ from ._ffi.types import (
 )
 from .async_conn import AsyncConnection, AsyncState, Notification, PollState
 from .connection import Connection
+from .copy import CopyIn, CopyOut
 from .errors import PgError, PgErrorKind
 from .params import Param
 from .prepared import PreparedStatement
