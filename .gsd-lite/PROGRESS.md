@@ -135,3 +135,20 @@
   **README のコード片は examples から逐語**で、`python3 .gsd-lite/logs/phase5-polish-bench-readme/scratch/turn-008-readme-excerpts.py` を必ず回す。`examples/pool.mojo` は `Pool.open(conninfo, 2)` → 3 本目の `USAGE` → drop → 同じ pid の再利用まで（`backend_pid` は `SELECT pg_backend_pid()`）。
   `check` は 321 s（余裕 59 s）、母数 260〜370 s の揺れ込み。T8 の増分は examples 2 本（2 s × 2 サーバー）と文書だけ。`pool_*` のキーは全部埋まったので T8 は README 系 12 行と件数 3 行だけが動く。
   **struct に parameter を足したら docstring に `Parameters:` 節**（(3)）。テスト側で数える副作用カウンタは環境変数（(4)）
+
+## turn 10 — impl — T8 README / CHANGELOG / `__init__` docstring / examples 2 本 / pixi / final_check（サブエージェント 2 本で並行）
+- やったこと: (a) `examples/copy.mojo` 新設（1,000 行を `copy_in` で書き `finish().affected_rows()`、`copy_out` を `while True: next()` で読み、行数とバイト数の往復一致を検査して不一致は `exit(1)`）、`examples/pool.mojo` 新設（`Pool.open(conninfo, 2)` → `acquire` ×2 → 3 本目が `USAGE`「pool exhausted」→ 1 本 drop → 再 `acquire` が同じ `pg_backend_pid()`、`size/idle/borrowed` を印字）。
+  `examples/params.mojo` に `= ANY($1)`（`List[Int32]` を `[ids^]`）と `array_agg` を `List[String]` で読む節を追記（`EXPECTED_ROWS` と既存ロジックは不変）。`pixi.toml` に `example-copy` / `example-pool`、`final_check.sh` の 4/6 段に 2 行（examples 5 → **7 本**）。
+  (b) README: 英語要約に `arrays, COPY and a single-threaded connection pool`、型マッピング表に配列行 + 1 次元のみ / 要素 OID 完全一致 / `array element N:` の段落、`### パラメータバインド` に `List` パラメータの散文、クイックスタートに `### COPY` と `### コネクションプール`、「既知の制限」の「配列型・COPY・プールは対象外」1 項目を **9 項目**に差し替え。CHANGELOG の `[Unreleased]` に `- Phase 7:` 1 行。
+  (c) 親: `src/pq/__init__.mojo` の docstring（Phase 7 の行 / re-export 列挙に `CopyIn` `CopyOut` `Pool` `PooledConnection` / 型表と `## Parameters` 表に配列行 / 新節 `## COPY` と `## Connection pool`）。`Raises:` の USAGE 句は T6 で済んでいた（7 箇所確認済み）。
+  `check` 6/6 PASS = **423 s**。テストケースの `PASS` は **1524 = turn 9 と同数**（T8 はテストを増やさないので正しい）、`FAIL` 0 = **既存テストの期待値変更 0 件**。3/6 段の docstring 欠落 0、6/6 段の警告 0、`fmt` 差分 0。チェックリストは **77 key すべて期待値・`absent` 0 件**（T8 の 18 行が到達。生値は TRACE「チェックリスト（turn 10）」）
+- PLAN 訂正 1 件（詳細は TRACE「PLAN 訂正（turn 10）」）: T8 (b) の「パラメータ表（`:141-159`）」は **README に存在しない**（`:141-159` は libpq の探索順で、パラメータの説明は `### パラメータバインド` の散文 `:207-210`。PLAN の行番号が phase 5 時点の写しだった）→ 実物を正とし同じ節の**散文**として追記、PLAN.md の該当行も訂正。`__init__.mojo` 側の `## Parameters` は表があるので PLAN どおり行追加
+- 想定外: (1) 並列 2 本のうち B（README）は A（examples）のコードを逐語で写す必要があり本来は直列依存 → **親が抜粋 19 + 11 + 4 行を先に確定し、同じ固定文言を両方の依頼文に書く**ことで並列化した。結果、照合器は 1 回目から全 9 ブロック missing 0（親の手直し 0 箇所）。
+  (2) `len(String)` は Mojo 1.1.0 で不可（`a single length is ambiguous`）→ A は `_row_text(i).byte_length()` を使った。抜粋の `len(payload)` は `payload` が `List[UInt8]` なので無関係。
+  (3) 照合器の `missing_total=1` は**変更前からの既存**（インストール節の ```mojo に `###` 見出しが無く `NO-SOURCE` になる）。`git show HEAD:README.md` を別ディレクトリに出して baseline を実測し、回帰でないことを確認した。
+  (4) `check` が turn 9 の 321 s から **+102 s（423 s）**。増えた実体は 4/6 の examples 2 本（約 +10 s）だけで、残り約 90 s は 1 サーバー目のコンパイル時間の揺れ（5/6 の内訳は 54317 で 290 s / 54314 で 91 s、`test_leak` は 97 s = turn 9 の 94 s と誤差）
+- やり直し: 0 回（親・サブエージェントとも検証は 1 回で green。`pixi run package` と docstring 診断は `__init__.mojo` 編集直後に単体で先に通して、`check` を無駄にしないようにした）
+- サブエージェント: 2 本（A = examples 3 本 + `pixi.toml` + `final_check.sh` / B = README + CHANGELOG）。**どちらも固定文言の抜粋を 1 行も変えずに通した**ので親の統合修正は 0 箇所。契約外の提案 8 件はすべて**未実装のまま報告**（A: `CopyIn.abort` / CSV・binary COPY / `min_size`・`max_lifetime_s`・`close`・handler のデモ / `labels == [...]` の断言 / `example-all` タスク。B: トランザクション内 COPY の例 / `Pool.open` と `Connection.reset()` の API 節 / 配列リテラルの引用規則の詳細 / `List[UInt8]` と `List[T]` の区別の注記）
+- 次への注意: T9 は最終判定（堅牢性格子の全セル + `db-reset` からの `check` + 受け入れ基準対応表 + branch push）。`scratch/turn-003-robust-grid.sh` を `turn-011-robust-grid.sh` に写し `copy.mojo` / `pool.mojo` / `params.mojo` の行を有効化する。
+  **PLAN T9 (b) の閾値 300 s は green な 2 回（turn 9 = 321 s、turn 10 = 423 s）とも超えている**。T9 は `db-reset` 後に計測してから、閾値そのものを訂正するか判断すること（1 回の計測で決めない）。母数は **260〜425 s** で読む。
+  `absent` は 0 件になったので、T9 で動くチェックリストの key は無い（全 77 key が期待値のまま維持されることの確認だけ）。PROGRESS の最新節 ≤ 40 行の検査が T9 (c) にあるので注意

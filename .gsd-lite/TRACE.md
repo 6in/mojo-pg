@@ -868,3 +868,63 @@ turn 8 の 266 s から **+55 s**。内訳は新ファイル 2 本（約 +15 s�
    `var a = pool.acquire(); var p2 = pool^; _ = a.execute("SELECT 1")` が
    `error: use of uninitialized value 'pool'`（`turn-009-posctl-origin.mojo:30:18`）で
    コンパイル失敗 = 貸し出し中のプールは move できない。
+
+## チェックリスト（turn 10）
+
+`scratch/turn-010-checklist.log` の全文は 77 key。turn 9 からの差分は **18 行**で、
+全部 T8 の到達分。これで **`absent` は 0 件**（T8 の examples 2 本が最後の absent だった）:
+
+```
+readme_array_optional_row=0 -> 3                       # 期待値 >= 2
+readme_array_word=1 -> 8                               # 期待値 >= 8
+readme_copy_example=0 -> 2                             # 期待値 >= 2
+readme_pool_example=0 -> 2                             # 期待値 >= 2
+readme_out_of_scope_line=1 -> 0                        # 期待値 0
+readme_thread_unsafe=0 -> 5                            # 期待値 >= 2
+readme_en_arrays=0 -> 1                                # 期待値 >= 1
+changelog_phase7=0 -> 1                                # 期待値 >= 1
+changelog_phase_lines=6 -> 7                           # 期待値 7
+init_docstring_phase7=0 -> 1                           # 期待値 >= 1
+init_docstring_copy_in=0 -> 2                          # 期待値 >= 2
+examples_copy=absent -> exists
+examples_pool=absent -> exists
+examples_params_any=0 -> 1
+examples_copy_next=absent(examples/copy.mojo) -> 1
+pixi_example_tasks=5 -> 7                              # 期待値 7
+final_check_examples=5 -> 7                            # 期待値 7
+examples_mojo_count=7 -> 9                             # 期待値 9
+```
+
+不変を確認した key（T8 で動かしてはいけないもの）: `readme_19_types`=1（スカラの型数。
+配列は別行にしたので真のまま）、`readme_h2`=11（新節は `###`）、`test_file_count`=28、
+`src_mojo_count`=22、`src_def_ref_return`=0、`src_iterator_in_copy`=0、`tests_sh_bash4_only`=0。
+
+## PLAN 訂正（turn 10）
+
+1. **T8 (b) の「パラメータ表（`:141-159`）」は README に存在しない**。`README.md:141-159` は
+   「libpq の探索順」で、パラメータの説明は `### パラメータバインド` の散文（`:207-210`）。
+   PLAN の行番号は phase 5 時点の写しだった。要件・決定に触れないので**実物を正とし**、
+   `List[T]` / `List[Optional[T]]` のバイナリ送信・typarray・`List[String]`=1009・
+   名前付き `List` は `[ids^]` / `[ids.copy()]` を**同じ節の散文として**足した（表は作っていない）。
+   `src/pq/__init__.mojo` 側の `## Parameters` には表があるので、そちらは PLAN どおり行を追加した。
+
+## `check` の所要（turn 10 / T8 完了時点）
+
+`check` 1 回 = **423 s**（18:14:06 -> 18:21:09）、`final_check: PASS`。テストケースの
+`PASS` 行は **1524**（turn 9 と同数 = T8 はテストを増やさないので正しい。`grep -c PASS` の
+生値 1525 は末尾の `final_check: PASS` を 1 行拾ったもの）。`FAIL` 行は 0 =
+**既存テストの期待値変更 0 件**。6/6 段の警告 0、3/6 段の docstring 欠落 0。
+
+段ごとの実測: 1/6 fmt 1 s、2/6 precompile 4 s、3/6 docstring 3 s、
+**4/6 examples 26 s（7 本。copy / pool の 2 本増）**、**5/6 tests 389 s**、6/6 warnings 0 s。
+5/6 の内訳は **54317 で 290 s / 54314 で 91 s**（1 サーバー目が 28 本のコンパイルを全部払う）。
+`tests/test_leak.mojo` は **97 s**（turn 9 は 94 s。T8 は leak を触っていないので誤差）。
+
+**turn 9 の 321 s から +102 s だが、増えた実体は 4/6 の examples 2 本（約 +10 s）だけ**で、
+残り約 90 s は 1 サーバー目のコンパイル時間の揺れ。母数は turn 9 までの「260〜370 s」から
+**260〜425 s** に広げて読む必要がある。
+
+**T9 への申し送り（判断は T9 が行う）**: PLAN T9 (b) の閾値 **300 s** は、green な
+turn 9（321 s）と turn 10（423 s）の 2 回とも超えている。T9 (b) は `db-reset` 後の
+クリーン計測なので本番の値はこれよりさらに重くなる見込み。T9 は計測してから
+閾値そのものを訂正するか判断すること（1 回の計測で決めない: PROGRESS turn 7 の注意）。
