@@ -36,3 +36,17 @@
 - 次への注意: `check` の閾値は **380 s**（300 s ではない。TRACE の訂正節）。新しいサーバーテストは 1 件 ≈ 3.6 s × 2 サーバーで積み上がるので、T5 / T6 / T7 のテスト件数は所要に直結する。
   T2 は `decode_text.mojo` 単独（`parse_array_literal` + 40 分岐）で `test_decode_array.mojo` はサーバー不要 → `pixi run mojo run -I src tests/test_decode_array.mojo` だけで回せる。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）。
   `conn_transaction_parts_sites` と `copy_in_defs` / `copy_out_defs` は `pool.mojo` を見るので T7 まで `absent`。コメントを書いたらコミット前にチェックリストを 1 回（turn 3 は TRACE の 2 key 以外の差分なしを `diff` で確認した）
+
+## turn 4 — impl — T2 配列 OID 表 + テキスト配列リテラル + `decode_text` の 34 分岐
+- やったこと: (a) `decode_text.mojo` に `OID_*_ARRAY` 21 個 + `_array_elem_oid` / `_array_oid_of`。(b) `parse_array_literal`（`[0:1]=` 捨て / 引用の `\` unescape / 裸の trim と `NULL` / 入れ子 `{` は `multidimensional`）。
+  (c) `_decode_text_array[E]` + `_decode_text_string_array`（text 系 6 OID）+ `_require_no_nulls`（`array element N is NULL`）、要素失敗は `array element N: <元>`。(d) `List[E]` 17 + `List[Optional[E]]` 17 の分岐（既存のスカラ `List[UInt8]` と `String` wildcard は不変）。
+  (e) `tests/test_decode_array.mojo` 新設 **40 件 PASS**（サーバー不要、0.065 s）。チェックリスト T2 の 8 行は全部期待値（`oid_array_consts`=21 / `*_def`=1 ×4 / 35 / 17 / `test_decode_array_tests`=40。生値と総数 77 は TRACE「チェックリスト（turn 4）」）。
+  `db-up` → `check` 6/6 PASS = **310 s**（閾値 380 s。既存テストの期待値変更 0 件）
+- 想定外: (1) **要素型は 20 ではなく 17**（`decode_text` のスカラ分岐を数えた。`String` が 6 配列 OID、`Int`/`Int64` が同じ 1016 を受けるので 21 OID を 17 型で覆う）→ PLAN 訂正（下記）。
+  (2) `E: Copyable` だけでは `List[Optional[E]]` が `abandoned without being explicitly destroyed` で通らず **`Copyable & Deinitable`** が必要（`mojo run` の probe で判別。`turn-004-probe-str.mojo`）。
+  (3) `List[UInt8](0, 255)` の位置引数 ctor は無く `var x: List[UInt8] = [0, 255]` の形だけ（既存 `test_decode_text.mojo:309` と同じ）。(4) `{{}}` は PLAN (e) では「空」と並記だが、サーバー出力は `{}` のみなので入れ子 `{` の規則どおり `TYPE_MISMATCH`（`multidimensional`）にし、その理由をテストにコメントで書いた
+- やり直し: 2 回（(2) の Deinitable、(3) の `List` literal。どちらも PLAN の雛形に無い形で、コンパイルエラーで即分かった）
+- PLAN 訂正: 要素型 20 → **17**。checklist `decode_text_list_branches` 41 → **35** / `decode_text_optional_branches` 20 → **17**、同じ算術で `decode_binary_*` 1/35/17・`params_*_implicit` 35/17、本文の「40 分岐」→ 34・「40 本」→ 34・「20 要素型」→ 17（根拠は TRACE「PLAN 訂正（turn 4）」）
+- 陽性対照: `OID_TIMESTAMP_ARRAY` を 1115 → 1114 にすると `test_array_oid_constants_are_the_observed_typarray_values` だけが FAIL（`turn-004-posctl-oid.log`）。**両方向マップの 2 件は通ってしまった**ので、転記ミスを捕まえているのは literal で数値を固定したこの 1 件（PLAN (a) の「両方向 21 行」だけでは循環で検査にならない）→ 1 件足して 40 件
+- 次への注意: T3 は同じ 17 型で `decode_binary` に 34 分岐（期待値 1 / 35 / 17）。`_decode_binary_array` も `E: Copyable & Deinitable` が必要になる。`tests/test_decode_array.mojo` にバイナリ側を**追記**するので `test_decode_array_tests` は 40 → ≥ 54（PLAN の「≥ 32」は基線が 18 件想定。実際は 40 件あるので超過で問題なし）。
+  サーバー不要のテストファイルでも `check` は 1 本 ≈ 47 s 増える（両サーバー分のコンパイル）。残り 70 s なので T5〜T7 のサーバーテストは所要に注意。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）
