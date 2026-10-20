@@ -538,3 +538,164 @@ PLAN 53-55 行の見積もり（`test_array` ≈ 3 s）は実行時間として�
 - 対照として `tests/test_encode_binary.mojo`: `test_array_of_no_elements_is_three_int32s` 1 件だけ FAIL
 
 判別できた（どちらのファイルも 1 件に絞られる）ので差し替えは不要。
+
+## チェックリスト（turn 8）
+
+`scratch/turn-008-checklist.log` の全文（**全 77 key**）。turn 7 からの差分は 14 行で、
+うち 11 行が T6 の到達分（残り 3 行は `trace_checklist_section` と件数 2 本）:
+
+```
+trace_checklist_section=3 -> 4
+copy_mojo=absent -> exists
+copyin_struct / copyout_struct / copy_drain_def=absent(src/pq/copy.mojo) -> 1 / 1 / 1
+conn_copy_parts_defs=0 -> 2
+conn_check_not_copying_def=0 -> 1
+check_not_copying_sites=0 -> 7          # 期待値 >= 7
+conn_docstring_copy_unsupported=1 -> 0  # 期待値 0
+init_export_copy=0 -> 1
+test_copy_tests=absent -> 21            # 期待値 >= 18
+src_iterator_in_copy=absent -> 0        # 不変（Iterator / Iterable を付けない）
+test_file_count=26 -> 27                # T7 で 28
+src_mojo_count=20 -> 21                 # T7 で 22
+```
+
+`copy_in_defs` / `copy_out_defs` / `conn_transaction_parts_sites` は `absent(src/pq/pool.mojo)`
+のまま（PLAN の「`absent(pool.mojo)` は T7 まで許容」）。`Connection` と `Transaction` の
+`def copy_in` はそれぞれ 1 本（`grep -cE 'def copy_in'` で確認）= T6 の期待値 2 / 2。
+
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=4
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=exists
+copyin_struct=1
+copyout_struct=1
+copy_drain_def=1
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=2
+conn_check_not_copying_def=1
+check_not_copying_sites=7
+conn_docstring_copy_unsupported=0
+init_export_copy=1
+test_copy_tests=21
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=27
+src_mojo_count=21
+src_def_ref_return=0
+src_iterator_in_copy=0
+tests_sh_bash4_only=0
+```
+
+## PLAN 訂正（turn 8）
+
+- T6 ⑩（COPY IN 途中切断）の「`write` が `CONNECTION`」は**どの `write` かを固定できない**:
+  `PQputCopyData` はバッファに積むだけで、実際に flush した呼び出しでしか `-1` を返さない。
+  4 byte 行では close 後 5 回の `write` と `PQputCopyEnd` が全部 `1` を返し、約 8.3 KB
+  チャンクでは close 直後の 1 本目が `1`、**2 本目**が `-1`（PG14 / PG17 同一）。
+  → テストは 1000 行（約 10 KB）チャンクを上限 64 回まで回して**最初に失敗した `write`** を
+  `CONNECTION` と断言し、その次の `write` と `finish` を `USAGE` と断言する形にした。
+  PLAN 215 行の括弧内「（測定: close 後の最初の `write` がすでに -1 を返す）」は turn 1 の
+  プローブが 1000 行チャンクだったときの観測で、チャンクサイズ依存のため契約にしない。
+- T6 ⑭（`Transaction` が `CopyIn` より先に死ぬ順序）の handler ≥ 1 は成立するが**理由が違う**:
+  `PQexec("ROLLBACK")` は COPY IN 中でも**成功する**（`PGRES_COMMAND_OK`。libpq が自前で
+  `CopyFail` を送り `57014` を飲んでから ROLLBACK を走らせる）ので `Transaction.__deinit__` は
+  handler に到達しない。handler を呼ぶのは**その後の `CopyIn.__deinit__`**で、その
+  `PQputCopyEnd` が `-1`（`no COPY in progress`、sqlstate 無し）を返し `57014` でないため
+  報告される。テストの docstring にこの経路を書いた（断言は PLAN どおり handler ≥ 1）。
+
+## `check` の所要（turn 8 / T6 完了時点）
+
+`check` 1 回 = **266 s**（17:13:00 -> 17:17:26、閾値 380 s）。`PASS` 行は **1486**
+（turn 7 は 1444。+42 = 21 件 x 2 サーバー）。`tests/test_copy.mojo` の実測は
+`final_check.log` の計測行で **54317 で 6 s / 54314 で 5 s**。
+
+turn 7 の 298 s より **32 s 短い**（足したのは新ファイル 1 本だけで増える方向しかない）。
+turn 6 の「±50 s の揺れ」の再現で、母数は依然 **260〜370 s** と読む。
+T7 の新ファイル 2 本（`src/pq/pool.mojo` / `tests/test_pool.mojo`）を足しても
+266 + 20 前後 = 290 s 程度の見込みで、閾値 380 s には余裕がある。
+
+**注意**: サブエージェントの報告にあった「test_copy は 1 サーバー 334 s」は
+`TestSuite` の `Summary [ 334 ]` を秒として読んだもの（turn 7 で実測した**ミリ秒**が正しい）。
+`final_check.log` の `took 6s` が実測値。
+
+## 陽性対照（turn 8）
+
+`scratch/turn-008-posctl-copying.sh` / `.log`。`src/pq` の**写し**（実行後に削除）で
+`Connection._check_not_copying` の本体を `return` に差し替えた（シグネチャと 7 箇所の
+呼び出しはそのまま = T6 以前の状態）。
+
+libpq は COPY 中の `PQexec` を拒否せず、**書いた行を黙って捨ててから**新しいコマンドを
+成功させる（turn 1 の `probe-copy.log` case 5: `execute during COPY IN returned rows: 1` /
+`rows a>=800000: 0`）。なので対照の判定は「USAGE が出なくなる」だけでなく
+「その後の `finish()` が 2 行でなく 0 行を数える」でもある:
+
+- `tests/test_copy.mojo`: **`test_every_other_command_during_a_copy_is_usage` 1 件だけ** FAIL（20 passed / 1 failed）
+- 対照として `tests/test_transaction.mojo`: 13 件すべて PASS（0 failed）
+
+判別できた（1 件に絞られ、無関係なファイルは無傷）ので差し替えは不要。
