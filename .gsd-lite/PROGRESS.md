@@ -50,3 +50,14 @@
 - 陽性対照: `OID_TIMESTAMP_ARRAY` を 1115 → 1114 にすると `test_array_oid_constants_are_the_observed_typarray_values` だけが FAIL（`turn-004-posctl-oid.log`）。**両方向マップの 2 件は通ってしまった**ので、転記ミスを捕まえているのは literal で数値を固定したこの 1 件（PLAN (a) の「両方向 21 行」だけでは循環で検査にならない）→ 1 件足して 40 件
 - 次への注意: T3 は同じ 17 型で `decode_binary` に 34 分岐（期待値 1 / 35 / 17）。`_decode_binary_array` も `E: Copyable & Deinitable` が必要になる。`tests/test_decode_array.mojo` にバイナリ側を**追記**するので `test_decode_array_tests` は 40 → ≥ 54（PLAN の「≥ 32」は基線が 18 件想定。実際は 40 件あるので超過で問題なし）。
   サーバー不要のテストファイルでも `check` は 1 本 ≈ 47 s 増える（両サーバー分のコンパイル）。残り 70 s なので T5〜T7 のサーバーテストは所要に注意。T4 の最初に `List[String]` → `$1::varchar[]` を実測（P9）
+
+## turn 5 — impl — T3 バイナリ配列デコーダ + `decode_binary` の 34 分岐
+- やったこと: (a) `_decode_binary_array[E]`（`array_recv` と同じ検査順: 列 OID → 12 byte ヘッダ → `flags ∈ {0,1}` → `elemtype` 一致（両 OID をメッセージに）→ ndim 0 は dims を読まず空 / 負・2 以上は拒否 → dim → 要素長 -1 で NULL（flags は見ない。P1）→ 要素は `decode_binary[E]`、失敗は `array element N: <元>` → 末尾残り拒否。P3）+ `_decode_binary_string_array`（6 配列 OID）+ `_binary_array_oid_error`。`_require_no_nulls` は `decode_text` から import して text 側と同じ `NULL_VALUE` にする。
+  (b) `decode_binary[T]` に `List[E]` 17 + `List[Optional[E]]` 17（生成スクリプト `turn-005-gen-branches.py` で機械生成。既存 `String` / `List[UInt8]` は不変）。(c) `tests/test_decode_array.mojo` にバイナリ 23 件を追記 → **63 件 PASS**（0.126 s）。payload は `turn-005-gen-tests.py` が RESEARCH §2.3 の hex を組み直したもの（`_P_*` の comptime 定数 32 個）。
+  チェックリスト T3 の 3 行は期待値どおり（`decode_binary_array_def`=1 / `decode_binary_list_branches`=35 / `decode_binary_optional_branches`=17）。`check` 6/6 PASS（既存テストの期待値変更 0 件）
+- 想定外: (1) PLAN (a) は「`len > 残り` → `TYPE_MISMATCH`」しか書いていないが、**要素の長さ語 4 byte 自体の境界検査**が別に要る（`dim` が実要素数より多いと `bytes[pos:pos+4]` が範囲外になる）。同じ `TYPE_MISMATCH` を返す検査を 2 つ足した: 長さ語が読めない場合と、`dim > 残りバイト // 4` の事前検査（後者が無いと壊れた `dim` が巨大な `List` を予約しうる。どちらも PLAN の P3 と同じ結果で、早く落ちるだけ）。
+  (2) `check` が **368 s**（閾値 380 s、turn 4 は 310 s）。`test_decode_array` 単体で 14 s + 4 s = 18 s（34 分岐の instantiation がコンパイル時間になる）。残り 12 s しかないので T5〜T7 の新ファイル 3 本で**閾値を超える**見込み
+- やり直し: 0 回
+- 陽性対照: NULL 判定を `elem_len == -1 and flags == 1`（= P1 の罠）に変えると `test_binary_array_null_element_with_flags_zero` **だけ**が FAIL（`turn-005-posctl-flags.log`）。63 件中 1 件に効いている
+- 次への注意: T4 は `encode_binary.encode_array` と `params.mojo` の `@implicit` 34 本（期待値 1 / 35 / 17）。最初に `List[String]` → `$1::varchar[]` をサーバーで 1 回実測する（P9。未実測のまま OID 1009 固定にしている）。
+  `check` の所要が閾値に迫っている（368 / 380 s）。T5〜T7 で超えたら PLAN 53-55 行の見積もり（新ファイル 4 本で +60〜85 s）が低すぎたのが理由 — 実測は `test_decode_array` 1 本で +18 s なので、**超過は BLOCKED にせず PROGRESS に実測値と内訳を書いて進める**（PLAN 55 行の指示どおり）
