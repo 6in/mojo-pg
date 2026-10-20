@@ -409,3 +409,132 @@ int4[] with NULL OK -> {1,NULL,3}
 34 行の表が literal で固定されていて、転記ミスが検査されていることの証明（PLAN T4 (d)）。
 turn 4 の教訓（両方向マップだけでは循環で検査にならない）に従い、この表は `_array_oid_of` を呼ばずに
 数値を直書きしている。
+
+## チェックリスト（turn 7）
+
+`scratch/turn-007-checklist.log` の全文（**全 77 key**）。turn 6 からの差分は 3 行だけで、
+うち 2 行が T5 の到達分:
+
+```
+trace_checklist_section=2 -> 3   # turn 6 で追記した節の分（この節を足すと 4 になる）
+test_array_tests=absent(tests/test_array.mojo) -> 26   # T5 の期待値 >= 14
+test_file_count=25 -> 26         # tests は T7 で 28 になる見込み
+```
+
+T5 の行は 1 本だけ（`test_array_tests`）で、期待値 **>= 14** に対し **26**。
+
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=absent(src/pq/pool.mojo)
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=3
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=absent
+copyin_struct=absent(src/pq/copy.mojo)
+copyout_struct=absent(src/pq/copy.mojo)
+copy_drain_def=absent(src/pq/copy.mojo)
+copy_in_defs=absent(src/pq/pool.mojo)
+copy_out_defs=absent(src/pq/pool.mojo)
+conn_copy_parts_defs=0
+conn_check_not_copying_def=0
+check_not_copying_sites=0
+conn_docstring_copy_unsupported=1
+init_export_copy=0
+test_copy_tests=absent(tests/test_copy.mojo)
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=absent
+pool_struct=absent(src/pq/pool.mojo)
+pooled_struct=absent(src/pq/pool.mojo)
+pool_release_def=absent(src/pq/pool.mojo)
+pool_consume_input=absent(src/pq/pool.mojo)
+pool_rollback=absent(src/pq/pool.mojo)
+pool_monotonic=absent(src/pq/pool.mojo)
+init_export_pool=0
+test_pool_tests=absent(tests/test_pool.mojo)
+test_leak_tests=20
+test_leak_pool=0
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=26
+src_mojo_count=20
+src_def_ref_return=0
+src_iterator_in_copy=absent(src/pq/copy.mojo)
+tests_sh_bash4_only=0
+```
+
+## `check` の所要（turn 7 / T5 完了時点）
+
+`check` 1 回 = **298 s**（16:36:41 -> 16:41:39、閾値 380 s）。`PASS` 行は **1444**
+（turn 6 は 1392。+52 = 26 件 x 2 サーバー）。新ファイル `tests/test_array.mojo` の実測は
+**54317 で 17 s / 54314 で 4 s = 計 21 s**（1 本目はコンパイルを含む）。
+
+PLAN 53-55 行の見積もり（`test_array` ≈ 3 s）は実行時間としては当たっているが、
+**1 サーバー目のコンパイル込みで 17 s** なので、新規テストファイルの単価は
+「コンパイル 13 s + 実行 4 s」で読むのが正しい。turn 6 の「±50 s の揺れ」も残るので、
+残る T6 / T7 の新ファイル 2 本は +40 s 程度を見込む（298 + 40 = 338 s < 380 s）。
+
+`TestSuite` の `Summary [ N ]` の単位は**ミリ秒**（`turn-007-time.sh` で実測:
+サマリ 187 の回の `mojo run` 全体が 5 s、2 回とも同じ）。PROGRESS の turn 4 / 5 が
+「0.065 s」「0.126 s」と書いているのは秒として読んだもので、ターンの判断には影響しない。
+
+## 陽性対照（turn 7）
+
+`scratch/turn-007-posctl-encode.sh` / `.log`。`src/pq` の**写し**（`.gsd-lite/logs/.../scratch/`、
+実行後に削除）で `encode_array` の `ndim` を「空なら 0」から常に 1 に変えた。
+空配列は次元語を持たない唯一のペイロードなので、これは**他のどの配列も往復し続ける中で
+送信経路だけが間違える**1 箇所:
+
+- `tests/test_array.mojo`: **`test_array_param_empty_array_round_trips` 1 件だけ** FAIL（25 passed / 1 failed）
+- 対照として `tests/test_encode_binary.mojo`: `test_array_of_no_elements_is_three_int32s` 1 件だけ FAIL
+
+判別できた（どちらのファイルも 1 件に絞られる）ので差し替えは不要。

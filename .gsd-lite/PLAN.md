@@ -174,7 +174,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - A（親）: `encode_binary.mojo` + `params.mojo` + P9 のサーバー確認
     - B: `tests/test_encode_binary.mojo` の 3 件 + `tests/test_params.mojo` の 4 件（PLAN の (a)(b) のシグネチャと OID 表を依頼文に写す。親の待ち合わせファイル名は書かない）
 
-- [ ] T5: `tests/test_array.mojo` — サーバー格子（受信 17 型 × text / binary × `List` / `List[Optional]`、境界値、送信往復、`= ANY($1)`）
+- [x] T5: `tests/test_array.mojo` — サーバー格子（受信 17 型 × text / binary × `List` / `List[Optional]`、境界値、送信往復、`= ANY($1)`）
   - 完了基準（REQ §4.1 + RESEARCH §5-8。**≥ 14 件**。雛形 `tests/test_binary.mojo:699` `test_binary_scalars_match_text` の「text と binary で同じ値」の形）:
     - (a) 17 要素型（`Bool` / `Int16` / `Int32` / `Int64` / `Int` / `Float32` / `Float64` / `String` ×6 OID / `List[UInt8]` / `Decimal` / `UUID` / `Date` / `Time` / `TimeTz` / `Timestamp` / `TimestampTz` / `Interval`）それぞれ `SELECT ARRAY[...]::<type>[]` を `execute(sql)`（text）と `execute(sql, [], result_format=BINARY)` で取得し `List[T]` が一致。
       要素に Phase 3 の境界値（`test_binary.mojo:776,807` の最小 / 最大 / 0 / 負数 / NaN / ±Infinity / `infinity` 日時 / numeric の大きな桁）
