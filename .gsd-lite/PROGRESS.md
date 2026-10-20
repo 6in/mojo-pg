@@ -179,3 +179,22 @@
 - やり直し: 1 回（probe の `external_call` import 漏れ = コンパイルエラーで即判明）
 - 次への注意: F1 は 3 箇所とも同じ状態機械（`_check_not_copying` が入って変わった `execute` の失敗の仕方）なので、**修正前に ②③ のテストを書いて赤を見てから**直す（① は既存テストの期待値変更 1 件で PROGRESS に列挙）。
   `reset()` は閉じた fd 番号を取り直すので ③ は `reset()` 後に普通に使える。決めた事項 13 の訂正を TRACE「PLAN 訂正（turn 13）」に。round 2 の verify は F1 の回帰 + `check` + 格子だけ（新クラスの探索はしない）、合格なら PR 作成 → `gh pr checks --watch`
+
+## turn 13 — impl — F1 Transaction × COPY の状態機械 3 件 + テスト 5 件
+- やったこと: 指摘 1 = `Transaction.commit` / `rollback` が `_check_not_copying()` を `_done = True` の**前**に呼ぶ（拒否してもブロックは開いたまま）。
+  指摘 2 = `CopyIn` / `CopyOut` の `__deinit__` は `PQtransactionStatus != PQTRANS_ACTIVE` なら何も送らない（誤報の除去）。
+  指摘 3 = `write` の失敗が `PQerrorMessage` を先に読んでから `PQputCopyEnd(0)` + drain で終端（`finish` / `abort` の `rc < 0` にも drain）。
+  `test_copy.mojo` 21 → **26 件**、helper 4 本（`_tx_commit_error` / `_tx_rollback_error` / `_tx_copy_out` / `_reset`）。docstring は `CopyIn.write` の Raises / `copy.mojo` の destruction 節 / `Transaction.copy_in` の order 段落 / `Pool.acquire` の Raises。
+  **陽性対照**: 5 件を修正前に走らせて 4 件が赤（26 tests / 5 failed、内訳は TRACE「陽性対照（turn 13）」）。修正後 26/26 green。
+  `db-reset` → `check` **280 s** `final_check: PASS`（6/6、PASS 1534 / FAIL 0）。チェックリスト 77 key は `test_copy_tests` 21 → 26 の 1 行だけ差分（`trace_checklist_section` は TRACE 追記で 8 → 9）
+- 既存テストの期待値変更（**1 件**、F1 (d) ① のみ）: `test_transaction_destroyed_before_its_copy_in` の
+  `getenv(HANDLER_CALLS_VAR).byte_length() >= 1` → `== ""`（handler 0 回）。理由 = 先に `Transaction` の ROLLBACK が COPY を終わらせた後の
+  `CopyIn.__deinit__` の中止は libpq の `no COPY in progress`（sqlstate 無し）を引き、健全な接続について `CONNECTION` を handler に誤報していた。
+  docstring も「reports that through the handler」→「leaves the connection alone」に書き換えた
+- 想定外: F1 (d) ④（`close` 後の `finish()`）は**修正前から green**だった。`PQputCopyEnd` が `rc >= 0` を返して既存の `_copy_final_result` が drain する経路に入るため、
+  指摘 3 の対照になっていない（対照は ③ 1 本）。④ は REQ §4.2 の未テスト分として残した。
+  ついでに `finish` / `abort` の `rc < 0` 側に足した drain は**どのテストも踏んでいない**（同期接続で `PQputCopyEnd` が負を返す形を作れなかった）
+- やり直し: 0 回
+- 次への注意: round 2 の verify は F1 の回帰（`test_copy` 26 件 + 期待値変更 1 件が ① であること）+ クリーン `check` + 堅牢性格子 126 セルで足りる。
+  `check` の所要は同じ木で 280 s（クリーン）〜360 s（テスト直後）と揺れるので、閾値 300 s は**クリーン実測**で判定する（TRACE「`check` の所要（turn 13）」）。
+  未カバーの経路（`finish` / `abort` の `rc < 0` の drain）は指摘ではなく記録として残してある
