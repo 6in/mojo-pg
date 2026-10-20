@@ -300,6 +300,41 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T8
   - 並列サブ作業: なし（推奨 0 本）
 
+- [ ] F1: Transaction × COPY の状態機械 3 件（verify round 1 の指摘。VERIFICATION.md「指摘」表 1〜3）+ テスト 5 件 + docstring
+  - 根拠（verify turn 12 の実測。`scratch/turn-012-probe-failed-write{,-end}.mojo` / `.log`）:
+    1. `Transaction.commit()` / `rollback()`（`transaction.mojo:264-265` / `:290-291`）は `self._done = True` を**送信前**に立てるが、`Connection.execute` が T6 で足した `_check_not_copying()` は**何も送らずに** `USAGE` を raise する。
+       COPY 中に `tx.commit()` を呼ぶと `tx` は「終了済み」になるのに `COMMIT` も `ROLLBACK` も出ておらず、`__deinit__` の implicit ROLLBACK も止まる（サーバーは INTRANS のまま、`Transaction` API からは閉じられない）
+    2. `CopyIn.__deinit__` / `CopyOut.__deinit__` は COPY が**既に終わっている**（`Transaction` の ROLLBACK が先に走った T6 ⑭ の順序）ときも中止を送り、libpq の `no COPY in progress`（sqlstate 無し）を `CONNECTION` として handler に報告する。
+       既定 handler だと健全な接続で `pq: implicit ROLLBACK failed: ...` が stderr に出る。`test_transaction_destroyed_before_its_copy_in` はこの誤報を `>= 1` で固定している
+    3. `CopyIn.write` の `-1` の後（T6 ⑩）、libpq は `PQstatus` OK / `PQtransactionStatus` **ACTIVE のまま**で、以後の `execute` / `transaction()` / `prepare` が全部 `USAGE` `a COPY is in progress`（実際には何も進行していない）。出口は `reset()` だけで、docstring にも無い。
+       `PQputCopyEnd(0)` → `PQgetResult` を NULL まで回すと `PGRES_FATAL_ERROR` 1 件を消費して **IDLE** に戻り、以後の `execute` は `CONNECTION`（probe (b)）。`finish` / `abort` の `rc < 0` 経路も同じく drain していないので同じ形で stuck する
+  - 期待結果（完了基準とテストはこの表だけを参照する）:
+
+    | 条件 | 結果 |
+    |---|---|
+    | COPY 中（`CopyIn` / `CopyOut` が open）に `tx.commit()` / `tx.rollback()` | raise `USAGE` `a COPY is in progress on this connection`。`tx` は未終了のまま（その後 `finish()` → `tx.commit()` / `tx.rollback()` が通る） |
+    | 失敗した `write` の後の `execute` / `transaction()` / `prepare` | raise `CONNECTION`（`USAGE` ではない）。`transaction_status()` == `PQTRANS_IDLE`（0） |
+    | 書き込み成功後に `close(PQsocket)` → `finish()` | raise `CONNECTION`。その後の `execute` も `CONNECTION`、`transaction_status()` == 0 |
+    | 失敗した `write` / `finish` の後の `reset()` | 通る。以後の `execute` が通る |
+    | `tx` を先に drop（T6 ⑭ の順序）→ `CopyIn` の drop、同型で `CopyOut` の drop | handler **0 回**、トレースバック無し、`count(*)` 0、`execute` が通る |
+    | `CopyIn` を単独で drop / `abort()`（従来） | 57014 を飲む、handler 0 回（不変） |
+  - 完了基準:
+    - (a) `Transaction.commit` / `rollback`: `self._conn[]._check_not_copying()` を `self._done = True` の**前**に呼ぶ（上表 1 行目）。docstring の「marked ended before sending」段落に「COPY 中の拒否は送信前・`_done` 前」を 1 句
+    - (b) `CopyIn.write` の `rc != 1` 経路: `PQerrorMessage` を**先に 1 回**読んで保持 → `PQputCopyEnd(0)` → `_drain_results`（両方の戻り値は捨てる）→ `_done = True` → 保持した文言で `CONNECTION`。
+      `finish` / `abort` の `rc < 0` 経路も `_drain_results` を挟んでから raise（上表 2〜3 行目。決めた事項 13 の「`-1` の後は libpq を呼ばない」は「`PQerrorMessage` を先に読んでから終端・drain する」に訂正し、TRACE「PLAN 訂正（turn 13）」に 1 行）
+    - (c) `CopyIn.__deinit__` / `CopyOut.__deinit__`: `_done` でなくても `PQtransactionStatus(conn) != PQTRANS_ACTIVE` なら**何もしない**（中止を送らず handler も呼ばない: COPY は既に終わっている）。`ACTIVE` のときは現行どおり（上表 5〜6 行目）
+    - (d) `tests/test_copy.mojo`（≥ 21 → **≥ 25 件**。helper は `_tx_copy_in` `:652` / `_copy_write_until_connection_error` `:748` / `_assert_usable` `:991` / `_count_rollback_failure` `:1179` / `HANDLER_CALLS_VAR` を流用）:
+      ① **既存テストの期待値変更 1 件**: `test_transaction_destroyed_before_its_copy_in` の `>= 1` を **`== ""`（0 回）** に（docstring の「reports that through the handler」も書き換え。PROGRESS に「期待値の変更」として列挙）；
+      ② 新規 `tx.copy_in` → 1 行 `write` → `tx.commit()` が `USAGE` → `finish()` == 1 → `tx.commit()` が通り `count == 1`。同型で `tx.rollback()` → `USAGE` → `finish()` → `tx.rollback()` が通り `count == 0`（表 1 行目。2 件か 1 件にまとめても可）；
+      ③ 新規: ⑩ の形（close → `write` まで失敗）の後に `execute("SELECT 1")` が `CONNECTION`、`transaction_status() == 0`、`reset()` → `execute` が通る（表 2・4 行目。`reset()` が同じ fd 番号を取り直すので ⑩ の「記述子を開かない」注意は `reset()` 後には当たらない: probe 参照）；
+      ④ 新規: 2 chunk 書いて close → `finish()` が `CONNECTION` → `execute` が `CONNECTION`、`transaction_status() == 0`（表 3 行目。REQ §4.2「途中切断で `finish` が `CONNECTION`」の未テスト分）；
+      ⑤ 新規: `tx.copy_out` で 1 行読んで `_ = tx^` → `_ = stream^` → handler 0 回、`_assert_usable`（表 5 行目の `CopyOut` 側）
+    - (e) docstring: `CopyIn.write` の Raises（失敗は COPY も終端し、以後の接続は `CONNECTION`、回復は `reset()`）、`copy.mojo` モジュール docstring「Destruction ends the stream」節と `Transaction.copy_in` の「the order matters」段落（先に ROLLBACK が走った場合、stream の destructor は何もせず handler も呼ばない）、`Pool.acquire` の Raises（`reset()` の失敗は飲んで `_open_one` の失敗を上げる。現行の記述は実装と逆）。README「既知の制限」は変更不要
+    - (f) 共通: `check` 6/6 PASS、既存テストの期待値変更は (d) ① の 1 件だけ、チェックリスト 77 key は `test_copy_tests` ≥ 25 以外不変、PROGRESS 最新節 ≤ 40 行。陽性対照は不要（① 自体が (c) の対照、② が (a) の対照、③ が (b) の対照: 修正前のコードで赤になることを**修正前に 1 回**走らせて確認する）
+  - 対象: `src/pq/transaction.mojo`, `src/pq/copy.mojo`, `src/pq/pool.mojo`, `tests/test_copy.mojo`, `.gsd-lite/TRACE.md`
+  - 依存: T9
+  - 並列サブ作業: なし（推奨 0 本。3 箇所とも同じ状態機械で、テストは修正前に赤を見てから書く）
+
 ## 決めた事項
 
 1. **モジュール配置**（RESEARCH §6 の案を採用）: FFI は `src/pq/_ffi/functions.mojo`、配列 OID 表 + テキスト配列は `decode_text.mojo`、バイナリ配列は `decode_binary.mojo`、エンコーダは `encode_binary.mojo`、`Param` は `params.mojo`、COPY は新規 `copy.mojo`、プールは新規 `pool.mojo`。src は 20 → 22 ファイル（根拠: `find src/pq -name '*.mojo' | wc -l` = 20）

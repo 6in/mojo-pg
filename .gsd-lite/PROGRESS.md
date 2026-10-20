@@ -168,3 +168,14 @@
 - 陽性対照: T9 には新しい対照なし（格子の判定は「全セル 0」で、対照は T6 / T7 / T9 (a) の入力軸テスト側が持つ）。格子が「別経路を見ている」証拠は rc の分布（`run_epipe` の 14 セルだけが 141）で確認した
 - 次への注意: **全 9 タスク完了 → verify フェーズへ**（`phase: "verify"` / `next_command: "/gsd-lite-verify"`）。verify への申し送りは TRACE「verify への申し送り（turn 11 / T9 (d)）」に集約した（P1〜P29 の対応表 + 差し戻し対象にしない 2 項目 = `CopyOut` が `Iterator` でない（決めた事項 7）と REQ §4.3 の `copy_in` 未完了 drop の読み替え（決めた事項 20））。
   **CI は未実施**（`ci.yml` は `pull_request` / `push(main)` のみ。T9 の branch push では run が起動しない）→ PR を作るのは verify。3 OS の赤は OS 固有の経路（`close(PQsocket)` の EBADF / `pg_stat_activity` の権限）から見る。`verify_round_max` は 4
+
+## turn 12 — verify — round 1: 差し戻し（指摘 3 件 → F1）、PR 未作成
+- やったこと: `db-reset` → `check` 6/6 PASS **291 s**（PASS 1524 / FAIL 0）、堅牢性格子 126 セル再実行（全セル 0、T9 と同一）、チェックリスト 77 key 不変、README 抜粋照合 0 missing、PROGRESS 15 行。
+  サブエージェント 2 本（コードレビュー / セキュリティ、読み取り専用）+ 親の読み（`copy.mojo` / `pool.mojo` / `connection.mojo` 差分 / 3 つのパーサ）。指摘 3 件はすべて source と probe（`scratch/turn-012-probe-failed-write{,-end}.mojo`）で親が再確認してから F1 にまとめた（VERIFICATION.md）。
+  セキュリティは HIGH / MEDIUM なし（2 GiB `write` の LOW は残留リスク）。決めた事項 7 / 20 は申し送りどおり差し戻し対象外
+- 想定外: (1) T8 の PLAN 訂正 ② が「handler を呼ぶのは `CopyIn.__deinit__`」と記録した挙動は、健全な接続への**誤報**だった（テスト ⑭ がそれを `>= 1` で固定）。impl が観測を正しく記録していたので verify はそこから拾えた = TRACE の記録が効いた例。
+  (2) ⑩ の「失敗した `write` の後は何もしない」設計（決めた事項 13）は、libpq が COPY 状態に残るため接続が `USAGE` で永久に塞がる。probe (b) で `PQputCopyEnd(0)` + drain が出口になることを確認して F1 (b) に書いた。
+  (3) `Read` ツールが未読ファイルに dedup 通知を返して中身を出さなかった（`copy.mojo` / `pool.mojo`）→ `cat -n` で代替
+- やり直し: 1 回（probe の `external_call` import 漏れ = コンパイルエラーで即判明）
+- 次への注意: F1 は 3 箇所とも同じ状態機械（`_check_not_copying` が入って変わった `execute` の失敗の仕方）なので、**修正前に ②③ のテストを書いて赤を見てから**直す（① は既存テストの期待値変更 1 件で PROGRESS に列挙）。
+  `reset()` は閉じた fd 番号を取り直すので ③ は `reset()` 後に普通に使える。決めた事項 13 の訂正を TRACE「PLAN 訂正（turn 13）」に。round 2 の verify は F1 の回帰 + `check` + 格子だけ（新クラスの探索はしない）、合格なら PR 作成 → `gh pr checks --watch`
