@@ -70,10 +70,10 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 | `trace_exists` / `trace_checklist_section` / `grid_script` | T1: `.gsd-lite/TRACE.md` 新設 + `scratch/turn-003-robust-grid.sh`（3 軸） | **exists / ≥ 1 / exists**（T1） |
 | `oid_array_consts` / `array_elem_oid_def` / `array_oid_of_def` | T2: `decode_text.mojo` に `OID_*_ARRAY` 21 個（RESEARCH §2.1）+ 2 関数 | **21 / 1 / 1**（T2） |
 | `parse_array_literal_def` / `decode_text_array_def` | T2: tokenizer + 要素デコーダ呼び出し | **1 / 1**（T2） |
-| `decode_text_list_branches` / `decode_text_optional_branches` | T2: `comptime if` に `List[T]` 20 + `List[Optional[T]]` 20（既存 `List[UInt8]` 1 を含む） | **41 / 20**（T2） |
-| `decode_binary_array_def` / `decode_binary_list_branches` / `decode_binary_optional_branches` | T3: `decode_binary.mojo` 同型 | **1 / 41 / 20**（T3） |
+| `decode_text_list_branches` / `decode_text_optional_branches` | T2: `comptime if` に `List[T]` 17 + `List[Optional[T]]` 17（既存 `List[UInt8]` 1 を含む） | **35 / 17**（T2。turn 4 訂正） |
+| `decode_binary_array_def` / `decode_binary_list_branches` / `decode_binary_optional_branches` | T3: `decode_binary.mojo` 同型 | **1 / 35 / 17**（T3。turn 4 訂正） |
 | `test_decode_array_tests` | T2 でテキスト側（≥ 18）、T3 でバイナリ側（+ ≥ 14） | **≥ 18（T2）/ ≥ 32（T3）** |
-| `encode_array_def` / `params_list_implicit` / `params_optional_list_implicit` / `params_text_array_oid` | T4: `encode_binary.mojo` の `encode_array` + `params.mojo` の `@implicit` 40 本（既存 `List[UInt8]` 1 + `Optional[List[UInt8]]` は `var v: Optional[` なので母数外） | **1 / 41 / 20 / ≥ 1**（T4） |
+| `encode_array_def` / `params_list_implicit` / `params_optional_list_implicit` / `params_text_array_oid` | T4: `encode_binary.mojo` の `encode_array` + `params.mojo` の `@implicit` 34 本（既存 `List[UInt8]` 1 + `Optional[List[UInt8]]` は `var v: Optional[` なので母数外） | **1 / 35 / 17 / ≥ 1**（T4。turn 4 訂正） |
 | `test_encode_binary_tests` / `test_params_tests` | T4: 単体 3 件以上 + サーバー 4 件以上（既存 26 / 33 件の期待値変更 0） | **≥ 29 / ≥ 37**（T4） |
 | `test_array_tests` | T5: `tests/test_array.mojo` 新設 | **≥ 14**（T5） |
 | `copy_mojo` / `copyin_struct` / `copyout_struct` / `copy_drain_def` | T6: `src/pq/copy.mojo` | **exists / 1 / 1 / 1**（T6） |
@@ -123,7 +123,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: なし
   - 並列サブ作業: なし（推奨 0 本）
 
-- [ ] T2: 配列 OID 表 + テキスト配列リテラルの tokenizer + `decode_text` の 40 分岐 + 単体テスト（テキスト側）
+- [x] T2: 配列 OID 表 + テキスト配列リテラルの tokenizer + `decode_text` の 34 分岐 + 単体テスト（テキスト側）
   - 完了基準:
     - (a) `src/pq/decode_text.mojo` に `OID_*_ARRAY` 21 個（`decode_text.mojo:34-94` の `OID_*` の直後。値は RESEARCH §2.1: bool 1000 / bytea 1001 / name 1003 / int8 1016 / int2 1005 / int4 1007 / text 1009 / json 199 / float4 1021 / float8 1022 /
       bpchar 1014 / varchar 1015 / date 1182 / time 1183 / timestamp 1115 / timestamptz 1185 / interval 1187 / timetz 1270 / numeric 1231 / uuid 2951 / jsonb 3807）、
@@ -133,7 +133,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - (c) `_decode_text_array[E: Copyable](text: String, oid: UInt32, expect_oid: UInt32, elem_oid: UInt32, type_name: StaticString) raises PgError -> List[Optional[E]]`:
       `oid != expect_oid` → `TYPE_MISMATCH`（メッセージに両 OID と `type_name`。P5）→ `parse_array_literal` → 要素ごとに `decode_text[E](elem, elem_oid)`、失敗は `array element N: <元メッセージ>`（N は 0 始まり。決めた事項 6。P8）。
       `_require_no_nulls[E](var elems: List[Optional[E]]) raises PgError -> List[E]`（None があれば `NULL_VALUE` `array element N is NULL`）
-    - (d) `decode_text[T]`（`:211-`）に `List[E]` 20 + `List[Optional[E]]` 20 の分岐を **1 行ずつ**（`elif T == List[Int32]: return rebind[T](_require_no_nulls(_decode_text_array[Int32](text, oid, OID_INT4_ARRAY, OID_INT4, "int4[]"))).copy()` の形。probe-lang A）。
+    - (d) `decode_text[T]`（`:211-`）に `List[E]` 17 + `List[Optional[E]]` 17 の分岐を **1 行ずつ**（`elif T == List[Int32]: return rebind[T](_require_no_nulls(_decode_text_array[Int32](text, oid, OID_INT4_ARRAY, OID_INT4, "int4[]"))).copy()` の形。probe-lang A）。
       `List[String]` / `List[Optional[String]]` は 6 配列 OID（1009 / 1015 / 1014 / 1003 / 199 / 3807）を受け、要素 OID は `_array_elem_oid(oid)` を渡す（スカラ `String` の wildcard と同じ）。
       既存 `List[UInt8]`（`:285`）の分岐は不変。**`String` の wildcard（`:283`）は不変**: 配列列を `get[String]` するとリテラルがそのまま返る（REQ §4.1）
     - (e) `tests/test_decode_array.mojo` 新設（サーバー不要。雛形 `test_decode_text.mojo:10-80` の `_ok` / `_error_kind` / `_error_message`）。RESEARCH §2.2 の実測文字列を期待値に: text[] 9 要素 `{a,"b,c","d\"e","f\\g","","NULL","null"," x ","{y}"}` → 9 要素（P6）、
@@ -144,13 +144,13 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T1
   - 並列サブ作業: なし（推奨 0 本。tokenizer と分岐は同じファイル）
 
-- [ ] T3: バイナリ配列デコーダ + `decode_binary` の 40 分岐 + 単体テスト（バイナリ側）
+- [ ] T3: バイナリ配列デコーダ + `decode_binary` の 34 分岐 + 単体テスト（バイナリ側）
   - 完了基準:
     - (a) `src/pq/decode_binary.mojo` に `_decode_binary_array[origin: ImmOrigin, //, E: Copyable](bytes: Span[UInt8, origin], oid: UInt32, expect_oid: UInt32, elem_oid: UInt32, type_name: StaticString, column: Int) raises PgError -> List[Optional[E]]`
       （RESEARCH §3-2 の検査を**この順で**）: `oid != expect_oid` → `TYPE_MISMATCH`; `len < 12` → `TYPE_MISMATCH`; `ndim` / `flags` / `elemtype` を読む; `flags ∉ {0,1}` → `TYPE_MISMATCH`（P1）; `elemtype != elem_oid` → `TYPE_MISMATCH`（メッセージに両 OID。P5 / P2）;
       `ndim == 0` → 空（**dims を読まない**。P2）; `ndim < 0 or ndim >= 2` → `TYPE_MISMATCH`（`multidimensional`）; `dim` / `lbound` を読む（lbound は捨てる。P4）; `dim < 0` → `TYPE_MISMATCH`; 要素ごとに `int32 len`: `-1` → None、`len > 残り` → `TYPE_MISMATCH`（P3）、
       それ以外 `decode_binary[E](bytes[p:p+len], elem_oid, column)`（jsonb の version byte / 固定長検査は既存が行う）、失敗は `array element N: <元>`; 全要素の後に残りバイト → `TYPE_MISMATCH`（P3）。`List[String]` は 6 配列 OID
-    - (b) `decode_binary[T]`（`:865-`）に 40 分岐（T2 (d) と同型。`column` を渡す）。既存 `List[UInt8]`（`:904`）/ `String`（`:900`）不変
+    - (b) `decode_binary[T]`（`:865-`）に 34 分岐（T2 (d) と同型。`column` を渡す）。既存 `List[UInt8]`（`:904`）/ `String`（`:900`）不変
     - (c) `tests/test_decode_array.mojo` にバイナリ側 **≥ 14 件**。RESEARCH §2.3 の hex を期待値に（`test_decode_binary.mojo` の hex → `List[UInt8]` 変換ヘルパを流用）: `ARRAY[1,2,3]::int4[]` の 11 ワード、`'{}'::int4[]` の 12 byte（P2）、`ARRAY[1,NULL,3]` の `ffffffff`（flags 1）と **flags 0 + `ffffffff`**（P1。`List[Optional[Int32]]` で `[1,None,3]`、`List[Int32]` で `NULL_VALUE`）、
       flags 2 → `TYPE_MISMATCH`、elemtype 25 を 1007 で → `TYPE_MISMATCH`（P2）、11 byte → `TYPE_MISMATCH`、dim 3 で要素 2 個 / 要素 len 5 の int4 / 末尾 +1 byte → `TYPE_MISMATCH`（P3）、ndim 2 → `TYPE_MISMATCH`、lbound 0 → `[7,8]`（P4）、
       text[] 9 要素（空文字は len 0）、`ARRAY['tab\there','é',NULL]`、numeric 12 byte 要素、bpchar padding 5 byte、**jsonb 要素の version byte `01`**（`decode_binary[String](…, 3802)` で剥がれる）、interval 16 byte、bool / bytea。`{1,2}`（1005 の payload、elemtype 21）を `List[Int32]` → `TYPE_MISMATCH`
@@ -158,13 +158,13 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T2
   - 並列サブ作業: なし（推奨 0 本）
 
-- [ ] T4: 配列エンコーダ + `Param` の `@implicit` 40 本 + 単体テスト + `List[String]` → `varchar[]` のサーバー確認
+- [ ] T4: 配列エンコーダ + `Param` の `@implicit` 34 本 + 単体テスト + `List[String]` → `varchar[]` のサーバー確認
   - 完了基準:
     - (a) `src/pq/encode_binary.mojo` に `encode_array(elems: List[Optional[List[UInt8]]], elem_oid: UInt32) -> List[UInt8]`（決めた事項 8。RESEARCH §3-3）: 空なら `ndim 0, flags 0, elemtype`（12 byte）、それ以外 `ndim 1, flags = (None があれば 1), elemtype, dim = len, lbound 1`、要素は `int32 len + bytes`、None は `ffffffff`。
       単体テスト（`tests/test_encode_binary.mojo`、≥ 3 件）: `[1,2,3]` int4 が RESEARCH §2.3 の hex と一致、空が 12 byte、`[1,None,3]` が flags 1 + `ffffffff`
-    - (b) `src/pq/params.mojo` に `@implicit def __init__(out self, var v: List[E])` 20 本 + `List[Optional[E]]` 20 本（`:354-365` の `List[UInt8]` の次。probe-lang B の形）。OID は `_array_oid_of` 系の定数（`List[Int]` / `List[Int64]` → 1016 / 要素 20、`List[String]` → **1009 / 要素 25**（決めた事項 9。P9）、`List[List[UInt8]]` → 1001 / 17）、
+    - (b) `src/pq/params.mojo` に `@implicit def __init__(out self, var v: List[E])` 17 本 + `List[Optional[E]]` 17 本（`:354-365` の `List[UInt8]` の次。probe-lang B の形）。OID は `_array_oid_of` 系の定数（`List[Int]` / `List[Int64]` → 1016 / 要素 20、`List[String]` → **1009 / 要素 25**（決めた事項 9。P9）、`List[List[UInt8]]` → 1001 / 17）、
       `_binary = True`、要素は既存 `encode_*`（`encode_binary.mojo:68-274`）/ `String` は `_text_bytes`（`params.mojo:97`）/ `List[UInt8]` は生バイト。docstring に「`text[]` として送る。`varchar[]` / `jsonb[]` 列へはサーバーの配列キャスト」
-    - (c) `tests/test_params.mojo` に ≥ 4 件（既存 33 件の期待値変更 0。P10）: `test_param_oids_of_the_extended_types`（`:534`）と同型に配列 OID / `is_binary()` の表 40 行、`[ids^, "a", Param.null()]` の literal が通る（P10。`^` 必須）、
+    - (c) `tests/test_params.mojo` に ≥ 4 件（既存 33 件の期待値変更 0。P10）: `test_param_oids_of_the_extended_types`（`:534`）と同型に配列 OID / `is_binary()` の表 34 行、`[ids^, "a", Param.null()]` の literal が通る（P10。`^` 必須）、
       `SELECT $1::varchar[]` / `INSERT INTO <temp>(v varchar[]) VALUES ($1)` / `SELECT $1::jsonb[]` が通る（**P9 の未実測。impl の最初に 1 回**。通らなければ TRACE に記録し `List[String]` を `Param` の `oid` 引数付き ctor で送る案に切り替え、PLAN 訂正として 1 行）、
       `List[String]` に NUL を含む要素 → サーバーが `SERVER`（sqlstate を実測して TRACE に。決めた事項 10 の確認）
     - (d) 陽性対照: (c) の OID 表で 1 本の OID を故意に変えた scratch コピーが FAIL する（表の転記が検査されていることの証明）
@@ -174,14 +174,14 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - A（親）: `encode_binary.mojo` + `params.mojo` + P9 のサーバー確認
     - B: `tests/test_encode_binary.mojo` の 3 件 + `tests/test_params.mojo` の 4 件（PLAN の (a)(b) のシグネチャと OID 表を依頼文に写す。親の待ち合わせファイル名は書かない）
 
-- [ ] T5: `tests/test_array.mojo` — サーバー格子（受信 20 型 × text / binary × `List` / `List[Optional]`、境界値、送信往復、`= ANY($1)`）
+- [ ] T5: `tests/test_array.mojo` — サーバー格子（受信 17 型 × text / binary × `List` / `List[Optional]`、境界値、送信往復、`= ANY($1)`）
   - 完了基準（REQ §4.1 + RESEARCH §5-8。**≥ 14 件**。雛形 `tests/test_binary.mojo:699` `test_binary_scalars_match_text` の「text と binary で同じ値」の形）:
-    - (a) 20 要素型（`Bool` / `Int16` / `Int32` / `Int64` / `Int` / `Float32` / `Float64` / `String` ×6 OID / `List[UInt8]` / `Decimal` / `UUID` / `Date` / `Time` / `TimeTz` / `Timestamp` / `TimestampTz` / `Interval`）それぞれ `SELECT ARRAY[...]::<type>[]` を `execute(sql)`（text）と `execute(sql, [], result_format=BINARY)` で取得し `List[T]` が一致。
+    - (a) 17 要素型（`Bool` / `Int16` / `Int32` / `Int64` / `Int` / `Float32` / `Float64` / `String` ×6 OID / `List[UInt8]` / `Decimal` / `UUID` / `Date` / `Time` / `TimeTz` / `Timestamp` / `TimestampTz` / `Interval`）それぞれ `SELECT ARRAY[...]::<type>[]` を `execute(sql)`（text）と `execute(sql, [], result_format=BINARY)` で取得し `List[T]` が一致。
       要素に Phase 3 の境界値（`test_binary.mojo:776,807` の最小 / 最大 / 0 / 負数 / NaN / ±Infinity / `infinity` 日時 / numeric の大きな桁）
     - (b) `'{}'::int4[]` → 空（両形式）、`ARRAY[1,NULL,3]` → `List[Optional[Int32]]` で None / `List[Int32]` で `NULL_VALUE`（両形式）、`get_optional[List[Optional[Int32]]]` で列 NULL と要素 NULL の両立
     - (c) `'{1,2}'::int2[]` を `List[Int32]` → `TYPE_MISMATCH`（両形式。P5）、`int8[]` を `List[Int]` と `List[Int64]` の両方で、`varchar[]` / `name[]` / `bpchar[]` / `json[]` / `jsonb[]` を `List[String]` で（6 OID）
     - (d) `ARRAY[[1,2],[3,4]]` → `TYPE_MISMATCH`（両形式、メッセージに `multidimensional`）、`'[0:1]={7,8}'::int4[]` → `[7,8]`（両形式。P4）、配列列を `get[String]`（text）→ リテラルそのまま `{1,NULL,3}` / `[0:1]={7,8}`（REQ §4.1）、binary の `get[String]` → `TYPE_MISMATCH`（現行どおり）
-    - (e) 送信往復 20 型: `SELECT $1::<type>[]` に `List[T]` を渡して `List[T]` で読み戻し一致（`List[Optional[T]]` で None 混じりも）、空 `List[Int32]` → `{}`、`SELECT 2 = ANY($1)`（`List[Int32]`）→ `t`、`'b,c' = ANY($1)`（`List[String]`、要素に `,` / `"` / `\` / 空 / `NULL` 文字列）→ `t`（RESEARCH §2.3 p）
+    - (e) 送信往復 17 型: `SELECT $1::<type>[]` に `List[T]` を渡して `List[T]` で読み戻し一致（`List[Optional[T]]` で None 混じりも）、空 `List[Int32]` → `{}`、`SELECT 2 = ANY($1)`（`List[Int32]`）→ `t`、`'b,c' = ANY($1)`（`List[String]`、要素に `,` / `"` / `\` / 空 / `NULL` 文字列）→ `t`（RESEARCH §2.3 p）
     - (f) 既存 `test_binary` 14 件 / `test_params` の期待値変更 0。両サーバー（54317 / 54314）で PASS
   - 対象: `tests/test_array.mojo`
   - 依存: T3, T4
@@ -310,8 +310,8 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 6. **要素エラーのメッセージは `array element N: <元メッセージ>`、N は 0 始まり**（既存の `column N is NULL` `result.mojo:729` が 0 始まりなので揃える）。NULL 要素の `NULL_VALUE` は `array element N is NULL`
 7. **`CopyOut` は `Iterator` / `Iterable` にしない**。主 API は `next() -> Optional[List[UInt8]]` + `while`（REQ §2.2「`Iterator` としても使える」からの**意図的な逸脱**。根拠: Mojo 1.1.0 の `Iterator.__next__` は `raises StopIteration` ちょうどでないと適合せず `PgError` を `for` の中で出せない。
    RESEARCH §0 発見 1 / §2.7 D / `probe-lang.log`。error-stash 方式はエラーを隠すので D2 の堅牢性に反する）。README「既知の制限」に明記（T8）。verify はこの項を差し戻し対象にしない
-8. **`encode_array(elems: List[Optional[List[UInt8]]], elem_oid: UInt32) -> List[UInt8]`** の非ジェネリック 1 本（RESEARCH §6 の「前者」。ジェネリック無しで単体テストしやすい）。`Param` の 40 本が既存 `encode_*` の戻りを並べて呼ぶ
-9. **`List[String]` / `List[Optional[String]]` は OID 1009（`text[]`）/ 要素 25 で送る**（RESEARCH §2.3 p: 1015 に 25 を入れると `42804`）。`List[Int]` は `List[Int64]` と同じ 1016 / 20。要素型は `Int` を含めて **20**、`Param` は 40 本、`decode_*` は各 40 分岐
+8. **`encode_array(elems: List[Optional[List[UInt8]]], elem_oid: UInt32) -> List[UInt8]`** の非ジェネリック 1 本（RESEARCH §6 の「前者」。ジェネリック無しで単体テストしやすい）。`Param` の 34 本が既存 `encode_*` の戻りを並べて呼ぶ
+9. **`List[String]` / `List[Optional[String]]` は OID 1009（`text[]`）/ 要素 25 で送る**（RESEARCH §2.3 p: 1015 に 25 を入れると `42804`）。`List[Int]` は `List[Int64]` と同じ 1016 / 20。要素型は `Int` を含めて **17**（turn 4 訂正）、`Param` は 34 本、`decode_*` は各 34 分岐
 10. **`List[String]` の NUL 入り要素はサーバーに送り `SERVER`（22021 想定、T4 で実測）**。`USAGE` にするには `Param` に失敗フラグ用のフィールドを足す必要があり（`@implicit __init__` は raise しない）、最小実装を優先（RESEARCH P9 の「`USAGE`」は不採用）
 11. **`CopyIn` / `CopyOut` の構造 = `Transaction[origin]`**（`transaction.mojo:96-157`）: `_conn: Pointer[Connection, origin]` / `_done: Bool` / `_handler: def(PgError) thin`。`__deinit__` は `PQexec` を呼ばない（COPY API だけ。P16）
 12. **COPY の USAGE 文言**: `a COPY is in progress on this connection` / `COPY already finished` / `copy_in() requires a COPY ... FROM STDIN statement (result status N)` / `copy_out() requires a COPY ... TO STDOUT statement (result status N)`。プール: `pool is closed` / `pool exhausted: all N connections are borrowed` / `max_size must be positive (got N)` / `min_size must be between 0 and max_size (got N)` / `max_lifetime_s must not be negative (got N)`
@@ -358,7 +358,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 | 2 | psycopg `_load_binary` + `array_recv` の検査 10 種をクライアントで | **採用**（T3 (a)。hasnull を見ない = P1） |
 | 3 | psycopg `ListBinaryDumper` + `array_send`（空は ndim 0） | **採用**（T4 (a)） |
 | 4 | `pg_type.typarray` の定数表 + 2 関数 | **採用**（T2 (a)） |
-| 5 | `comptime if` 分岐は 1 行ずつ 40 本 | **採用**（T2 (d) / T3 (b)。probe-lang A で `rebind` 形が通ることを確認済み） |
+| 5 | `comptime if` 分岐は 1 行ずつ 34 本 | **採用**（T2 (d) / T3 (b)。probe-lang A で `rebind` 形が通ることを確認済み） |
 | 6 | psycopg `finish(exc)`: abort は 57014 だけ飲む | **採用**（T6 (b)） |
 | 7 | `PQTRANS_ACTIVE` で COPY 中を検出 | **採用**（決めた事項 4） |
 | 8 | psycopg `_reset_connection` の判定順 + `List[Connection]` 丸ごと | **採用**（決めた事項 15 / 18） |
@@ -377,7 +377,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 | 4 | 方向違い / 非 COPY 文の `USAGE` はその場で drain | **採用**（T6 (c) ⑫。`execute(sql)` の COPY 文も drain: 決めた事項 23） |
 | 5 | USAGE 検査の根拠 = データ消失、陽性対照 | **採用**（T6 ⑧） |
 | 6 | `finish()` は多文の残りを捨てる、`abort` は 57014 だけ、`-1` は `CONNECTION` | **採用**（決めた事項 13） |
-| 7 | `List[String]` = 1009 / 25、`List[Int]` を含め 20 型 | **採用**（決めた事項 9）。NUL 要素の `USAGE` は**却下**（決めた事項 10） |
+| 7 | `List[String]` = 1009 / 25、`List[Int]` を含め 17 型 | **採用**（決めた事項 9）。NUL 要素の `USAGE` は**却下**（決めた事項 10） |
 | 8 | §4.1 の境界値追加 | **採用**（T2 (e) / T3 (c) / T5） |
 | 9 | `max_lifetime_s=1` は `pg_sleep(1.1)` で | **採用**（T7 ⑩） |
 | 10 | `test_leak` に 2 ループ | **採用**（T7 (d)） |
@@ -401,5 +401,5 @@ P19 → T1 (b) + T7 ⑨；P20 → T7 ⑦ ⑧ + T8 (b)；P21 → T7 ⑰；P22 →
 - `PQerrorMessage` は失敗ごとに追記される → `-1` を見たら 1 回だけ読む（P11）
 - `pixi` は絶対パス。`check` の前後は `date -Iseconds` で挟んで所要を TRACE に
 - 既存テストの期待値変更は **0 件**を目標（変えるなら PROGRESS に 1 行ずつ列挙し、verify が diff で照合する）
-- T2 / T3 の 40 分岐はコピペ事故（OID の取り違え）が最も起きやすい → T2 (a) の両方向テストと T4 (d) の陽性対照で表を機械検査する
+- T2 / T3 の 34 分岐はコピペ事故（OID の取り違え）が最も起きやすい → T2 (a) の両方向テストと T4 (d) の陽性対照で表を機械検査する
 - `examples/params.mojo` を変えると README の抜粋（`README.md:189-211`）が逐語一致しなくなる → T8 で必ず照合器を回す
