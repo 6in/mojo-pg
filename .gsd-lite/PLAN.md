@@ -158,7 +158,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T2
   - 並列サブ作業: なし（推奨 0 本）
 
-- [ ] T4: 配列エンコーダ + `Param` の `@implicit` 34 本 + 単体テスト + `List[String]` → `varchar[]` のサーバー確認
+- [x] T4: 配列エンコーダ + `Param` の `@implicit` 34 本 + 単体テスト + `List[String]` → `varchar[]` のサーバー確認
   - 完了基準:
     - (a) `src/pq/encode_binary.mojo` に `encode_array(elems: List[Optional[List[UInt8]]], elem_oid: UInt32) -> List[UInt8]`（決めた事項 8。RESEARCH §3-3）: 空なら `ndim 0, flags 0, elemtype`（12 byte）、それ以外 `ndim 1, flags = (None があれば 1), elemtype, dim = len, lbound 1`、要素は `int32 len + bytes`、None は `ffffffff`。
       単体テスト（`tests/test_encode_binary.mojo`、≥ 3 件）: `[1,2,3]` int4 が RESEARCH §2.3 の hex と一致、空が 12 byte、`[1,None,3]` が flags 1 + `ffffffff`

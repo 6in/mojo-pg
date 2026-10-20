@@ -1245,5 +1245,229 @@ def test_params_inside_an_aborted_transaction() raises:
     _ = conn^
 
 
+# --- arrays -- (c)-13 --------------------------------------------------------
+#
+# Every `List[E]` and `List[Optional[E]]` goes out as a *binary* array
+# parameter carrying the array OID of `E`. An empty list is a 12-byte header,
+# which is a value, not a NULL; a `None` element is `ffffffff` inside that
+# payload, which is a NULL *element*, also not a NULL parameter.
+#
+# `List[String]` is `text[]` (1009), never `varchar[]`. A `varchar[]` or
+# `jsonb[]` target is reached through the server's own array cast, so the
+# round trips below spell the cast out rather than expecting a second OID.
+
+
+def _assert_array_param(
+    p: Param, expected_oid: UInt32, what: StaticString
+) raises:
+    """Assert `p` is a non-NULL binary array parameter of `expected_oid`.
+
+    Args:
+        p: The parameter built from a `List`.
+        expected_oid: The array OID, written as a literal by the caller.
+        what: Label naming the row of the table, for failure messages.
+
+    Raises:
+        Error: If the OID, the format flag or the NULL flag is wrong.
+    """
+    assert_equal(p.oid(), expected_oid, String(what, ": oid"))
+    assert_true(p.is_binary(), String(what, ": binary"))
+    assert_false(p.is_null(), String(what, ": not null"))
+
+
+def _assert_strings(got: List[String], expected: List[String]) raises:
+    """Assert two string lists have the same length and elements.
+
+    Args:
+        got: The decoded array.
+        expected: The values that were sent.
+
+    Raises:
+        Error: If the lists differ.
+    """
+    assert_equal(len(got), len(expected))
+    for i in range(len(expected)):
+        assert_equal(got[i], expected[i], String("element ", i))
+
+
+def test_param_oids_of_the_array_types() raises:
+    # The array OIDs are spelled out here on purpose: deriving them from
+    # `pq.params` would make this test agree with any transcription error it
+    # might contain.
+    var blob: List[UInt8] = [1, 2]
+    var uuid_text = String("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+
+    var v_bool: List[Bool] = [True, False]
+    _assert_array_param(Param(v_bool^), 1000, "bool[]")
+    var v_i2: List[Int16] = [1, 2]
+    _assert_array_param(Param(v_i2^), 1005, "int2[]")
+    var v_i4: List[Int32] = [1, 2]
+    _assert_array_param(Param(v_i4^), 1007, "int4[]")
+    var v_i8: List[Int64] = [1, 2]
+    _assert_array_param(Param(v_i8^), 1016, "int8[]")
+    var v_int: List[Int] = [1, 2]
+    _assert_array_param(Param(v_int^), 1016, "int8[] from Int")
+    var v_f4: List[Float32] = [1.5, 2.5]
+    _assert_array_param(Param(v_f4^), 1021, "float4[]")
+    var v_f8: List[Float64] = [1.5, 2.5]
+    _assert_array_param(Param(v_f8^), 1022, "float8[]")
+    var v_text: List[String] = ["a", "b"]
+    _assert_array_param(Param(v_text^), 1009, "text[]")
+    var v_blob: List[List[UInt8]] = [blob.copy()]
+    _assert_array_param(Param(v_blob^), 1001, "bytea[]")
+    var v_numeric: List[Decimal] = [Decimal(String("1.5"))]
+    _assert_array_param(Param(v_numeric^), 1231, "numeric[]")
+    var v_uuid: List[UUID] = [UUID(uuid_text)]
+    _assert_array_param(Param(v_uuid^), 2951, "uuid[]")
+    var v_date: List[Date] = [Date(8825)]
+    _assert_array_param(Param(v_date^), 1182, "date[]")
+    var v_ts: List[Timestamp] = [Timestamp(762525296789000)]
+    _assert_array_param(Param(v_ts^), 1115, "timestamp[]")
+    var v_tstz: List[TimestampTz] = [TimestampTz(762525296789000)]
+    _assert_array_param(Param(v_tstz^), 1185, "timestamptz[]")
+    var v_time: List[Time] = [Time(45296789000)]
+    _assert_array_param(Param(v_time^), 1183, "time[]")
+    var v_timetz: List[TimeTz] = [TimeTz(45296000000, -32400)]
+    _assert_array_param(Param(v_timetz^), 1270, "timetz[]")
+    var v_interval: List[Interval] = [Interval(10800000000, 2, 1)]
+    _assert_array_param(Param(v_interval^), 1187, "interval[]")
+
+    # The same seventeen OIDs again, from the nullable element form. A `None`
+    # element is a NULL inside the payload, so the parameter itself still
+    # reports `is_null()` False.
+    var o_bool: List[Optional[Bool]] = [True, None]
+    _assert_array_param(Param(o_bool^), 1000, "bool[] with NULL")
+    var o_i2: List[Optional[Int16]] = [Int16(1), None]
+    _assert_array_param(Param(o_i2^), 1005, "int2[] with NULL")
+    var o_i4: List[Optional[Int32]] = [Int32(1), None]
+    _assert_array_param(Param(o_i4^), 1007, "int4[] with NULL")
+    var o_i8: List[Optional[Int64]] = [Int64(1), None]
+    _assert_array_param(Param(o_i8^), 1016, "int8[] with NULL")
+    var o_int: List[Optional[Int]] = [Int(1), None]
+    _assert_array_param(Param(o_int^), 1016, "int8[] from Int with NULL")
+    var o_f4: List[Optional[Float32]] = [Float32(1.5), None]
+    _assert_array_param(Param(o_f4^), 1021, "float4[] with NULL")
+    var o_f8: List[Optional[Float64]] = [Float64(1.5), None]
+    _assert_array_param(Param(o_f8^), 1022, "float8[] with NULL")
+    var o_text: List[Optional[String]] = ["a", None]
+    _assert_array_param(Param(o_text^), 1009, "text[] with NULL")
+    var o_blob = List[Optional[List[UInt8]]]()
+    o_blob.append(Optional[List[UInt8]](blob.copy()))
+    o_blob.append(Optional[List[UInt8]](None))
+    _assert_array_param(Param(o_blob^), 1001, "bytea[] with NULL")
+    var o_numeric: List[Optional[Decimal]] = [Decimal(String("1.5")), None]
+    _assert_array_param(Param(o_numeric^), 1231, "numeric[] with NULL")
+    var o_uuid: List[Optional[UUID]] = [UUID(uuid_text), None]
+    _assert_array_param(Param(o_uuid^), 2951, "uuid[] with NULL")
+    var o_date: List[Optional[Date]] = [Date(8825), None]
+    _assert_array_param(Param(o_date^), 1182, "date[] with NULL")
+    var o_ts: List[Optional[Timestamp]] = [Timestamp(762525296789000), None]
+    _assert_array_param(Param(o_ts^), 1115, "timestamp[] with NULL")
+    var o_tstz: List[Optional[TimestampTz]] = [
+        TimestampTz(762525296789000),
+        None,
+    ]
+    _assert_array_param(Param(o_tstz^), 1185, "timestamptz[] with NULL")
+    var o_time: List[Optional[Time]] = [Time(45296789000), None]
+    _assert_array_param(Param(o_time^), 1183, "time[] with NULL")
+    var o_timetz: List[Optional[TimeTz]] = [TimeTz(45296000000, -32400), None]
+    _assert_array_param(Param(o_timetz^), 1270, "timetz[] with NULL")
+    var o_interval: List[Optional[Interval]] = [
+        Interval(10800000000, 2, 1),
+        None,
+    ]
+    _assert_array_param(Param(o_interval^), 1187, "interval[] with NULL")
+
+    # An empty list is a value of its array type, never a SQL NULL.
+    _assert_array_param(Param(List[Int32]()), 1007, "empty int4[]")
+    _assert_array_param(Param(List[String]()), 1009, "empty text[]")
+
+    _ = blob^
+    _ = uuid_text^
+
+
+def test_param_list_literal_takes_an_array_among_other_kinds() raises:
+    # A named `List` needs the transfer sigil to enter a list literal; the
+    # other elements convert implicitly as before.
+    var ids: List[Int32] = [1, 2]
+    var params: List[Param] = [ids^, "a", Param.null()]
+    assert_equal(len(params), 3)
+    assert_equal(params[0].oid(), UInt32(1007))
+    assert_true(params[0].is_binary())
+    assert_false(params[0].is_null())
+    assert_equal(params[1].oid(), UInt32(0))
+    assert_false(params[1].is_binary())
+    assert_true(params[2].is_null())
+    _ = params^
+
+
+def test_string_array_round_trips_through_the_server_casts() raises:
+    var conn = _connect(_conninfo())
+
+    # `text[]` into a `varchar[]` position: the cast is the server's, so the
+    # parameter OID stays 1009 and the column comes back as 1015.
+    var names: List[String] = ["a", "héllo", "", INJECTION]
+    var vc_params: List[Param] = [names.copy()]
+    var vc = _execute_params(conn, "SELECT $1::varchar[]", vc_params)
+    assert_equal(_column_type_oid(vc, 0), UInt32(1015))
+    var vc_row = _row(vc, 0)
+    _assert_strings(_get[List[String]](vc_row, 0), names)
+    _ = vc_row^
+    _ = vc^
+
+    # Same for `jsonb[]`; these three texts are already in jsonb's own
+    # normalized spelling, so they come back byte for byte.
+    var docs: List[String] = ["1", "true", '"s"']
+    var jb_params: List[Param] = [docs.copy()]
+    var jb = _execute_params(conn, "SELECT $1::jsonb[]", jb_params)
+    assert_equal(_column_type_oid(jb, 0), UInt32(3807))
+    var jb_row = _row(jb, 0)
+    _assert_strings(_get[List[String]](jb_row, 0), docs)
+    _ = jb_row^
+    _ = jb^
+
+    # And through a real `varchar[]` column, which exercises the same cast on
+    # the INSERT path rather than in a `SELECT` target list.
+    var created = _execute(conn, "CREATE TEMP TABLE pq_p2_varr(v varchar[])")
+    _ = created^
+    var ins_params: List[Param] = [names.copy()]
+    var inserted = _execute_params(
+        conn, "INSERT INTO pq_p2_varr VALUES ($1)", ins_params
+    )
+    assert_equal(inserted.affected_rows(), 1)
+    _ = inserted^
+
+    var back = _execute(conn, "SELECT v FROM pq_p2_varr")
+    assert_equal(back.row_count(), 1)
+    assert_equal(_column_type_oid(back, 0), UInt32(1015))
+    var back_row = _row(back, 0)
+    _assert_strings(_get[List[String]](back_row, 0), names)
+    _ = back_row^
+    _ = back^
+
+    _ = names^
+    _ = docs^
+    _ = conn^
+
+
+def test_nul_in_a_string_array_element_is_the_servers_call() raises:
+    # The scalar `String` parameter is rejected client-side, because it is
+    # sent as a C-string-shaped text parameter. An array element is a
+    # counted run of bytes inside a binary payload, so there is nothing to
+    # truncate: the NUL travels and the server refuses it.
+    var conn = _connect(_conninfo())
+
+    var values: List[String] = ["ok", _with_nul("ab")]
+    var params: List[Param] = [values^]
+    var error = _execute_params_error(conn, "SELECT $1::text[]", params)
+    assert_true(error.kind == PgErrorKind.SERVER)
+    # 22021 is `character_not_in_repertoire`, measured identically on PG14
+    # and PG17; the marker proves nothing past the NUL reached the message.
+    assert_equal(error.sqlstate, "22021")
+    assert_false(error.message.find(NUL_MARKER) >= 0)
+
+    _ = conn^
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

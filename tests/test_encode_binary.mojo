@@ -11,6 +11,7 @@ from pq.decode_binary import (
 )
 from pq.decode_text import parse_bytea_hex
 from pq.encode_binary import (
+    encode_array,
     encode_bool,
     encode_date,
     encode_float32,
@@ -476,6 +477,96 @@ def test_time_types_round_trip_through_the_decoders() raises:
         except e:
             raise Error(String(e))
         assert_true(back == value, String("interval round trip ", i))
+
+
+def _int4_elements(values: List[Int32]) -> List[Optional[List[UInt8]]]:
+    """Encode each value as int4, ready to hand to `encode_array`.
+
+    Args:
+        values: The element values, in order.
+
+    Returns:
+        One present element per value, each four bytes wide.
+    """
+    var elems = List[Optional[List[UInt8]]](capacity=len(values))
+    for i in range(len(values)):
+        elems.append(Optional[List[UInt8]](encode_int32(values[i])))
+    return elems^
+
+
+def test_array_wire_matches_the_server() raises:
+    # The bytes PostgreSQL sends for `ARRAY[1,2,3]::int4[]`: a five-int32
+    # header (ndim, flags, elemtype, dim, lbound) then a length-prefixed
+    # element each.
+    _assert_bytes(
+        encode_array(_int4_elements([1, 2, 3]), 23),
+        _hex(
+            "00000001"
+            + "00000000"
+            + "00000017"
+            + "00000003"
+            + "00000001"
+            + "00000004"
+            + "00000001"
+            + "00000004"
+            + "00000002"
+            + "00000004"
+            + "00000003"
+        ),
+        "int4[] 1,2,3",
+    )
+    assert_equal(len(encode_array(_int4_elements([1, 2, 3]), 23)), 44)
+
+
+def test_array_of_no_elements_is_three_int32s() raises:
+    # An empty array has no dimension, so the header stops after the element
+    # type: `ndim 0`, `flags 0`, `elemtype`. That is a value, not a NULL.
+    var none = List[Optional[List[UInt8]]]()
+    var bytes = encode_array(none, 25)
+    assert_equal(len(bytes), 12)
+    _assert_bytes(
+        bytes, _hex("00000000" + "00000000" + "00000019"), "empty text[]"
+    )
+
+    # The element type is whatever was passed in, not a default.
+    _assert_bytes(
+        encode_array(List[Optional[List[UInt8]]](), 1700),
+        _hex("00000000" + "00000000" + "000006a4"),
+        "empty numeric[]",
+    )
+
+
+def test_array_with_a_none_sets_the_null_flag() raises:
+    # A missing element is `int32 -1` with no bytes after it, and its presence
+    # anywhere in the array flips `flags` to 1.
+    var elems = List[Optional[List[UInt8]]]()
+    elems.append(Optional[List[UInt8]](encode_int32(1)))
+    elems.append(Optional[List[UInt8]](None))
+    elems.append(Optional[List[UInt8]](encode_int32(3)))
+
+    _assert_bytes(
+        encode_array(elems, 23),
+        _hex(
+            "00000001"
+            + "00000001"
+            + "00000017"
+            + "00000003"
+            + "00000001"
+            + "00000004"
+            + "00000001"
+            + "ffffffff"
+            + "00000004"
+            + "00000003"
+        ),
+        "int4[] 1,NULL,3",
+    )
+
+    # Without the None the same three slots carry `flags 0`, so the flag
+    # tracks the elements rather than being set for every array.
+    var no_null = encode_array(_int4_elements([1, 2, 3]), 23)
+    assert_equal(Int(no_null[7]), 0, "int4[] no-null flags")
+    _ = no_null^
+    _ = elems^
 
 
 def main() raises:
