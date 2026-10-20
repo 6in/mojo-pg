@@ -81,6 +81,7 @@ from pq.async_conn import AsyncConnection, Notification
 from pq.connection import Connection
 from pq.errors import PgError
 from pq.params import Param
+from pq.pool import Pool, PooledConnection
 from pq.prepared import PreparedStatement
 from pq.result import Result, ResultFormat
 from pq.transaction import Transaction
@@ -1303,6 +1304,132 @@ def test_async_drop_with_pending_results_does_not_leak() raises:
         if _is_sample_due(i, ERROR_WARMUP, every):
             _sample("async-drop", samples)
     _assert_stable("async-drop", samples, ERROR_SAMPLES)
+
+
+# --- the Phase 7 loops -------------------------------------------------------
+#
+# A `Pool` owns `PGconn`s that outlive the call that opened them, which is new:
+# every other owner in this file is freed by the statement that created it.
+# Two things can therefore leak, and they get one loop each. Opening and
+# dropping whole pools is the `PQfinish` in `Pool.__deinit__` -- the one free
+# nothing else in the file exercises, and the one a pool that forgot its idle
+# list would skip. Borrowing and returning from a single pool is the guard's
+# own round trip: a `PooledConnection.__deinit__` that dropped the connection
+# instead of parking it, or a `Pool._release` that parked a copy, would both
+# show up as a `PGconn` a time.
+#
+# The helpers below are the same `raises PgError` translation the rest of the
+# file uses; they sit here rather than with the others because this section is
+# an addition to a finished file.
+
+
+def _open_pool(
+    var conninfo: String, max_size: Int, min_size: Int = 0
+) raises -> Pool:
+    """Open a pool over a conninfo string.
+
+    Args:
+        conninfo: A libpq `key=value ...` conninfo string.
+        max_size: Most connections the pool may ever hold.
+        min_size: How many to open before returning.
+
+    Returns:
+        The open pool.
+
+    Raises:
+        Error: If `Pool.open` raised a `PgError`.
+    """
+    try:
+        return Pool.open(conninfo^, max_size, min_size=min_size)
+    except e:
+        raise Error(String(e))
+
+
+def _acquire(pool: Pool) raises -> PooledConnection[origin_of(pool)]:
+    """Borrow a connection from `pool`.
+
+    Args:
+        pool: An open pool.
+
+    Returns:
+        The guard holding the borrowed connection; dropping it returns the
+        connection, since there is no `release` method.
+
+    Raises:
+        Error: If `acquire` raised a `PgError`.
+    """
+    try:
+        return pool.acquire()
+    except e:
+        raise Error(String(e))
+
+
+def _guard_execute[
+    origin: ImmOrigin, //
+](guard: PooledConnection[origin], var sql: String) raises -> Result:
+    """Run `sql` through the guard's forwarded `execute`.
+
+    Parameters:
+        origin: Origin of the `Pool` the guard views; inferred.
+
+    Args:
+        guard: The borrowed connection.
+        sql: The statement to run.
+
+    Returns:
+        The result of the statement.
+
+    Raises:
+        Error: If `execute` raised a `PgError`.
+    """
+    try:
+        return guard.execute(sql^)
+    except e:
+        raise Error(String(e))
+
+
+def test_pool_open_and_drop_does_not_leak() raises:
+    if _skip_on_macos("test_pool_open_and_drop_does_not_leak"):
+        return
+    var conninfo = _conninfo()
+    # Two `PGconn`s per iteration, both opened by `min_size` and neither ever
+    # borrowed, so `Pool.__deinit__` is the only thing that can close them --
+    # a pool that finished one and forgot the rest strands a whole connection
+    # a time, which is the same order of magnitude as `test_failed_open`'s.
+    # ERROR_ITERATIONS rather than MAIN_ITERATIONS because each iteration is
+    # two real connects, as in the other connect-per-iteration loops.
+    var every = (ERROR_ITERATIONS - ERROR_WARMUP) // ERROR_SAMPLES
+    var samples = List[Int]()
+    for i in range(ERROR_ITERATIONS):
+        var pool = _open_pool(conninfo.copy(), 2, min_size=2)
+        _ = pool^
+        if _is_sample_due(i, ERROR_WARMUP, every):
+            _sample("pool-open-drop", samples)
+    _assert_stable("pool-open-drop", samples, ERROR_SAMPLES)
+
+
+def test_pool_acquire_and_release_does_not_leak() raises:
+    if _skip_on_macos("test_pool_acquire_and_release_does_not_leak"):
+        return
+    var pool = _open_pool(_conninfo(), 1, min_size=1)
+    # One connection for the whole loop: every iteration takes it out of the
+    # idle list and puts it back, so a leak here is per *borrow* rather than
+    # per connect. The statement is deliberately the cheapest one -- what is
+    # being watched is the guard and the release path, not a `PGresult`, and
+    # the `Result` this returns is far too small for RSS to see (see the
+    # module docstring on why a `SELECT 1` loop cannot catch a missing
+    # `PQclear`).
+    var every = (MAIN_ITERATIONS - MAIN_WARMUP) // MAIN_SAMPLES
+    var samples = List[Int]()
+    for i in range(MAIN_ITERATIONS):
+        var guard = _acquire(pool)
+        var result = _guard_execute(guard, "SELECT 1")
+        _ = result^
+        _ = guard^
+        if _is_sample_due(i, MAIN_WARMUP, every):
+            _sample("pool-acquire-release", samples)
+    _assert_stable("pool-acquire-release", samples, MAIN_SAMPLES)
+    _ = pool^
 
 
 def main() raises:

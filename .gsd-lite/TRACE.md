@@ -699,3 +699,172 @@ libpq は COPY 中の `PQexec` を拒否せず、**書いた行を黙って捨�
 - 対照として `tests/test_transaction.mojo`: 13 件すべて PASS（0 failed）
 
 判別できた（1 件に絞られ、無関係なファイルは無傷）ので差し替えは不要。
+
+
+## チェックリスト（turn 9）
+
+`scratch/turn-009-checklist.log` の全文（**全 77 key**）。turn 8 からの差分は 14 行で、
+全部 T7 の到達分（件数 2 本と `absent(pool.mojo)` の解消を含む）:
+
+```
+pool_mojo=absent -> exists
+pool_struct / pooled_struct / pool_release_def=absent(src/pq/pool.mojo) -> 1 / 1 / 1
+pool_consume_input=absent(src/pq/pool.mojo) -> 5        # 期待値 >= 1
+pool_rollback=absent(src/pq/pool.mojo) -> 1             # 期待値 >= 1
+pool_monotonic=absent(src/pq/pool.mojo) -> 10           # 期待値 >= 1
+init_export_pool=0 -> 1
+test_pool_tests=absent -> 18                            # 期待値 >= 14
+test_leak_tests=20 -> 22                                # 期待値 >= 22
+test_leak_pool=0 -> 7                                   # 期待値 >= 2
+conn_transaction_parts_sites=absent(pool.mojo) -> 3     # 期待値 >= 3
+copy_in_defs=absent(pool.mojo) -> 3                     # 期待値 3
+copy_out_defs=absent(pool.mojo) -> 3                    # 期待値 3
+test_file_count=27 -> 28                                # 期待値 28（確定）
+src_mojo_count=21 -> 22                                 # 期待値 22（確定）
+```
+
+`absent(...)` は T7 の時点で **0 件**になった（残る `absent` は T8 の examples 2 本だけ）。
+
+```
+## T1 FFI 3 関数 + Connection.reset / _transaction_parts + TRACE / 格子
+ffi_putcopydata=3
+ffi_putcopyend=3
+ffi_getcopydata=3
+conn_reset_def=1
+conn_reset_session_setup=5
+conn_transaction_parts_def=1
+conn_transaction_parts_sites=3
+test_connection_tests=33
+trace_exists=exists
+trace_checklist_section=5
+grid_script=exists
+## T2 配列 OID 表 + テキスト配列リテラル + decode_text 40 分岐
+oid_array_consts=21
+array_elem_oid_def=1
+array_oid_of_def=1
+parse_array_literal_def=1
+decode_text_array_def=1
+decode_text_list_branches=35
+decode_text_optional_branches=17
+test_decode_array_tests=63
+## T3 バイナリ配列デコーダ + decode_binary 40 分岐
+decode_binary_array_def=1
+decode_binary_list_branches=35
+decode_binary_optional_branches=17
+## T4 配列エンコーダ + Param 40 本
+encode_array_def=1
+params_list_implicit=35
+params_optional_list_implicit=17
+params_text_array_oid=3
+test_encode_binary_tests=29
+test_params_tests=37
+## T5 test_array.mojo（サーバー格子）
+test_array_tests=26
+## T6 copy.mojo + Connection / Transaction / PreparedStatement の結線
+copy_mojo=exists
+copyin_struct=1
+copyout_struct=1
+copy_drain_def=1
+copy_in_defs=3
+copy_out_defs=3
+conn_copy_parts_defs=2
+conn_check_not_copying_def=1
+check_not_copying_sites=7
+conn_docstring_copy_unsupported=0
+init_export_copy=1
+test_copy_tests=21
+## T7 pool.mojo + test_pool / test_leak
+pool_mojo=exists
+pool_struct=1
+pooled_struct=1
+pool_release_def=1
+pool_consume_input=5
+pool_rollback=1
+pool_monotonic=10
+init_export_pool=1
+test_pool_tests=18
+test_leak_tests=22
+test_leak_pool=7
+## T8 README / CHANGELOG / __init__ docstring / examples / pixi.toml / final_check
+readme_array_optional_row=0
+readme_array_word=1
+readme_copy_example=0
+readme_pool_example=0
+readme_out_of_scope_line=1
+readme_thread_unsafe=0
+readme_en_arrays=0
+readme_19_types=1
+readme_h2=11
+changelog_phase7=0
+changelog_phase_lines=6
+init_docstring_phase7=0
+init_docstring_copy_in=0
+examples_copy=absent
+examples_pool=absent
+examples_params_any=0
+examples_copy_next=absent(examples/copy.mojo)
+pixi_example_tasks=5
+final_check_examples=5
+## 全体（不変 / 件数）
+examples_mojo_count=7
+test_file_count=28
+src_mojo_count=22
+src_def_ref_return=0
+src_iterator_in_copy=0
+tests_sh_bash4_only=0
+```
+
+## PLAN 訂正（turn 9）
+
+- T7 (d) の陽性対照「`_release` が**捨てる経路**で `conn._conn = PGconnPtr(0)` してから
+  `_ = conn^`」は**判別しない**: `test_leak` の 2 ループはどちらも捨てる経路を通らない
+  （ループ 1 = `Pool.open(min_size=2)` の drop は `List[_Slot]` の deinit、ループ 2 =
+  `acquire` -> `execute` -> drop は park 経路）。
+  → 対照を **park 経路**に差し替えた（`_release` が `_idle.append` する直前に
+  `conn._conn = PGconnPtr(0)`）。park した handle の `PQfinish` が走らず、次の `acquire` が
+  その接続を捨てて（`PQfinish` なし）新規に開くので 1 反復 1 handle ずつ漏れる。
+  結果は下記「陽性対照（turn 9）」のとおり 1 件に絞れた。
+- T7 (a) の `Pool.set_rollback_failure_handler` は `for ref slot in self._idle` では
+  **コンパイルできない**（`List iteration requires the element to be 'Copyable'`。`_Slot` は
+  `Connection` を所有する）→ `for i in range(len(self._idle))` の添字形にした。
+- `_Slot` から `Connection` を取り出すのに `slot.conn^` は不可
+  （`field '...' destroyed out of the middle of a value`）。`var self` の消費メソッドでも同じ。
+  **`def take(deinit self) -> Connection`** だけが通る（`scratch/turn-009-probe-take.mojo` で実測）
+  → `_Slot.take()` を足し、`opened_at` は take の前に読む形にした。
+- `PooledConnection[origin: ImmOrigin]` の struct docstring には `Parameters:` 節が必要
+  （無いと 3/6 段と 6/6 段が `struct takes parameters, but has no 'Parameters' in doc string`
+  の warning 1 行で FAIL する）。`CopyIn` / `Transaction` と同じ 1 行を足した。
+
+## `check` の所要（turn 9 / T7 完了時点）
+
+`check` 1 回 = **321 s**（17:53:28 -> 17:58:49、閾値 380 s）。`PASS` 行は **1524**
+（turn 8 は 1486。+38 = `test_pool` 18 件 x 2 サーバー + `test_leak` の 2 件 x 1 サーバー）
+= **既存テストの期待値変更 0 件**。`FAIL` 行は 0。
+
+内訳の実測（`final_check.log` の計測行）: `tests/test_pool.mojo` は
+**54317 で 16 s（コンパイル込み）/ 54314 で 8 s**（`Summary` はミリ秒で 3363 / 3459 =
+`pg_sleep` 2.2 s + 切断反映待ち）。`tests/test_leak.mojo` は **94 s**（turn 8 は 83 s。
+pool 2 ループで +11 s = 見込み +10 s どおり。1 サーバーのみ）。
+
+turn 8 の 266 s から **+55 s**。内訳は新ファイル 2 本（約 +15 s）と `test_leak` の +10 s で
+約 25 s、残り 30 s は turn 6 以降ずっと見えている **±50 s の揺れ**の範囲。母数は **260〜370 s**
+のまま。T8 は examples 2 本（各 2 s x 2 サーバー）と文書だけなので閾値 380 s に余裕がある。
+
+## 陽性対照（turn 9）
+
+3 件すべて判別できた（差し替えたのは 1 件目の対象経路だけ。上記 PLAN 訂正）。
+
+1. **park した接続の `PQfinish` が走らない**（`src/pq` の写し、実行後に削除）:
+   `_release` の `_idle.append` の直前に `conn._conn = PGconnPtr(0)` を挿入
+   → built binary で `tests/test_leak.mojo` が
+   **`test_pool_acquire_and_release_does_not_leak` 1 件だけ** FAIL（21 passed / 1 failed）。
+   `test_pool_open_and_drop_does_not_leak` は PASS のまま（このループは park 経路を通らない
+   = 2 つのループが別の経路を見ている証明にもなった）。
+2. **`_stmt_counter` が接続とともに残ること**（同じ写し）: `_release` の park 直前に
+   `conn._stmt_counter[0] = 0` を挿入 → `tests/test_pool.mojo` が
+   **`test_the_statement_counter_rides_along_with_the_connection` 1 件だけ** FAIL
+   （17 passed / 1 failed）。サーバーは `42P05`（`prepared statement "pq_stmt_1" already exists`）。
+3. **P21 / T7 ⑰ の origin**（`scratch/turn-009-posctl-origin.mojo`、コンパイルのみ）:
+   `var a = pool.acquire(); var p2 = pool^; _ = a.execute("SELECT 1")` が
+   `error: use of uninitialized value 'pool'`（`turn-009-posctl-origin.mojo:30:18`）で
+   コンパイル失敗 = 貸し出し中のプールは move できない。

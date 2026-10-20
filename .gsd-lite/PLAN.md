@@ -222,7 +222,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - A（親）: `copy.mojo` + `connection.mojo` / `transaction.mojo` / `prepared.mojo` / `__init__.mojo`
     - B: `tests/test_copy.mojo` の ①〜⑮（(a)(b) のシグネチャと USAGE 文言を依頼文に写す。親のファイル名・待ち合わせ条件は書かない。`fmt` は親が統合後）
 
-- [ ] T7: `src/pq/pool.mojo`（`Pool` / `PooledConnection` / `_Slot`）+ `tests/test_pool.mojo` + `test_leak.mojo` の 2 ループ
+- [x] T7: `src/pq/pool.mojo`（`Pool` / `PooledConnection` / `_Slot`）+ `tests/test_pool.mojo` + `test_leak.mojo` の 2 ループ
   - 完了基準:
     - (a) `src/pq/pool.mojo` 新設（決めた事項 15〜19。雛形 `probe-pool.mojo:53-174`）: `struct _Slot(Movable)`（`conn: Connection`, `opened_at: Int`）、
       `struct Pool(Movable)`: フィールド `_pq`, `_conninfo: String`, `_params: Dict[String, String]`, `_use_params: Bool`, `_max_size: Int`, `_max_lifetime_s: Int`, `_idle: List[_Slot]`, `_borrowed: List[Int]`（1 要素セル）, `_closed: List[Int]`（1 要素セル）, `_handler: def(PgError) thin`。

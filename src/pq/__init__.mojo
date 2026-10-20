@@ -338,6 +338,7 @@ from .connection import Connection
 from .copy import CopyIn, CopyOut
 from .errors import PgError, PgErrorKind
 from .params import Param
+from .pool import Pool, PooledConnection
 from .prepared import PreparedStatement
 from .result import Result, ResultFormat, Row
 from .transaction import Transaction
