@@ -32,6 +32,10 @@ comptime SELECT_SQL = "SELECT id, label FROM pq_p2_example WHERE id = $1"
 
 comptime COUNT_SQL = "SELECT count(*) FROM pq_p2_example"
 
+comptime ANY_SQL = "SELECT id, label FROM pq_p2_example WHERE id = ANY($1)"
+
+comptime AGG_SQL = "SELECT array_agg(label ORDER BY id) FROM pq_p2_example"
+
 comptime EXPECTED_ROWS = 2
 
 
@@ -93,6 +97,20 @@ def main():
 
         var total = _count(conn)
         print("rows =", total)
+
+        # One array parameter stands in for an IN-list of unknown length, and
+        # one array column comes back as a `List`.
+        var ids: List[Int32] = [Int32(1), Int32(2)]
+        var picked = conn.execute(String(ANY_SQL), [ids^])
+        for row in picked:
+            print("any id =", row.get[Int32]("id"))
+        _ = picked^
+
+        var agg = conn.execute(String(AGG_SQL))
+        var labels = agg[0].get[List[String]](0)
+        print("labels =", len(labels))
+        _ = agg^
+
         _ = conn^
         if total != EXPECTED_ROWS:
             print("expected", EXPECTED_ROWS, "rows, got", total)

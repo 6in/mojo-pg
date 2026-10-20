@@ -124,6 +124,8 @@ run_logged mojo run -I src examples/params.mojo || examples_failed=1
 run_logged mojo run -I src examples/binary.mojo || examples_failed=1
 run_logged mojo run -I src examples/async_query.mojo || examples_failed=1
 run_logged mojo run -I src examples/listen_notify.mojo || examples_failed=1
+run_logged mojo run -I src examples/copy.mojo || examples_failed=1
+run_logged mojo run -I src examples/pool.mojo || examples_failed=1
 if [ "$examples_failed" -ne 0 ]; then
     fail "4/6 examples"
 fi

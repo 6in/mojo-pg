@@ -22,6 +22,8 @@ example-params = "mojo run -I src examples/params.mojo"
 example-binary = "mojo run -I src examples/binary.mojo"
 example-async = "mojo run -I src examples/async_query.mojo"
 example-notify = "mojo run -I src examples/listen_notify.mojo"
+example-copy = "mojo run -I src examples/copy.mojo"
+example-pool = "mojo run -I src examples/pool.mojo"
 # Timings only, no verdict: not part of `check`.
 bench = "mojo run -I src examples/bench_formats.mojo"
 build = "mkdir -p build && mojo build -I src -o build/hello_libpq examples/hello_libpq.mojo"

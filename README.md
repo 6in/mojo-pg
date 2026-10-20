@@ -2,15 +2,16 @@
 
 libpq を C FFI 経由で呼ぶ、Mojo 用の PostgreSQL クライアントです。同期接続・
 パラメータバインド・トランザクション・バイナリ形式の結果・非同期接続・
-`LISTEN` / `NOTIFY` を扱えます。
+`LISTEN` / `NOTIFY`・配列型・`COPY`・コネクションプールを扱えます。
 
 ## English summary and install
 
 `pq` is a PostgreSQL client for Mojo that calls libpq through the C FFI. It
 covers synchronous connections, `$1` parameter binding, transactions and
 savepoints, text and binary result decoding (19 types), asynchronous
-connections with cancellation, and `LISTEN` / `NOTIFY`. It targets Mojo 1.1.0
-on Linux (x86_64, aarch64) and macOS (arm64); the Windows code paths exist but
+connections with cancellation, `LISTEN` / `NOTIFY`, as well as
+arrays, COPY and a single-threaded connection pool. It targets Mojo 1.1.0 on
+Linux (x86_64, aarch64) and macOS (arm64); the Windows code paths exist but
 are untested.
 
 Two install routes are supported, both of them measured. First, depend on the
@@ -71,7 +72,9 @@ var conn = Connection.open("host=127.0.0.1 port=5432 user=pq dbname=pq_test")
 （`PreparedStatement`）、テキスト／バイナリ両形式の結果デコード（19 の型）、
 ゼロコピー読み出し（`Row.get_text` / `Row.get_bytes`）、非同期接続
 （`AsyncConnection`）、`LISTEN` / `NOTIFY`（`notifications` /
-`wait_notification` / `wait_notifications`）。
+`wait_notification` / `wait_notifications`）、1 次元の配列型
+（`List[T]` / `List[Optional[T]]`）、`COPY`（`copy_in` / `copy_out`）、
+単一スレッド前提のコネクションプール（`Pool` / `PooledConnection`）。
 
 `from pq import Connection, PgError` だけで 1 往復が書けます。パッケージが
 再エクスポートしている名前がそのまま公開 API です。
@@ -198,6 +201,17 @@ pixi run example-basic
             print("id =", row.get[Int32]("id"))
             print("label =", row.get[String]("label"))
         _ = res^
+
+        var ids: List[Int32] = [Int32(1), Int32(2)]
+        var picked = conn.execute(String(ANY_SQL), [ids^])
+        for row in picked:
+            print("any id =", row.get[Int32]("id"))
+        _ = picked^
+
+        var agg = conn.execute(String(AGG_SQL))
+        var labels = agg[0].get[List[String]](0)
+        print("labels =", len(labels))
+        _ = agg^
 ```
 
 ```bash
@@ -208,6 +222,13 @@ pixi run example-params
 データが文そのものを変えることはありません。`Param` は対応する Mojo 型から
 暗黙変換されるため、リストリテラルをそのまま渡せます。SQL NULL は
 `Param.null()`（型が文から決まるとき）か `Param.null(oid)` です。
+
+`List[T]` と `List[Optional[T]]` は配列パラメータとして**バイナリ**で送られ、
+OID は要素型の typarray になります。`List[String]` /
+`List[Optional[String]]` は OID **1009**（`text[]`、要素は `text`／25）です。
+名前の付いた配列（`List`）は所有権ごと渡す必要があります:
+`conn.execute(sql, [ids^])`、その後も使いたいなら `[ids.copy()]` です。
+裸の `[ids]` はコンパイルできません。
 
 ### トランザクションとセーブポイント — `examples/params.mojo`
 
@@ -322,6 +343,75 @@ pixi run example-notify
 集まった分を返す）の 3 つです。1 回の呼び出しで送信済みの通知すべてが
 見えるとは**どれも約束しません**。
 
+### `COPY` — `examples/copy.mojo`
+
+```mojo
+        var copy_in = conn.copy_in(String(COPY_IN_SQL))
+        for i in range(ROW_COUNT):
+            copy_in.write(_row_text(i))
+        var inserted = copy_in.finish()
+        print("copied in =", inserted.affected_rows())
+        _ = inserted^
+
+        var copy_out = conn.copy_out(String(COPY_OUT_SQL))
+        var rows = 0
+        var total_bytes = 0
+        while True:
+            var row = copy_out.next()
+            if not row:
+                break
+            rows += 1
+            ref payload = row.value()
+            total_bytes += len(payload)
+        print("copied out =", rows, "rows")
+        print("copied out bytes =", total_bytes)
+```
+
+```bash
+pixi run example-copy
+```
+
+上の抜粋は `examples/copy.mojo` の書き込み（`copy_in`）と読み出し
+（`copy_out`）を続けて通す部分です。バイトは `pq` が一切解釈しません:
+`COPY` 文が指定した形式（既定ではテキスト）に**すでになっている**必要が
+あります。`finish()` は `Result` を返し、その `affected_rows()` が行数です。
+`CopyOut` は意図的に `Iterator` **ではない**ので、`next()` と `while`
+ループで読みます。不正な行は `finish()` まで分かりません。
+
+### コネクションプール — `examples/pool.mojo`
+
+```mojo
+        var pool = Pool.open(_conninfo(), 2)
+        var first = pool.acquire()
+        var second = pool.acquire()
+        print("size =", pool.size())
+        print("idle =", pool.idle())
+        print("borrowed =", pool.borrowed())
+        try:
+            var third = pool.acquire()
+            _ = third^
+        except e:
+            print("pool exhausted:", e)
+```
+
+```mojo
+        var pid = _backend_pid(first)
+        _ = first^
+        var again = pool.acquire()
+        print("reused backend =", _backend_pid(again) == pid)
+```
+
+```bash
+pixi run example-pool
+```
+
+上の 2 つの抜粋は `examples/pool.mojo` を前半・後半に分けたものです。
+`acquire()` は `PooledConnection` の guard を返し、その破棄が接続をプールへ
+戻します（`Transaction` と同じ RAII）。`max_size` を超える `acquire()` は
+待たずに `USAGE` です。待つためのスレッドが無いからです。返した接続は
+次に借りた人のところへ同じバックエンドのまま戻ってきます。プールは
+スレッド安全では**ありません**。
+
 接続に失敗したときは、例のどれも次の形を 1 レコード印字して終了コード 1 に
 なります（libpq 側の文言は環境で変わるので約束しません）。
 
@@ -360,7 +450,15 @@ failed: PgError(kind=Connection, ...)
 | json | 114 | `String` | そのまま、UTF-8 を検査 | 同じ |
 | jsonb | 3802 | `String` | そのまま、UTF-8 を検査 | 同じ、先頭のバージョンバイト（1）を落としてから検査 |
 | bytea | 17 | `List[UInt8]` | `\x` の 16 進形式のみ | 生のバイト列 |
+| `T[]`（上の 19 型の 1 次元配列） | 要素の typarray（int4[] = 1007 など） | `List[T]` / `List[Optional[T]]` | 配列リテラル `{1,2}`（引用・`\` エスケープ） | `array_send` 形式（ndim / flags / elemtype / dim / lbound + 要素） |
 | 上記以外 | — | テキストでは `String`、バイナリでは無し | そのまま | `TYPE_MISMATCH`（`ResultFormat.TEXT` を指す） |
+
+配列は**1 次元だけ**です。多次元の配列は
+`TYPE_MISMATCH` になります。要素の OID はスカラーの列と同じで、`T` と
+**完全一致**が必要です。要素の側で問題が起きたときは
+`array element N: <元のメッセージ>` という形で報告されます（N は 0 から
+数えます）。NULL の要素を非オプショナルで要求した場合は
+`array element N is NULL` です。
 
 `Row.get_bytes` はこの表の外です: OID を一切見ずに届いたバイト列をそのまま
 返すので、`bytea` はテキスト形式では `\x00ff00` の 8 バイト、バイナリ形式では
@@ -573,9 +671,25 @@ modular-community への recipe 提出もありますが、まだ行っていま
 - **`cancel` は `PQcancel` を使います。** 2 本目の短命な接続でキャンセルを
   依頼するため TLS で保護されません。キャンセルされたコマンド自身は
   `PgErrorKind.SERVER` の SQLSTATE `57014` として回収する必要があります。
-- **配列型・`COPY`・コネクションプールは対象外です。** 型マッピング表に無い
-  OID は、テキスト形式なら `String` として受け取れますが、バイナリ形式では
-  `TYPE_MISMATCH` になります。
+- 多次元配列は対象外（`TYPE_MISMATCH`）。1 次元だけ。
+- 配列のテキスト形式の区切りは `,` だけ（`box` 型のような `;` 区切りは
+  対象外）。
+- `AsyncConnection` に `COPY` は無い（同期 `Connection` / `Transaction` /
+  `PooledConnection` だけ）。
+- `COPY` の不正なデータは `finish()` まで分からない（libpq はデータ行を
+  検査せずに送る）。
+- `CopyOut` は `Iterator` ではないので `for` は使えず、`next()` + `while`
+  で読む。
+- プールはスレッド安全ではない（Mojo 1.1.0 に stdlib のスレッドが無いため、
+  単一スレッド前提の設計）。
+- 返却された接続に残るもの: `SET` した GUC、prepared statement、一時テーブル、
+  `LISTEN`、advisory lock。プールは返却時に `ROLLBACK` するだけで、これらは
+  消さない。
+- 切られた直後の接続は返却時／貸し出し前の `PQconsumeInput` で検出して捨てるが、
+  サーバーの FATAL がまだ届いていなければ検出できず、次の利用者の最初の
+  `execute` が `CONNECTION` になる。
+- 未完了の `CopyIn` を持つ guard の drop は、まず `COPY` を中止してから接続を
+  返す（接続は捨てられず再利用される）。
 - `PreparedStatement.execute(params)` は `Connection.execute(sql, params)`
   より幅に厳しく、`param_type_oid(i)` が報告する幅と**同じ**値を要求します
   （`$1::int4` に `Int`（`int8`）を渡すと SQLSTATE `22P03`）。

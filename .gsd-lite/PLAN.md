@@ -266,14 +266,14 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - A（親）: `pool.mojo` + `__init__.mojo`
     - B: `tests/test_pool.mojo` ①〜⑯ + `tests/test_leak.mojo` の 2 ループ（(a)(b) のシグネチャ・USAGE 文言・`application_name` 規則を依頼文に写す）
 
-- [ ] T8: README / CHANGELOG / `__init__` docstring / examples 2 本 + `params.mojo` 配列 / `pixi.toml` / `final_check.sh`
+- [x] T8: README / CHANGELOG / `__init__` docstring / examples 2 本 + `params.mojo` 配列 / `pixi.toml` / `final_check.sh`
   - 完了基準:
     - (a) `examples/copy.mojo` 新設（docstring は `examples/params.mojo:1-16` の形。`_conninfo` / `DEFAULT_CONNINFO` 同じ）: `CREATE TEMP TABLE` → `copy_in` で 1,000 行 text を `write` → `finish().affected_rows()` → `copy_out` を `while True: var row = out.next(); if not row: break`（P18）で行数とバイト数を数え、
       往復が一致しなければ `exit(1)`。`examples/pool.mojo` 新設: `Pool.open(conninfo, 2)` → `acquire` ×2 → 3 本目の `USAGE` を捕まえて `pool exhausted` を印字 → 1 本 drop → 再 `acquire` の `backend_pid` が同じことを確認、`size()/idle()/borrowed()` を印字、不一致は `exit(1)`。
       `examples/params.mojo` に `SELECT id, label FROM pq_p2_example WHERE id = ANY($1)` を `List[Int32]` で + `SELECT array_agg(label ORDER BY id)` を `List[String]` で読む節（`EXPECTED_ROWS` のロジックは不変）。
       `pixi.toml:20-24` に `example-copy` / `example-pool`、`final_check.sh:122-126` に 2 行（P26）。全 examples が単体で `exit 0`
     - (b) README（日本語本文、英語要約 `:7-14` に `arrays, COPY and a single-threaded connection pool` を 1 句）: 型マッピング表（`:343-363`）に行 `T[]（上の 19 型の 1 次元配列）| 要素の typarray（int4[] = 1007 など）| List[T] / List[Optional[T]] | 配列リテラル {1,2}（引用・\ エスケープ）| array_send 形式（ndim / flags / elemtype / dim / lbound + 要素）`、
-      パラメータ表（`:141-159`）に `List[T]` / `List[Optional[T]]`（binary、typarray。`List[String]` は 1009）と「名前付きの `List` は `[ids^]` か `.copy()`」の注意（P10）；クイックスタートに `### COPY — examples/copy.mojo` と `### コネクションプール — examples/pool.mojo`（`:164-315` の形。コード片は examples から逐語抜粋、`pixi run example-copy` / `example-pool`）、
+      `### パラメータバインド` の散文（`:207-210`。**README にパラメータ表は無い**: `:141-159` は libpq の探索順。turn 10 訂正）に `List[T]` / `List[Optional[T]]`（binary、typarray。`List[String]` は 1009）と「名前付きの `List` は `[ids^]` か `.copy()`」の注意（P10）；クイックスタートに `### COPY — examples/copy.mojo` と `### コネクションプール — examples/pool.mojo`（`:164-315` の形。コード片は examples から逐語抜粋、`pixi run example-copy` / `example-pool`）、
       `### パラメータバインド` の抜粋に `= ANY($1)` を足す（**抜粋照合器 `turn-008-readme-excerpts.py` が通ること**）；「既知の制限」（`:567-590`）から `:576-578` の 1 項目を外し、代わりに: 多次元配列（`TYPE_MISMATCH`）/ `box` 等 `,` 以外の区切り / `AsyncConnection` の COPY 無し / COPY の不正データは `finish()` まで分からない（P12）/
       `CopyOut` は `Iterator` ではない（`next()` + `while`）/ プールはスレッド安全でない（D12。Mojo 1.1.0 に stdlib のスレッド無し）/ 返却時に `SET` した GUC・prepared statement・一時テーブル・`LISTEN`・advisory lock は残る（D15。deadpool の Clean の列挙）/
       切られた直後の接続は `PQconsumeInput` で検出するが FATAL がまだ届いていなければ次の利用者の最初の `execute` が `CONNECTION`（P20 (b)）/ 未完了の `CopyIn` を持つ guard の drop は COPY を中止してから返却する（接続は再利用される）。「エラー」表は不変
