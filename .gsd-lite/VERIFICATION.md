@@ -40,3 +40,36 @@ round 1 で拾えた理由: 3 件とも「`_check_not_copying` が入ったこ�
 ### 合格だった事項（round 2 は回帰確認だけ）
 
 配列（テキスト / バイナリ / 送信）、COPY の正常系と USAGE 格子、プール全件、`Connection.reset()`、文書・examples・pixi・final_check、堅牢性格子 126 セル、セキュリティ観点。round 2 は F1 の差分（`transaction.mojo` / `copy.mojo` / `pool.mojo` docstring / `test_copy.mojo`）の回帰と、`check` 6/6 + 格子の再確認だけを行い、新しいクラスの探索はしない。
+
+## round 2（turn 14、2026-10-20）— 判定: **合格**（指摘 0 件、verify_round 2 / 4）→ push + PR
+
+対象: F1 の差分 `git diff 5390545..HEAD`（`src/pq/copy.mojo` +90/−24、`src/pq/transaction.mojo` +35/−10、`src/pq/pool.mojo` docstring、`tests/test_copy.mojo` +296）
+と、round 1 で合格だった事項の回帰確認。HEAD `1edf68e`。実行エンジン: Claude Code（claude-fable-5-1）。
+round 1 の方針どおり**新しいクラスの探索はしていない**（格子の再確認 + F1 差分の回帰だけ）。サブエージェントは使わず親が読んだ（差分 4 ファイル・457 行で 1 人分）。
+
+### 観点と確認したこと
+
+| 観点 | 確認したこと | 結果 |
+|---|---|---|
+| 最終判定コマンド | `db-reset` → `check`（クリーン状態、22:02:57 → 22:07:45、`scratch/turn-014-check.log`） | **6/6 PASS、288 s**（閾値 300 s 内）、`PASS` 1534 / `FAIL` 0（= round 1 の 1524 + F1 の 5 件 × 2 サーバー）、6/6 段 `matched lines: 0` |
+| 堅牢性格子（REQ §2.4、round 1 の格子の再確認） | `turn-011-robust-grid.sh` 再実行（`scratch/turn-014-robust-grid.log`） | **126 / 126 セル `unhandled_markers=0`**。`===` / `--- rc=` 行は round 1 と**完全一致**（差は build 行の HEAD ハッシュのみ）、rc 141 は `run_epipe` の 14 セルのみ |
+| 追従先チェックリスト | `turn-002-checklist.sh`（`scratch/turn-014-checklist.log`） | 77 key、turn 13 の基線と `diff` 差分 0（`test_copy_tests`=26、`absent` 0） |
+| F1 (a) 指摘 1 | `transaction.mojo` `commit` / `rollback`: `_check_not_copying()` が `_done = True` の前にあること、docstring の Raises に USAGE の文言と「block left open」 | 一致。`Transaction.__deinit__` は生の `PQexec("ROLLBACK")` のままで `_check_not_copying` を通らない（COPY 中の drop でも implicit ROLLBACK が出る。テスト ⑭ の `count == 0` が証明） |
+| F1 (c) 指摘 2 | `CopyIn.__deinit__` / `CopyOut.__deinit__` の `PQtransactionStatus != PQTRANS_ACTIVE` ガード | `_done` の次に置かれ、`ACTIVE` なら従来どおり中止 / 読み捨て。ガードが真になるのは「他の経路が COPY を終えた後」だけ（COPY 中の同期接続は常に `ACTIVE`、`PQstatus` が BAD の接続は `UNKNOWN` → 何も送らないが次のコマンドが `CONNECTION` を返すので塞がらない） |
+| F1 (b) 指摘 3 | `CopyIn.write` の `rc != 1`: `PQerrorMessage` → `PQputCopyEnd(0)` → `_drain_results` → `_done` → raise の順。`finish` / `abort` の `rc < 0` も drain | 一致。drain は `PQgetResult` が NULL まで。接続が切れた場合 libpq の `getCopyResult` が `asyncStatus` を IDLE に戻して FATAL 1 件 → NULL になるので終了する（テスト ③ の `transaction_status() == IDLE` が実測） |
+| F1 (d) テスト 5 件 | `test_copy.mojo` 21 → 26 件。②×2 / ③ / ④ / ⑤ が PLAN の期待結果表の各行を断言しているか | ②: `USAGE` 文言 + `finish()==1` + 後続 `commit`/`rollback` + `count`。③: `CONNECTION` + `IDLE` + `reset()` → usable。④: `finish` が `CONNECTION` + 後続 `execute` も `CONNECTION` + `IDLE`。⑤: handler 0 回 + `count 0` + usable。陽性対照は TRACE「陽性対照（turn 13）」の 4 件赤（④ は修正前から green = 指摘 3 の対照ではなく REQ §4.2 の未テスト分。正しく記録されている） |
+| 期待値の変更 | PROGRESS turn 13 の列挙 1 件（`test_transaction_destroyed_before_its_copy_in` の handler `>= 1` → `== ""`） | 意図どおり（指摘 2 の誤報を固定していた断言の除去）。`git diff` 上も既存テストの変更はこの 1 件だけ |
+| 文書の主張 | `copy.mojo` モジュール docstring / `Transaction.copy_in` の order 段落 / `Pool.acquire` の Raises / README / CHANGELOG | README・CHANGELOG は F1 で無変更（COPY の破棄挙動や handler に触れる記述が元から無いことを `grep` で確認）。`Pool.acquire` の Raises は実装（`reset` 失敗は飲んで `_open_one` の失敗を上げる）と一致するよう直っている。古い件数なし |
+| セキュリティ（F1 差分） | 新しい入力経路なし。`reason` は従来と同じ `PQerrorMessage` の写し、FFI 呼び出しの追加は `PQtransactionStatus` / `PQputCopyEnd(conn, 0)` のみ | 指摘なし |
+| PROGRESS 最新節 | turn 13 節 | 18 行（≤ 40） |
+
+### 残留リスク（round 1 から引き継ぎ + 追加 1 件）
+
+- round 1 の 3 件（2 GiB 超の 1 回 `write` / `encode_array` の `Int32` 長、`parse_array_literal` の引用なし末尾 `\ `、`check` 所要の揺れ）は据え置き
+- `finish` / `abort` の `rc < 0` 側の drain はテスト未踏（同期接続で `PQputCopyEnd` が負を返す形を作れない。libpq は書き込み失敗を `write_failed` で遅延させて 1 を返す）。到達するのは OOM か `asyncStatus` 不整合だけで、後者は `_check_active` が先に `USAGE` にする
+- CI 3 OS（REQ §4.4）はこの PR で初めて走る。結果は下の「PR / CI」節
+
+### PR / CI
+
+- PR: （作成後に追記）
+- CI: （`gh pr checks --watch` の結果を追記）
