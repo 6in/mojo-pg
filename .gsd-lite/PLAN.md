@@ -288,10 +288,10 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
     - B: `README.md` + `CHANGELOG.md`（対象: `README.md`, `CHANGELOG.md`。README のコード片は A の examples から逐語で写すので、A の完成後に親が照合器を回す）
     - 親: `src/pq/__init__.mojo` + 照合器 + `check`
 
-- [ ] T9: 最終判定 — 堅牢性格子の全セル + クリーン状態からの `check` + 受け入れ基準対応表 + branch push
+- [x] T9: 最終判定 — 堅牢性格子の全セル + クリーン状態からの `check` + 受け入れ基準対応表 + branch push
   - 完了基準:
     - (a) `scratch/turn-003-robust-grid.sh` を `turn-011-robust-grid.sh` に写し、`copy.mojo` / `pool.mojo` / `params.mojo` の行を有効化して全セル実行 → `unhandled_markers=0`（`traceback|unhandled|abort|segfault` 0 件。rc 141 は EPIPE の既知挙動で許容）。ログ `turn-011-robust-grid.log`。
-      入力軸の追加分の所在を TRACE の表に: 配列リテラル不正 9 件 → `test_decode_array`、バイナリ不正 6 件 → 同、COPY 途中切断 → `test_copy` ⑩、プール枯渇 / 死んだ接続 → `test_pool` ① ⑦ ⑧ ⑨
+      入力軸の追加分の所在を TRACE の表に: 配列リテラル不正 **10 件**（turn 11 訂正。P7 の 9 件 + `dimension_prefix_without_equals`）→ `test_decode_array`、バイナリ不正 6 件 → 同、COPY 途中切断 → `test_copy` ⑩、プール枯渇 / 死んだ接続 → `test_pool` ① ⑦ ⑧ ⑨
     - (b) `pixi run db-reset` → `pixi run check` が `final_check: PASS`（所要を TRACE。閾値 300 s）。`pixi run package` 警告ゼロ。`pixi run fmt` 差分ゼロ
     - (c) チェックリスト全 77 key が期待値（`absent` 0 件）。`python3 -c ...` で PROGRESS 最新節 ≤ 40 行
     - (d) TRACE に「受け入れ基準対応表」（REQ §4.1〜§4.4 の各行 → テスト名 / 完了基準番号）と「verify への申し送り」（P1〜P29 → 検証した場所の表、grep パターン / 件数 / ファイルの 3 列）

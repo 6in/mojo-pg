@@ -928,3 +928,168 @@ examples_mojo_count=7 -> 9                             # 期待値 9
 turn 9（321 s）と turn 10（423 s）の 2 回とも超えている。T9 (b) は `db-reset` 後の
 クリーン計測なので本番の値はこれよりさらに重くなる見込み。T9 は計測してから
 閾値そのものを訂正するか判断すること（1 回の計測で決めない: PROGRESS turn 7 の注意）。
+
+## 堅牢性格子 全セル（turn 11 / T9 (a)）
+
+`scratch/turn-011-robust-grid.sh`（`turn-003-robust-grid.sh` の写し。違いは `BIN` のパスと
+冒頭コメントだけ）を `db-reset` 直後に 1 回実行。ログ `scratch/turn-011-robust-grid.log`。
+
+- ビルド: `built: basic params binary async_query listen_notify copy pool` = **7 本**
+  （turn 3 では `copy` / `pool` が `absent` だった 2 本が実体になった。`build-failed` 0）
+- セル数 **126** = 7 本 ×（入力 6 + 出力 4 × 2 + 依存 4）。**全 126 セルが `unhandled_markers=0`**
+  （`traceback` / `exception_ignored` も全セル 0）
+- rc の分布: `rc=0` 39 / `rc=1` 73 / `rc=141` 14。**`rc=141` は 14 セルすべて `run_epipe`**
+  （7 本 × 入力 GOOD / MALFORMED）= Phase 5 からの既知の SIGPIPE 挙動で許容
+- 新 2 本の代表セル: `copy conninfo=GOOD` → `copied in = 1000` / `copied out = 1000 rows` /
+  `copied out bytes = 10780`（rc=0）、`pool conninfo=GOOD` → `size = 2` / `idle = 0` /
+  `borrowed = 2`（rc=0）、`copy dep=LIBC` → `PgError(kind=LibpqLoad, ...missing symbol PQconnectdb)`、
+  `pool dep=BADPW` → `PgError(kind=Connection, ...password authentication failed)`
+
+入力軸の追加分（REQ §2.4。conninfo / 環境変数では与えられないので examples ではなくテスト側が担う）:
+
+| REQ §2.4 の入力 | 所在 | 件数（実測） |
+|---|---|---|
+| 配列リテラルの不正形（閉じ括弧なし / 引用符の途中終端 / 空要素 / 括弧なし / 空文字 / `{` のみ / `}` のみ / 引用符で終端 / 次元接頭辞に `=` なし） | `tests/test_decode_array.mojo` の `test_malformed_*` | **10**（`grep -c '^def test_malformed_'`。P7 の 9 件 + `dimension_prefix_without_equals`） |
+| バイナリ配列ヘッダの不正（flags / elemtype 不一致 / 12 byte 未満 / dim と要素数の不一致 / 要素長の不一致 / 末尾のゴミ） | 同ファイルの `test_binary_array_rejects_*` | **6**（`rejects_*` は全 8 件。残り 2 件は多次元と int2 配列 OID） |
+| COPY の途中切断（クライアント側 `close(PQsocket)`） | `tests/test_copy.mojo` ⑩ = `test_copy_in_after_the_socket_is_closed` / `test_copy_out_after_the_socket_is_closed` | **2** |
+| プールの枯渇 / 死んだ接続の再利用 | `tests/test_pool.mojo` ① ⑦ ⑧ ⑨ = `test_two_guards_fill_the_pool_then_the_returned_one_is_reused` / `test_a_terminated_borrowed_connection_is_discarded` / `test_the_health_check_catches_a_kill_the_borrower_never_saw` / `test_a_kill_with_no_wait_is_only_seen_by_the_next_borrower` / `test_acquire_resets_a_connection_killed_while_it_was_idle` | **5** |
+
+## 受け入れ基準対応表（turn 11 / T9 (d)）
+
+REQ §4.1〜§4.4 の各行 → それを判定しているテスト名 / PLAN の完了基準番号。
+テスト名は `tests/` 配下の `def test_*`（`grep -n '^def test_' tests/<file>` で引ける）。
+
+### REQ §4.1 配列型
+
+| REQ §4.1 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| 19 型それぞれ text / binary で一致 + Phase 3 の境界値が要素としても往復 | `tests/test_array.mojo` の 15 件（`test_array_bool_matches_text_and_binary` 〜 `test_array_interval_matches_text_and_binary`、`test_array_int8_reads_as_int_and_int64`、`test_array_six_text_oids_decode_as_string_list`）+ 単体の境界値 `tests/test_decode_array.mojo` の `test_text_array_{numeric,float8}_specials` / `test_text_array_timestamp_infinities` / `test_binary_array_{numeric,interval,bool_and_bytea}_element*` | T5 (a) / T2 (e) / T3 (c) |
+| 空配列 `'{}'::int4[]` が空の `List` | `test_array_empty_is_empty_list_in_both_formats`、単体 `test_text_array_empty_is_empty_list` / `test_binary_array_*`（ndim 0）、送信側 `test_array_param_empty_array_round_trips` | T5 (b)(e) / T2 (e) / T3 (c) |
+| 配列 OID と `T` の不一致（`int2[]` を `List[Int32]`）は `TYPE_MISMATCH` | `test_array_element_oid_mismatch_in_both_formats`、単体 `test_text_array_rejects_int2_array_for_int32` / `test_binary_array_rejects_the_int2_array_oid_for_int32` / `test_binary_array_rejects_a_foreign_element_type` | T5 (c) / T2 (e) / T3 (c) |
+| 配列列を `String` で読むとテキスト形式ではリテラルがそのまま | `test_array_column_as_string_is_the_literal_in_text_only`、単体 `test_text_array_column_read_as_string_is_the_literal` / `test_binary_array_column_read_as_string_is_still_rejected` | T5 (d) |
+
+### REQ §4.2 COPY
+
+| REQ §4.2 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| text 10 万行 → `affected_rows() == 100000` + `count(*)` 一致 / CSV / binary 各 1 件 | `test_text_copy_in_takes_every_row` / `test_csv_copy_in_stores_quoted_fields` / `test_binary_copy_in_stores_both_rows` | T6 (d) ① ② ③ |
+| `copy_out` の行数と内容が `copy_in` のバイト列と一致 | `test_copy_out_returns_every_row_then_none` | T6 (d) ④ |
+| `abort()` / `finish()` なしの破棄で行が残らず、その後の `execute` が通る | `test_abort_discards_the_rows_without_raising` / `test_dropping_an_unfinished_copy_in_cancels_it_quietly` | T6 (d) ⑤ ⑥ |
+| `copy_out` を途中で破棄した後の `execute` が通る | `test_dropping_a_copy_out_mid_stream_leaves_the_connection_usable` | T6 (d) ⑦ |
+| COPY 中の `execute` / `transaction` / 2 つ目の `copy_*` は `USAGE`、サーバーには何も送られない | `test_every_other_command_during_a_copy_is_usage`（7 件の格子 + `finish()` が 2 行を数える）。陽性対照は TRACE「陽性対照（turn 8）」 | T6 (d) ⑧ |
+| 不正データは `finish()` が `22P04` 等の `SERVER`、接続はアイドルに戻る | `test_malformed_row_surfaces_from_finish` | T6 (d) ⑨ |
+| 途中切断で `write` / `next` / `finish` が `CONNECTION`、トレースバック無し | `test_copy_in_after_the_socket_is_closed` / `test_copy_out_after_the_socket_is_closed` | T6 (d) ⑩ |
+| `Transaction` 内の `copy_in` を `rollback()` すると行が残らない | `test_transaction_copy_in_rollback_loses_the_rows`（対照 `test_transaction_copy_in_commit_keeps_the_rows`、破棄順序 `test_transaction_destroyed_before_its_copy_in`） | T6 (d) ⑬ ⑭ |
+
+### REQ §4.3 プール
+
+| REQ §4.3 の行 | 検証した場所（テスト名） | 完了基準 |
+|---|---|---|
+| `max_size=2` で 2 回成功・3 回目 `USAGE`・`pg_stat_activity` = 2、drop 後の `acquire` が同じ `backend_pid` | `test_two_guards_fill_the_pool_then_the_returned_one_is_reused` | T7 (c) ① |
+| `min_size=2` で `open` 直後に `idle() == 2` / `size() == 2` / サーバーにも 2 本 | `test_min_size_opens_its_connections_before_open_returns` | T7 (c) ② |
+| commit せずガードを drop → 返却時に ROLLBACK、次の利用者が IDLE で変更も残らない | `test_a_dropped_transaction_block_is_rolled_back_before_reuse`（`Transaction` 側が先に ROLLBACK）/ `test_release_rolls_back_a_raw_begin_and_keeps_the_connection`（プールの `_release` の `INTRANS` 経路） | T7 (c) ③ ④ |
+| 未完了の `copy_in` を持つガードの drop | `test_an_unfinished_copy_in_is_cancelled_and_the_connection_kept`（**決めた事項 20 で文言を読み替え**: Mojo の破棄順では接続は捨てられず再利用される）+ 白箱 `test_a_connection_left_active_is_discarded_on_return`（`ACTIVE` なら捨てる分岐の証明） | T7 (c) ⑤ ⑥ |
+| 貸し出し中に `pg_terminate_backend` された接続を返却 → 捨てられ次の `acquire` は新規 | `test_a_terminated_borrowed_connection_is_discarded` / `test_the_health_check_catches_a_kill_the_borrower_never_saw` / `test_a_kill_with_no_wait_is_only_seen_by_the_next_borrower` / `test_acquire_resets_a_connection_killed_while_it_was_idle` | T7 (c) ⑦ ⑧ ⑨ |
+| `max_lifetime_s=1` の接続は返却時に閉じられ、次の `backend_pid` が変わる | `test_max_lifetime_retires_a_connection_on_return`（対照 `test_the_default_lifetime_never_retires_anything`） | T7 (c) ⑩ |
+| `close()` 後の `acquire` は `USAGE`、`Pool` の破棄で空き接続が `PQfinish` される | `test_close_drops_the_idle_connections_and_refuses_to_lend` + `tests/test_leak.mojo` の `test_pool_open_and_drop_does_not_leak` / `test_pool_acquire_and_release_does_not_leak`（RSS 判定 2 ループ） | T7 (c) ⑪ / T7 (d) |
+| `max_size <= 0` / `min_size > max_size` は `USAGE` でサーバーに接続しない | `test_bad_sizes_are_usage_errors_before_anything_is_dialled`（4 ケース + `pg_stat_activity` 不変） | T7 (c) ⑫ |
+
+### REQ §4.4 共通
+
+| REQ §4.4 の行 | 検証した場所 | 完了基準 |
+|---|---|---|
+| `pixi run check` 6/6 PASS（PG 14 / 17 両方）、`mojo build` 警告ゼロ | `scratch/turn-011-check.log`（`final_check: PASS`、5/6 段が 54317 → 54314 の 2 周）、`pixi run package` 警告ゼロ、6/6 段 `matched lines: 0` | T9 (b) |
+| CI 3 OS 緑 | **未実施**（`ci.yml` の `on:` は `pull_request` / `push(main)` → T9 の branch push では走らない）。PR 作成は verify の仕事 = P29 の申し送り | T9 (e) + verify |
+| README の型マッピング表・クイックスタート 2 節・「既知の制限」の書き換え、CHANGELOG `[Unreleased]` | チェックリスト key `readme_array_optional_row` / `readme_array_word` / `readme_copy_example` / `readme_pool_example` / `readme_thread_unsafe` / `readme_en_arrays` / `readme_out_of_scope_line`=0 / `changelog_phase7` / `changelog_phase_lines`=7 + 抜粋照合器（turn 10） | T8 (b)(c) |
+| `examples/copy.mojo` / `pool.mojo` 新設 + `pixi.toml` の `example-*`、配列は `params.mojo` に `= ANY($1)`、全 examples が単体で実行できる | `examples_copy`=exists / `examples_pool`=exists / `examples_params_any` / `pixi_example_tasks`=7 / `final_check_examples`=7 / `examples_mojo_count`=9。単体実行は `check` 4/6 段 7 本 + 堅牢性格子 126 セル | T8 (a) / T9 (a)(b) |
+| `Connection.execute` docstring の「COPY は未対応」を `copy_in` / `copy_out` の案内に | チェックリスト key `conn_docstring_copy_unsupported`=0、`check_not_copying_sites` ≥ 7 | T6 (c) |
+| state の `verify_round_max` は 4 | `.gsd-lite/state.json`（`verify_round_max: 4`） | T1 |
+| §2.4 の堅牢性 | `scratch/turn-011-robust-grid.log`（126 セル全部 `unhandled_markers=0`）+ 入力軸の追加分はテスト側（下表） | T9 (a) |
+
+## verify への申し送り（turn 11 / T9 (d)）
+
+落とし穴 P1〜P29（RESEARCH）を「どこで検証したか」に対応づけた表。測り方は
+`scratch/turn-011-pitfalls.sh`（`grep -cE <パターン> <ファイル>` を素のファイルに当てる。
+チェックリストと違いコメント行を除外しないので、`test_leak_pool`=7 と P24=12 のように
+同じ語でも値が違う）。出力は `scratch/turn-011-pitfalls.log`。
+
+| P | grep パターン（`grep -cE`） | 件数 | ファイル |
+|---|---|---|---|
+| P1 | `rejects_invalid_flags\|null_and_multibyte\|null_element_is_none_when_optional` | 3 | `tests/test_decode_array.mojo` |
+| P2 | `header_shorter_than_twelve_bytes\|foreign_element_type` | 2 | `tests/test_decode_array.mojo` |
+| P3 | `dimension_the_cell_cannot_fill\|element_of_the_wrong_width\|bytes_after_the_last_element` | 3 | `tests/test_decode_array.mojo` |
+| P4 | `multidimensional\|dimension_prefix\|lower_bound_is_dropped` | 12 | `tests/test_decode_array.mojo` + `tests/test_array.mojo` |
+| P5 | `int2_array\|element_oid_mismatch\|six_text_oids\|six_array_oids` | 6 | 同上 |
+| P6 | `nine_elements_unescaped\|bpchar_keeps_padding\|bytea_elements_decode_to_bytes\|lowercase_null_word` | 4 | `tests/test_decode_array.mojo` |
+| P7 | `^def test_malformed_` | 10 | `tests/test_decode_array.mojo` |
+| P8 | `array element ` | 8 | `src/pq/decode_text.mojo` + `src/pq/decode_binary.mojo` |
+| P9 | `varchar\[\]\|jsonb\[\]` | 2 | `tests/test_array.mojo` |
+| P10 | `^def test_`（既存の期待値変更 0 件の母数） | 51 | `tests/test_params.mojo` + `tests/test_binary.mojo` |
+| P11 | `after_the_socket_is_closed` | 2 | `tests/test_copy.mojo` |
+| P12 | `malformed_row_surfaces_from_finish` | 1 | `tests/test_copy.mojo` |
+| P13 | `every_other_command_during_a_copy_is_usage` | 1 | `tests/test_copy.mojo` |
+| P14 | `rejects_a_copy_to_stdout\|rejects_a_copy_from_stdin\|rejects_a_plain_select` | 3 | `tests/test_copy.mojo` |
+| P15 | `drains_the_statement_behind_it` | 1 | `tests/test_copy.mojo` |
+| P16 | `transaction_destroyed_before_its_copy_in\|transaction_copy_in_(commit\|rollback)` | 3 | `tests/test_copy.mojo` |
+| P17 | `dropping_a_copy_out_mid_stream\|dropping_an_unfinished_copy_in` | 2 | `tests/test_copy.mojo` |
+| P18 | `\.next\(\)`（`while` 形の例。`src_iterator_in_copy`=0 と対） | 1 | `examples/copy.mojo` |
+| P19 | `reset\(\)` | 5 | `tests/test_connection.mojo` |
+| P20 | `terminated_borrowed_connection_is_discarded\|health_check_catches_a_kill\|kill_with_no_wait` | 3 | `tests/test_pool.mojo` |
+| P21 | `two_guards_fill_the_pool\|every_forwarded_method_reaches`（陽性対照は TRACE「陽性対照（turn 9）」3） | 2 | `tests/test_pool.mojo` |
+| P22 | `statement_counter_rides_along` | 1 | `tests/test_pool.mojo` |
+| P23 | `max_lifetime_retires\|default_lifetime_never_retires` | 2 | `tests/test_pool.mojo` |
+| P24 | `Pool`（2 ループ + ヘルパ） | 12 | `tests/test_leak.mojo` |
+| P25 | `failed_implicit_rollback_reaches_the_handler_once` | 1 | `tests/test_pool.mojo` |
+| P26 | `examples/(copy\|pool)\.mojo` | 2 | `tests/final_check.sh` |
+| P27 | `unhandled_markers=0` | 126 | `scratch/turn-011-robust-grid.log` |
+| P28 | `warning:\|WARNING:\|implicit ROLLBACK failed` | **0** | `build/final_check.log` |
+| P29 | `P29`（この申し送り自体。CI 3 OS は未実施） | 0 → ≥ 1 | `.gsd-lite/TRACE.md` |
+
+verify への申し送り（上の表に乗らないもの）:
+
+1. **P29 / CI は未実施**。`ci.yml` の `on:` は `pull_request`（base main）と `push`（main）だけで、
+   T9 の branch push では run が起動しない（REQ §6: PR を作るのは verify）。OS 固有の経路は
+   `close(PQsocket)` の EBADF（`test_copy` ⑩）と `pg_stat_activity` / `pg_terminate_backend` の
+   権限（`test_pool` 全件）。macOS で赤くなったら `final-check-log-macos-latest` artifact の
+   `test_copy` / `test_pool` の PASS 行を見ること。`verify_round_max` は 4（D1）
+2. **REQ §4.3 の「未完了 `copy_in` のガードを drop → その接続は捨てられ `size()` が 1 減る」は
+   決めた事項 20 で読み替えた**（Mojo の破棄順では `CopyIn.__deinit__` が先に COPY を中止するので
+   接続は IDLE に戻り再利用される）。白箱の `test_a_connection_left_active_is_discarded_on_return` が
+   `ACTIVE` 分岐側を押さえている。README「既知の制限」に 1 行。**この項は差し戻し対象にしない**
+3. **`CopyOut` は `Iterator` ではない**（決めた事項 7。REQ §2.2 からの意図的な逸脱。
+   Mojo 1.1.0 の `Iterator.__next__` は `raises StopIteration` ちょうどでないと適合しない）。
+   README「既知の制限」に明記済み。**この項も差し戻し対象にしない**
+4. F 項目（見込みと実測の差）は `+/-` 単位で読む（Phase 5 reflect 提案 6）。`check` の母数は
+   **260〜425 s**（turn 9 321 s / turn 10 423 s / turn 11 298 s）
+5. 既存テストの期待値変更は **全ターンで 0 件**（T1〜T9。`check` の `FAIL` 行 0 が毎ターンの証拠）
+
+## `check` の所要（turn 11 / T9 完了時点・クリーン状態）
+
+`db-reset` → `check` を 1 回。**298 s**（`21:15:26` -> `21:20:24`、`scratch/turn-011-check-start.txt`
+/ `-check-end.txt`）、`final_check: PASS`。**PLAN T9 (b) の閾値 300 s を下回ったので訂正は不要**
+（turn 10 の申し送りは「超えるなら訂正を判断」だった。turn 10 の 423 s との差 125 s は
+1 サーバー目のコンパイル時間の揺れで、turn 11 は grid のビルドでキャッシュが暖まっていた分だけ速い）。
+
+- 段ごと: 1/6 fmt 1 s（差分 0）/ 2/6 precompile 4 s / 3/6 docstring 3 s（欠落 0）/
+  **4/6 examples 20 s（7 本）** / **5/6 tests 264 s** / 6/6 warnings 0 s（`matched lines: 0`）
+- 5/6 の内訳: **54317 で 176 s（`test_leak` 89 s を含む）/ 54314 で 83 s**、ファイル実行 55 回
+  （28 本 + 27 本。`test_leak` は 1 サーバー目のみ）
+- テストケースの `PASS` 行 **1524**（turn 9 / turn 10 と同数 = T9 はテストを増やさない）、
+  `FAIL` 行 **0** = 既存テストの期待値変更 0 件。`SKIP` は PG14 側の既知分のみ
+
+## チェックリスト（turn 11）
+
+`scratch/turn-011-checklist.log`、**全 77 key**。turn 10 からの差分は
+**`trace_checklist_section` の 6 → 7 の 1 行だけ**（turn 10 の TRACE 節が増えた分。期待値 ≥ 1）。
+`absent` **0 件**、他の 76 key は turn 10 と完全一致（`diff turn-010-checklist.log turn-011-checklist.log`）。
+この節を足した後は 8 になる（同じ key の `≥ 1` を維持）。
+
+## PLAN 訂正（turn 11）
+
+1. **T9 (a) の「配列リテラル不正 9 件」は実測 10 件**。`grep -c '^def test_malformed_' tests/test_decode_array.mojo` = 10 で、
+   RESEARCH P7 が挙げた 9 件（`{1,2` / `{"abc}` / `{1,,2}` / `{1,2}}` / `1,2` / 空文字 / `{` / `}` / `{"a`）に
+   T2 が `test_malformed_dimension_prefix_without_equals` を 1 件足していた（P4 の `[..]=` 接頭辞の異常系）。
+   要件・決定に触れないので**実物と実測を正とし**、PLAN T9 (a) の件数を 10 に直した。
+2. **T9 (b) の閾値 300 s は訂正しない**。turn 10 の申し送りは「超えるなら訂正を判断」だったが、
+   クリーン状態の実測は **298 s** で閾値内に収まった（`scratch/turn-011-check-start.txt` / `-check-end.txt`）。
+   母数の揺れ（260〜425 s）は「`check` の所要（turn 11 / T9 完了時点・クリーン状態）」節に記録した。
