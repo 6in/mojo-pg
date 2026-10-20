@@ -44,15 +44,24 @@ construction, the way `Transaction.__deinit__` reports a failed implicit
 `CopyOut` destructor reads the rest of the stream and discards it, which is
 what leaves the connection usable for the next command.
 
-Every path that ends a COPY -- `finish`, `abort` and both destructors --
-keeps calling `PQgetResult` until it returns NULL, so `COPY t FROM STDIN;
-SELECT 42` leaves nothing queued behind the COPY's own result.
+Both destructors do nothing at all when the COPY is already over without
+their own value knowing -- which is what `Transaction.copy_in` warns about
+under "the order matters": a block destroyed before its stream sends its
+`ROLLBACK` through libpq, which ends the COPY on the way out. Cancelling or
+draining then would draw libpq's `no COPY in progress`, a failure notice
+about a connection that is perfectly healthy, so the status of the connection
+is checked before anything is sent.
+
+Every path that ends a COPY -- `finish`, `abort`, a failed `write` and both
+destructors -- keeps calling `PQgetResult` until it returns NULL, so `COPY t
+FROM STDIN; SELECT 42` leaves nothing queued behind the COPY's own result and
+a connection whose COPY failed is idle rather than stuck.
 """
 
 from std.ffi import c_int
 
 from pq._ffi.functions import LibpqFFI
-from pq._ffi.types import CStr, MutRawPtr, PGconnPtr
+from pq._ffi.types import CStr, MutRawPtr, PGconnPtr, PQTRANS_ACTIVE
 from pq.connection import Connection
 from pq.errors import PgError, PgErrorKind, _reject_nul
 from pq.result import Result, adopt_result
@@ -214,9 +223,10 @@ struct CopyIn[origin: ImmOrigin](Movable):
     var _done: Bool
     """True once the stream ended, which disarms `__deinit__`.
 
-    A failed `write` sets it too: once libpq has rejected data there is no
-    stream left to end, and calling `PQputCopyEnd` on it would only grow
-    `PQerrorMessage`.
+    A failed `write` sets it too, after ending the COPY itself: libpq rejected
+    the data but stays in the COPY state until something terminates it, so the
+    `write` does that before it raises and there is nothing left for the
+    destructor to send.
     """
 
     var _handler: def(PgError) thin
@@ -246,11 +256,21 @@ struct CopyIn[origin: ImmOrigin](Movable):
         path, swallowed here. Any other failure is handed to the handler this
         value copied at construction time, because a destructor cannot raise.
         The queue is drained either way, so the connection is left idle.
+
+        A COPY that ended without this value hearing about it -- a
+        `Transaction` destroyed first sends its `ROLLBACK` through libpq,
+        which ends the COPY on the way -- leaves the connection out of
+        `PQTRANS_ACTIVE`, and cancelling then would draw libpq's own `no COPY
+        in progress`: a failure notice about a healthy connection. So the
+        status is the second guard after `_done`, and nothing is sent when it
+        says the stream is already over.
         """
         if self._done:
             return
         var pq = self._conn[]._pq
         var conn = self._conn[]._conn
+        if pq[].PQtransactionStatus(conn) != PQTRANS_ACTIVE:
+            return
         var message = String(_DROP_ABORT_MESSAGE)
         _ = pq[].PQputCopyEnd(conn, Int(message.as_c_string_span().ptr()))
         _ = message^
@@ -300,8 +320,11 @@ struct CopyIn[origin: ImmOrigin](Movable):
             PgError: `PgErrorKind.USAGE` (`COPY already finished`) when the
                 stream has already ended, or `PgErrorKind.CONNECTION` with
                 libpq's own `PQerrorMessage` text when `PQputCopyData` failed.
-                A failure ends the stream, so every later `write`, `finish`
-                and `abort` is `USAGE`.
+                A failure ends the stream -- on libpq's side too, so the
+                connection is idle rather than still in the COPY -- which
+                makes every later `write`, `finish` and `abort` `USAGE` and
+                every command on the connection `CONNECTION`. A connection
+                lost this way is recovered with `Connection.reset()`.
         """
         self._check_active()
         if len(bytes) == 0:
@@ -314,14 +337,22 @@ struct CopyIn[origin: ImmOrigin](Movable):
             c_int(len(bytes)),
         )
         if rc != 1:
-            # `PQerrorMessage` grows by one line per failure, so the stream is
-            # closed here and read exactly once. 0 means "would block", which
-            # a synchronous connection never answers.
+            # `PQerrorMessage` grows by one line per failure, so it is read
+            # here, once, *before* the COPY is ended -- ending it appends
+            # libpq's own complaint and would bury the real cause. 0 means
+            # "would block", which a synchronous connection never answers.
+            var reason = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
+            # The data was rejected but libpq is still in the COPY state, and
+            # only a `PQputCopyEnd` with its queue drained brings the
+            # connection back out of `PQTRANS_ACTIVE`. Without this the
+            # connection answers `a COPY is in progress` to everything for
+            # ever -- a `USAGE` error about a stream that is gone, on a
+            # connection that only `reset()` could recover. Both outcomes are
+            # discarded: what went wrong is `reason`, not the cleanup.
+            _ = pq[].PQputCopyEnd(conn, 0)
+            _drain_results(pq, conn)
             self._done = True
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn)),
-            )
+            raise PgError(PgErrorKind.CONNECTION, reason)
 
     def write(mut self, s: String) raises PgError:
         """Hand the UTF-8 bytes of `s` to the server.
@@ -371,10 +402,12 @@ struct CopyIn[origin: ImmOrigin](Movable):
         var rc = pq[].PQputCopyEnd(conn, 0)
         self._done = True
         if rc < 0:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn)),
-            )
+            # Read first, drain second: the queue is what leaves the
+            # connection idle, and draining it can replace the message that
+            # says why the end failed.
+            var reason = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
+            _drain_results(pq, conn)
+            raise PgError(PgErrorKind.CONNECTION, reason)
         return _copy_final_result(pq, conn)
 
     def abort(mut self, var message: String) raises PgError:
@@ -408,10 +441,11 @@ struct CopyIn[origin: ImmOrigin](Movable):
         _ = message^
         self._done = True
         if rc < 0:
-            raise PgError(
-                PgErrorKind.CONNECTION,
-                String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn)),
-            )
+            # As in `finish`: the reason before the drain that makes the
+            # connection idle again.
+            var reason = String(unsafe_from_utf8_ptr=pq[].PQerrorMessage(conn))
+            _drain_results(pq, conn)
+            raise PgError(PgErrorKind.CONNECTION, reason)
         try:
             _ = _copy_final_result(pq, conn)
         except e:
@@ -480,11 +514,19 @@ struct CopyOut[origin: ImmOrigin](Movable):
         to; the only way back to an idle connection is to consume what is
         left. A destructor cannot raise, so a transfer that failed part way
         through is handed to the handler this value copied at construction.
+
+        As in `CopyIn.__deinit__`, a stream that something else already ended
+        -- the `ROLLBACK` of a `Transaction` destroyed first -- leaves the
+        connection out of `PQTRANS_ACTIVE`, and reading from a COPY that is
+        over would report a failure on a healthy connection. Nothing is read
+        in that case.
         """
         if self._done:
             return
         var pq = self._conn[]._pq
         var conn = self._conn[]._conn
+        if pq[].PQtransactionStatus(conn) != PQTRANS_ACTIVE:
+            return
         var rc = _drain_copy_out(pq, conn)
         if rc == -1:
             try:

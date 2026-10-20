@@ -1093,3 +1093,51 @@ verify への申し送り（上の表に乗らないもの）:
 2. **T9 (b) の閾値 300 s は訂正しない**。turn 10 の申し送りは「超えるなら訂正を判断」だったが、
    クリーン状態の実測は **298 s** で閾値内に収まった（`scratch/turn-011-check-start.txt` / `-check-end.txt`）。
    母数の揺れ（260〜425 s）は「`check` の所要（turn 11 / T9 完了時点・クリーン状態）」節に記録した。
+
+## 陽性対照（turn 13 / F1 (f)）
+
+F1 のテスト 5 件を**先に書いて修正前のコードで 1 回走らせた**（`mojo run -I src tests/test_copy.mojo`、26 tests / 21 passed / **5 failed**）。
+赤の内容が 3 つの指摘にそのまま対応している:
+
+| テスト | 修正前の赤 | 対応する指摘 |
+|---|---|---|
+| `test_commit_during_a_copy_is_refused_and_the_block_stays_open` | `finish()` 後の `tx.commit()` が `USAGE transaction already ended` | 1（`_done` が送信前に立つ） |
+| `test_rollback_during_a_copy_is_refused_and_the_block_stays_open` | 同上（`tx.rollback()`） | 1 |
+| `test_transaction_destroyed_before_its_copy_in` | handler 1 回（`c` = `CONNECTION`）、期待は 0 回 | 2（既に終わった COPY に中止を送る誤報） |
+| `test_transaction_destroyed_before_its_copy_out` | handler 1 回（`c`）、期待は 0 回 | 2（`CopyOut` 側） |
+| `test_a_failed_write_leaves_a_connection_that_reports_connection` | 失敗 `write` の後の `execute` が `USAGE`（期待は `CONNECTION`） | 3（`-1` の後に COPY 状態が残る） |
+
+- **`test_finish_after_the_socket_is_closed_is_connection` は修正前から green**。`close` 後の `finish()` は
+  `PQputCopyEnd` が `rc >= 0` を返す経路に入り、既存の `_copy_final_result` が drain していたため。
+  これは陽性対照ではなく REQ §4.2「途中切断で `finish` が `CONNECTION`」の未テスト分の追加（F1 (d) ④）。
+  `finish` / `abort` の `rc < 0` 側に足した drain（F1 (b)）はこの経路に入らないので、テストでは踏めていない
+- 修正後は **26 tests 全 green**（`check` の 5/6 段でも PG17 / PG14 両方 green）
+
+## `check` の所要（turn 13 / F1 完了時点・クリーン状態）
+
+`db-reset` → `check` を 1 回。**280 s**（`21:53:36` -> `21:58:16`、`build/final_check.log` の `=== [1/6` と `=== [6/6` の時刻）、
+`final_check: PASS`。**T9 (b) の閾値 300 s 内なので訂正は不要**（turn 11 の 298 s から -18 s。テストは 5 件増えているが
+母数の揺れの範囲内）。
+
+- 段ごと: 1/6 fmt 1 s（差分 0）/ 2/6 precompile 3 s / 3/6 docstring 3 s / 4/6 examples 18 s（7 本）/
+  **5/6 tests 255 s** / 6/6 warnings 0 s（`matched lines: 0`）
+- テストケースの `PASS` 行 **1534**（turn 11 / turn 12 の 1524 + 新規 5 件 × 2 サーバー）、`FAIL` 行 **0**
+- 参考: テスト直後の**非クリーン**な 1 回目は 360 s（`21:46:18` -> `21:52:18`）。同じ木で 280 / 360 s なので、
+  所要はコンパイルキャッシュと同時負荷に支配される（turn 11 の「母数の揺れ 260〜425 s」と同じ性質）
+
+## チェックリスト（turn 13）
+
+`scratch/turn-013-checklist.log`、**全 77 key**。turn 12 からの差分は
+**`test_copy_tests` の 21 → 26 の 1 行だけ**（`diff turn-012-checklist.log turn-013-checklist.log`）。
+`absent` **0 件**、他の 76 key は turn 12 と完全一致。この節を足した後に回し直すと `trace_checklist_section` が
+8 → 9 になるだけ（`scratch/turn-013-checklist-after-trace.log`。期待値 `≥ 1` を維持）。
+
+## PLAN 訂正（turn 13）
+
+1. **決めた事項 13 の「`-1` の後は libpq を呼ばない」を「`PQerrorMessage` を先に 1 回読んでから `PQputCopyEnd(0)` + drain で終端する」に訂正**。
+   根拠は verify turn 12 の probe（`scratch/turn-012-probe-failed-write{,-end}.mojo`）と F1 (b) の実測: 呼ばないままだと libpq が
+   COPY 状態（`PQTRANS_ACTIVE`）に残り、以後の `execute` / `transaction()` / `prepare` が全部 `USAGE a COPY is in progress` になって
+   `reset()` 以外に出口が無い。P11（`PQerrorMessage` の追記肥大）は「終端の**前に**読む」で回避できるので、要件・決定に反しない。
+   PLAN の「決めた事項 13」の本文を直した
+2. **F1 (f) の「陽性対照は不要」は、④ については成立しなかった**（上の「陽性対照（turn 13 / F1 (f)）」節）。
+   ④ は修正前から green で、指摘 3 の対照は ③ 1 本だけ。PLAN 側の表記は変えていない（④ は REQ §4.2 の未テスト分として残す価値がある）

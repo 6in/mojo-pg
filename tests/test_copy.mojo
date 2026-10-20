@@ -561,6 +561,54 @@ def _tx_rollback[origin: ImmOrigin, //](mut tx: Transaction[origin]) raises:
         raise Error(String(e))
 
 
+def _tx_commit_error[
+    origin: ImmOrigin, //
+](mut tx: Transaction[origin]) raises -> PgError:
+    """Commit `tx` expecting a refusal, and hand the error back.
+
+    Parameters:
+        origin: Origin of the `Connection` the block views; inferred.
+
+    Args:
+        tx: The open transaction block.
+
+    Returns:
+        The `PgError` `commit` raised.
+
+    Raises:
+        Error: If `commit` succeeded.
+    """
+    try:
+        tx.commit()
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Transaction.commit()")
+
+
+def _tx_rollback_error[
+    origin: ImmOrigin, //
+](mut tx: Transaction[origin]) raises -> PgError:
+    """Roll `tx` back expecting a refusal, and hand the error back.
+
+    Parameters:
+        origin: Origin of the `Connection` the block views; inferred.
+
+    Args:
+        tx: The open transaction block.
+
+    Returns:
+        The `PgError` `rollback` raised.
+
+    Raises:
+        Error: If `rollback` succeeded.
+    """
+    try:
+        tx.rollback()
+    except e:
+        return e.copy()
+    raise Error("expected a PgError from Transaction.rollback()")
+
+
 def _copy_in(
     conn: Connection, var sql: String
 ) raises -> CopyIn[origin_of(conn)]:
@@ -673,6 +721,33 @@ def _tx_copy_in[
     """
     try:
         return tx.copy_in(sql^)
+    except e:
+        raise Error(String(e))
+
+
+def _tx_copy_out[
+    origin: ImmOrigin, //
+](mut tx: Transaction[origin], var sql: String) raises -> CopyOut[origin]:
+    """Start `sql` as a COPY OUT inside `tx`.
+
+    The mirror of `_tx_copy_in`, with the same origin and the same hazard:
+    the stream may outlive the block it was started in.
+
+    Parameters:
+        origin: Origin of the `Connection` the block views; inferred.
+
+    Args:
+        tx: The open transaction block.
+        sql: A `COPY ... TO STDOUT` statement.
+
+    Returns:
+        The open output stream.
+
+    Raises:
+        Error: If `copy_out` raised a `PgError`.
+    """
+    try:
+        return tx.copy_out(sql^)
     except e:
         raise Error(String(e))
 
@@ -986,6 +1061,21 @@ def _count(conn: Connection, var sql: String) raises -> Int:
     _ = row^
     _ = result^
     return Int(count)
+
+
+def _reset(conn: Connection) raises:
+    """Reconnect `conn` with `Connection.reset()`.
+
+    Args:
+        conn: The connection to revive.
+
+    Raises:
+        Error: If `reset` raised a `PgError`.
+    """
+    try:
+        conn.reset()
+    except e:
+        raise Error(String(e))
 
 
 def _assert_usable(conn: Connection) raises:
@@ -1756,24 +1846,94 @@ def test_transaction_copy_in_rollback_loses_the_rows() raises:
     _ = conn^
 
 
+def test_commit_during_a_copy_is_refused_and_the_block_stays_open() raises:
+    """A `commit()` refused for an open COPY leaves the block usable.
+
+    The `COMMIT` is a command on the connection, so it is refused like every
+    other one -- and the refusal has to come *before* the block marks itself
+    ended, or the `COMMIT` would be lost: nothing reached the server, yet no
+    later `commit()` and no implicit `ROLLBACK` would ever be sent again and
+    the transaction would stay open on the server with no way to close it
+    through this API.
+
+    So the contract is that `finish()` followed by `commit()` still works, and
+    the rows are kept.
+    """
+    var conn = _connect(_conninfo())
+    _create(conn, String(CREATE_PAIR))
+
+    var tx = _transaction(conn)
+    var stream = _tx_copy_in(tx, String(COPY_PAIR_IN))
+    _copy_write(stream, String(PAIR_ROW_ONE))
+
+    var refused = _tx_commit_error(tx)
+    assert_true(refused.kind == PgErrorKind.USAGE)
+    assert_equal(refused.message, String(COPY_IN_PROGRESS))
+
+    var result = _copy_finish(stream)
+    assert_equal(result.affected_rows(), 1)
+    _ = result^
+    _ = stream^
+
+    _tx_commit(tx)
+    _ = tx^
+
+    assert_equal(_count(conn, String(COUNT_PAIR)), 1)
+    _assert_usable(conn)
+    _ = conn^
+
+
+def test_rollback_during_a_copy_is_refused_and_the_block_stays_open() raises:
+    """The same refusal for `rollback()`, which is then still available.
+
+    `rollback()` is the one way out of a block whose statements failed, so
+    losing it to a refused call would be worse than losing `commit()`: the
+    destructor's implicit `ROLLBACK` is disarmed by the same flag.
+    """
+    var conn = _connect(_conninfo())
+    _create(conn, String(CREATE_PAIR))
+
+    var tx = _transaction(conn)
+    var stream = _tx_copy_in(tx, String(COPY_PAIR_IN))
+    _copy_write(stream, String(PAIR_ROW_ONE))
+
+    var refused = _tx_rollback_error(tx)
+    assert_true(refused.kind == PgErrorKind.USAGE)
+    assert_equal(refused.message, String(COPY_IN_PROGRESS))
+
+    var result = _copy_finish(stream)
+    assert_equal(result.affected_rows(), 1)
+    _ = result^
+    _ = stream^
+
+    _tx_rollback(tx)
+    _ = tx^
+
+    assert_equal(_count(conn, String(COUNT_PAIR)), 0)
+    _assert_usable(conn)
+    _ = conn^
+
+
 # --- destruction order -- (14) -----------------------------------------------
 
 
 def test_transaction_destroyed_before_its_copy_in() raises:
-    """A block that dies first cancels the COPY underneath it.
+    """A block that dies first cancels the COPY underneath it, silently.
 
     A `CopyIn` from a `Transaction` carries the *connection's* origin, not the
     block's, so it is allowed to outlive the block -- and when it does, the
     block's implicit `ROLLBACK` goes out first. libpq ends the COPY to make
     room for it, so by the time the stream's own destructor runs there is no
-    COPY in progress any more and its cancel fails. That failure cannot be
-    raised from a destructor, so it goes to the handler; what must *not*
-    happen is a crash, which is why this test exists at all.
+    COPY in progress any more: it sees a connection that is no longer
+    `PQTRANS_ACTIVE` and sends nothing. Cancelling anyway would draw libpq's
+    `no COPY in progress`, which carries no SQLSTATE and would be reported to
+    the handler -- a failure notice about a connection that is perfectly
+    healthy.
 
-    The handler is counted rather than inspected: which failure libpq reports
-    for a cancel with nothing to cancel is its own business, and the default
-    handler would print to stderr, so a dedicated connection with a dedicated
-    handler keeps the noise out of the other tests.
+    So the handler must stay untouched here, and the connection must be
+    usable afterwards. It is a dedicated connection with a dedicated handler
+    all the same, because the default handler prints to stderr and a
+    regression here would be noise in every other test.
     """
     _ = setenv(String(HANDLER_CALLS_VAR), "", True)
 
@@ -1790,12 +1950,51 @@ def test_transaction_destroyed_before_its_copy_in() raises:
     _ = tx^
 
     # Last use of the stream, one line later: its destructor finds the COPY
-    # already gone and reports that through the handler.
+    # already gone and leaves the connection alone.
     _ = stream^
 
-    assert_true(Int(getenv(String(HANDLER_CALLS_VAR)).byte_length()) >= 1)
+    assert_equal(getenv(String(HANDLER_CALLS_VAR)), "")
 
     # Neither destructor left anything queued on the connection.
+    assert_equal(_count(conn, String(COUNT_PAIR)), 0)
+    _assert_usable(conn)
+    _ = conn^
+
+
+def test_transaction_destroyed_before_its_copy_out() raises:
+    """The same order with a `CopyOut`, equally silent.
+
+    The output stream's destructor would normally read the rest of the stream
+    away, but the block's `ROLLBACK` has already ended the COPY, so there is
+    nothing left to read and asking would report a failure on a healthy
+    connection. The rows written earlier in the block go away with it.
+    """
+    _ = setenv(String(HANDLER_CALLS_VAR), "", True)
+
+    var conn = _connect(_conninfo())
+    conn.set_rollback_failure_handler(_count_rollback_failure)
+    _create(conn, String(CREATE_PAIR))
+
+    var tx = _transaction(conn)
+    var fill = _tx_copy_in(tx, String(COPY_PAIR_IN))
+    _copy_write(fill, String(PAIR_ROW_ONE))
+    _copy_write(fill, String(PAIR_ROW_TWO))
+    var written = _copy_finish(fill)
+    assert_equal(written.affected_rows(), 2)
+    _ = written^
+    _ = fill^
+
+    var stream = _tx_copy_out(tx, String(COPY_PAIR_OUT))
+    var first = _copy_next(stream)
+    assert_true(Bool(first))
+    _ = first^
+
+    # Last use of the block, then of the stream: the ROLLBACK ends the COPY
+    # with one row still unread, and the stream's destructor leaves it alone.
+    _ = tx^
+    _ = stream^
+
+    assert_equal(getenv(String(HANDLER_CALLS_VAR)), "")
     assert_equal(_count(conn, String(COUNT_PAIR)), 0)
     _assert_usable(conn)
     _ = conn^
@@ -1845,6 +2044,81 @@ def test_execute_of_a_copy_to_stdout_is_a_server_error() raises:
     assert_equal(error.message, String(UNEXPECTED_COPY_OUT))
 
     _assert_usable(conn)
+    _ = conn^
+
+
+# --- what a lost COPY leaves behind -- (16) ----------------------------------
+
+
+def test_a_failed_write_leaves_a_connection_that_reports_connection() raises:
+    """After a failed `write` the connection says `CONNECTION`, not `USAGE`.
+
+    A `write` that fails ends the COPY on libpq's side as well, so the
+    connection is idle again rather than stuck in `PQTRANS_ACTIVE` -- which is
+    what the `USAGE` refusal reads as, and reporting `a COPY is in progress`
+    for a connection whose socket is gone would send the caller looking for a
+    stream to finish instead of for a connection to replace.
+
+    `reset()` is the way back, and it works: the descriptor this test closed
+    is free, so libpq reconnects into it.
+    """
+    var conn = _connect(_conninfo())
+    _create(conn, String(CREATE_PAIR))
+
+    var stream = _copy_in(conn, String(COPY_PAIR_IN))
+    _copy_write(stream, _pair_rows(0, PAIR_CHUNK))
+
+    _ = external_call["close", c_int](
+        c_int(Int(conn._pq[].PQsocket(conn._conn)))
+    )
+
+    var lost = _copy_write_until_connection_error(
+        stream, _pair_rows(PAIR_CHUNK, PAIR_CHUNK), 64
+    )
+    assert_true(lost.kind == PgErrorKind.CONNECTION)
+
+    # The failed write disarmed the destructor, so it sends nothing.
+    _ = stream^
+
+    var after = _execute_error(conn, String(SELECT_ONE))
+    assert_true(after.kind == PgErrorKind.CONNECTION)
+    assert_equal(conn.transaction_status(), Int(PQTRANS_IDLE))
+
+    _reset(conn)
+    _assert_usable(conn)
+    _ = conn^
+
+
+def test_finish_after_the_socket_is_closed_is_connection() raises:
+    """A `finish()` on a closed socket reports `CONNECTION` and lets go.
+
+    The writes before the `close` all succeeded -- libpq buffers them -- so
+    this is the path where the failure surfaces from `finish()` rather than
+    from a `write`, and it has to leave the same end state: the COPY ended,
+    the connection idle, and the next command a `CONNECTION` error about the
+    connection rather than a `USAGE` error about the stream.
+
+    Nothing may open a descriptor between the `close` and this connection's
+    destructor, so this half never reconnects.
+    """
+    var conn = _connect(_conninfo())
+    _create(conn, String(CREATE_PAIR))
+
+    var stream = _copy_in(conn, String(COPY_PAIR_IN))
+    _copy_write(stream, _pair_rows(0, PAIR_CHUNK))
+    _copy_write(stream, _pair_rows(PAIR_CHUNK, PAIR_CHUNK))
+
+    _ = external_call["close", c_int](
+        c_int(Int(conn._pq[].PQsocket(conn._conn)))
+    )
+
+    var lost = _copy_finish_error(stream)
+    assert_true(lost.kind == PgErrorKind.CONNECTION)
+    _ = stream^
+
+    var after = _execute_error(conn, String(SELECT_ONE))
+    assert_true(after.kind == PgErrorKind.CONNECTION)
+    assert_equal(conn.transaction_status(), Int(PQTRANS_IDLE))
     _ = conn^
 
 

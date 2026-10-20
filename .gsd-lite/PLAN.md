@@ -300,7 +300,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
   - 依存: T8
   - 並列サブ作業: なし（推奨 0 本）
 
-- [ ] F1: Transaction × COPY の状態機械 3 件（verify round 1 の指摘。VERIFICATION.md「指摘」表 1〜3）+ テスト 5 件 + docstring
+- [x] F1: Transaction × COPY の状態機械 3 件（verify round 1 の指摘。VERIFICATION.md「指摘」表 1〜3）+ テスト 5 件 + docstring
   - 根拠（verify turn 12 の実測。`scratch/turn-012-probe-failed-write{,-end}.mojo` / `.log`）:
     1. `Transaction.commit()` / `rollback()`（`transaction.mojo:264-265` / `:290-291`）は `self._done = True` を**送信前**に立てるが、`Connection.execute` が T6 で足した `_check_not_copying()` は**何も送らずに** `USAGE` を raise する。
        COPY 中に `tx.commit()` を呼ぶと `tx` は「終了済み」になるのに `COMMIT` も `ROLLBACK` も出ておらず、`__deinit__` の implicit ROLLBACK も止まる（サーバーは INTRANS のまま、`Transaction` API からは閉じられない）
@@ -350,7 +350,7 @@ docker exec tests-pg17-1 psql -U pq -d pq_test -At -c "<sql>"   # サーバー�
 10. **`List[String]` の NUL 入り要素はサーバーに送り `SERVER`（22021 想定、T4 で実測）**。`USAGE` にするには `Param` に失敗フラグ用のフィールドを足す必要があり（`@implicit __init__` は raise しない）、最小実装を優先（RESEARCH P9 の「`USAGE`」は不採用）
 11. **`CopyIn` / `CopyOut` の構造 = `Transaction[origin]`**（`transaction.mojo:96-157`）: `_conn: Pointer[Connection, origin]` / `_done: Bool` / `_handler: def(PgError) thin`。`__deinit__` は `PQexec` を呼ばない（COPY API だけ。P16）
 12. **COPY の USAGE 文言**: `a COPY is in progress on this connection` / `COPY already finished` / `copy_in() requires a COPY ... FROM STDIN statement (result status N)` / `copy_out() requires a COPY ... TO STDOUT statement (result status N)`。プール: `pool is closed` / `pool exhausted: all N connections are borrowed` / `max_size must be positive (got N)` / `min_size must be between 0 and max_size (got N)` / `max_lifetime_s must not be negative (got N)`
-13. **`write` の `-1` と「sqlstate 無しの FATAL」は `CONNECTION`**（`PQstatus` は当てにならない: RESEARCH §2.4 6a）。`-1` の後は libpq を呼ばない（`PQerrorMessage` の追記肥大。P11）。`abort()` は 57014 だけ飲む（psycopg `finish(exc)`）。`finish` / `abort` / `__deinit__` は `PQgetResult` が NULL になるまで回す（P15）
+13. **`write` の `-1` と「sqlstate 無しの FATAL」は `CONNECTION`**（`PQstatus` は当てにならない: RESEARCH §2.4 6a）。`-1` の後は **`PQerrorMessage` を先に 1 回読んでから `PQputCopyEnd(0)` + drain で終端する**（turn 13 訂正。「libpq を呼ばない」では接続が `PQTRANS_ACTIVE` のまま塞がる。`PQerrorMessage` の追記肥大 P11 は「終端の前に読む」で避ける）。`abort()` は 57014 だけ飲む（psycopg `finish(exc)`）。`finish` / `abort` / `__deinit__` は `PQgetResult` が NULL になるまで回す（P15）
 14. **`_check_not_copying` の呼び出し 7 箇所**: `Connection.execute` ×2 / `prepare` / `_transaction_parts` / `_copy_in_parts` / `_copy_out_parts` / `PreparedStatement.execute`。`escape_*` は client-side なので対象外。`Transaction` の各コマンドは `Connection.execute` 経由なので自動的に対象
 15. **`Pool` は `Connection` を `List[_Slot]` で丸ごと保持**（`_stmt_counter` を引き継ぐ。RESEARCH §0 発見 5 / P22）。`__deinit__` は書かない（List の deinit が各 `Connection` の `PQfinish` を走らせる）
 16. **`Pool.open` のシグネチャ**: `open(var conninfo: String, max_size: Int, *, min_size: Int = 0, max_lifetime_s: Int = 0)` + `Dict` 版。`max_size` は位置引数（`Connection.open(conninfo)` の次に自然）、オプション 2 つは keyword-only（D17）。`max_lifetime_s` の時計は `std.time.monotonic()`（ns）

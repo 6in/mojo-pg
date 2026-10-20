@@ -434,9 +434,11 @@ struct Pool(Movable):
             PgError: `PgErrorKind.USAGE` (`pool is closed`) after `close()`,
                 or (`pool exhausted: all N connections are borrowed`) when
                 every one of the `max_size` connections is out. Otherwise
-                whatever `Connection.open` raises for a new connection, or
-                `Connection.reset` raises for one that could neither be reused
-                nor replaced.
+                whatever `Connection.open` raises -- for a connection opened
+                because the pool had none idle, and for the replacement of an
+                idle one that failed its health check. A failed
+                `Connection.reset()` is never raised: it only means the
+                replacement is opened instead.
         """
         if self._closed[0] != 0:
             raise PgError(PgErrorKind.USAGE, "pool is closed")
