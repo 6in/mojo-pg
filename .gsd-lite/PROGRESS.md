@@ -78,3 +78,20 @@
 - サブエージェント: 1 本（B = テスト 2 ファイル）。契約外の提案 5 件はすべて**未実装のまま報告**（`Span` を取る `_assert_bytes` 追補 / `text[]` の実測バイト列 / 全要素 None / jsonb の正規化 / キャスト無しの失敗方向）。親が直したのは 1 箇所だけ: NUL の sqlstate を未実測前提の `!= ""` + `print` から **`== "22021"` の断言 + マーカー不在**に（実測が済んだため。テスト内の `print` はこのリポジトリに前例が無い）
 - 次への注意: T5 は `tests/test_array.mojo` 新設（≥ 14 件、17 型 × text/binary × `List`/`List[Optional]`）。送信側は `List[Param] = [x^]` の形で、**名前付き `List` には `^` が必須**。`List[Optional[E]]` の literal は `Optional[E](...)` を明示（上記 (2)）。
   text/binary 両形式の比較は `execute(sql)` と `execute(sql, [], result_format=BINARY)`。`check` は 310〜370 s の揺れがあるので、1 回の計測で閾値超過を判断しない（db-up 済みで 2 回測る余地があるならそうする）
+
+## turn 7 — impl — T5 `tests/test_array.mojo`（サーバー格子 26 件）
+- やったこと: 17 要素型 × text / binary × `List` / `List[Optional]` を**実サーバー**で検査する `tests/test_array.mojo` を新設（**26 件**、PG17 / PG14 両方 PASS）。
+  受信は 17 型それぞれ `SELECT ARRAY[...]::<type>[]` を両形式で取って同じ `List` になることを確認（境界値: int2/int4/int8 の最小・最大、float の NaN/±Infinity/-0/1e300、numeric の NaN/±Infinity/30+10 桁、date・timestamp の infinity と BC、time の 24:00:00、bytea の空要素、bpchar の padding、jsonb の version byte、text 9 要素の引用規則）。
+  形は `'{}'` / `ARRAY[1,NULL,3]`（Optional と `NULL_VALUE`）/ 列 NULL と要素 NULL の両立 / `int2[]` を `List[Int32]` で読む `TYPE_MISMATCH` / 多次元拒否 / `[0:1]=` の lbound 落とし / 配列列の `get[String]`（text はリテラル、binary は `TYPE_MISMATCH`）。
+  送信は 17 型の `SELECT $1::<type>[]` 往復 + None 混じり + 空 `List` + `= ANY($1)`（`Int32` と、`,` `"` `\` 空 `"NULL"` を含む `String`）。
+  `check` 6/6 PASS = **298 s**（閾値 380 s、`PASS` 1444 行 = turn 6 の 1392 + 26×2、**既存テストの期待値変更 0 件**）。チェックリスト T5 の 1 行は期待値どおり（`test_array_tests`=26、期待値 ≥ 14。生値と総数 77 は TRACE「チェックリスト（turn 7）」）
+- 想定外: (1) `Row.get_optional[List[Optional[Int32]]]` の戻り値から中身を取るのに `var elements = value.value()` は不可（`List[Optional[Int32]]` が `ImplicitlyCopyable` でない）→ **`ref elements = value.value()`** で借用する。turn 6 の `encode_array` の `ref bytes` と同じ形。
+  (2) `Connection.execute` の `params` は**借用**（`params: List[Param]`、`var` ではない）なので、ヘルパ経由で渡すときに `params^` を書くとコンパイルエラー。既存 `test_params.mojo` と同じく借用で渡す。
+  (3) **`TestSuite` の `Summary [ N ]` の単位はミリ秒**（`turn-007-time.sh` で実測: サマリ 187 の回の `mojo run` 全体が 5 s、2 回とも同じ）。turn 4 / 5 の PROGRESS が「0.065 s」「0.126 s」と書いているのは秒として読んだもの。新ファイルの `check` 単価は「1 サーバー目 17 s（コンパイル込み）+ 2 サーバー目 4 s = 21 s」で読む。
+  (4) `timestamptz` はサーバーの `TimeZone` で表示が変わり `Connection.open` は `TimeZone` を pin しない（`DateStyle` と `IntervalStyle` だけ）→ 有限要素はリテラルで断言できないので **text と binary を互いに比較**し、`infinity` / `-infinity` だけ直接断言した
+- やり直し: 1 回（上記 (1) の `ref` 束縛。コンパイルエラーで即判明。(2) は書く前に `execute` のシグネチャを読んで回避した）
+- 陽性対照: `src/pq` の**写し**（scratch、実行後に削除）で `encode_array` の空配列 `ndim` を 0 → 常に 1 に変えた（空配列は次元語を持たない唯一のペイロード = 他の配列が全部往復し続ける中で送信経路だけが間違える 1 箇所）。
+  `test_array.mojo` は **`test_array_param_empty_array_round_trips` 1 件だけ**が FAIL（25 passed / 1 failed）、対照の `test_encode_binary.mojo` も 1 件だけ。判別できたので差し替え不要（`scratch/turn-007-posctl-encode.{sh,log}`）
+- 次への注意: T6 は `src/pq/copy.mojo` 新設 + `connection` / `transaction` / `prepared` / `__init__` の結線 + `tests/test_copy.mojo`（≥ 18 件）。並列サブ作業 1 本（親 = src、B = テスト）が PLAN の推奨。
+  `check` の残り余裕は 380 − 298 = **82 s** で、T6 / T7 の新ファイル 2 本は +40 s 程度の見込み（新ファイル単価 21 s）。ただし turn 6 の ±50 s の揺れが残るので 1 回の計測で超過を判断しない。
+  `List[Optional[E]]` / `List[E]` を `var` で束縛できない場面は `ref` で借用する（(1)）。`Connection.execute(sql, params, result_format=...)` の `params` は借用（(2)）。`CopyIn` / `CopyOut` のテストで所要を測るときは `Summary` をミリ秒として読む（(3)）
